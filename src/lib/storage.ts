@@ -95,7 +95,20 @@ export const storage: Storage = {
     })
   },
   async restoreMessage(m) {
-    await db.messages.put(m)
+    await db.transaction('rw', db.messages, async () => {
+      const clash = await db.messages
+        .where('[conversationId+order]')
+        .equals([m.conversationId, m.order])
+        .first()
+      if (clash && clash.id !== m.id) {
+        const later = await db.messages
+          .where('[conversationId+order]')
+          .between([m.conversationId, m.order], [m.conversationId, Infinity])
+          .toArray()
+        await db.messages.bulkPut(later.map((x) => ({ ...x, order: x.order + 1 })))
+      }
+      await db.messages.put(m)
+    })
   },
   async appendMessage(conversationId, role, first) {
     return db.transaction('rw', db.messages, db.conversations, async () => {

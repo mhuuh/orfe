@@ -105,4 +105,17 @@ describe('storage', () => {
     expect(got!.value).toEqual({ a: 1 })
     expect(got!.at).toBeGreaterThan(0)
   })
+
+  it('restore after a newer append keeps distinct orders and puts the restored message first', async () => {
+    const c = await storage.createConversation()
+    await storage.appendMessage(c.id, 'user', v('a'))
+    const last = await storage.appendMessage(c.id, 'assistant', v('b'))
+    const removed = (await storage.deleteMessage(last.id)) as Message
+    const newer = await storage.appendMessage(c.id, 'user', v('c'))
+    expect(newer.order).toBe(removed.order)
+    await storage.restoreMessage(removed)
+    const list = await storage.listMessages(c.id)
+    expect(new Set(list.map((m) => m.order)).size).toBe(3)
+    expect(list.map((m) => m.id).slice(1)).toEqual([removed.id, newer.id])
+  })
 })
