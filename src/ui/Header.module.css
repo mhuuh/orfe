@@ -1,0 +1,39 @@
+.header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: var(--s3);
+  padding: calc(env(safe-area-inset-top) + var(--s3)) 20px var(--s3);
+}
+.text {
+  min-width: 0;
+}
+.title {
+  margin: 0;
+  font-size: 15px;
+  line-height: 22px;
+  font-weight: 500;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.meta {
+  font: 400 11px/16px var(--font-mono);
+  color: var(--mute);
+}
+.menu {
+  flex: none;
+  width: 40px;
+  height: 40px;
+  margin-right: -10px;
+  display: grid;
+  place-items: center;
+  border: 0;
+  border-radius: 999px;
+  background: none;
+  color: var(--mute);
+  cursor: pointer;
+}
+.menu:focus-visible {
+  outline: 2px solid var(--ink);
+}

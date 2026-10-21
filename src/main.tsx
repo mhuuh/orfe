@@ -6,9 +6,18 @@ import '@fontsource-variable/newsreader'
 import './styles/tokens.css'
 import './styles/base.css'
 import { App } from './App'
+import { storage } from './lib/storage'
+import { recoverInterrupted } from './lib/send'
+import { applyTheme } from './ui/theme'
 
-createRoot(document.getElementById('root')!).render(
-  <StrictMode>
-    <App />
-  </StrictMode>,
-)
+async function start() {
+  await recoverInterrupted()
+  applyTheme((await storage.getSettings()).themeMode)
+  createRoot(document.getElementById('root')!).render(
+    <StrictMode>
+      <App />
+    </StrictMode>,
+  )
+}
+
+void start()
