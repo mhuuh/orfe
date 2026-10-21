@@ -1,0 +1,55 @@
+.thinking {
+  margin-bottom: var(--s2);
+}
+.head {
+  display: flex;
+  width: fit-content;
+  align-items: center;
+  gap: var(--s1);
+  margin: calc(-1 * var(--s2)) 0;
+  padding: var(--s2) 0;
+  border: 0;
+  background: none;
+  font: 400 11px/16px var(--font-mono);
+  color: var(--mute);
+  cursor: pointer;
+  -webkit-tap-highlight-color: transparent;
+}
+.head:hover,
+.head:focus-visible {
+  color: var(--ink);
+  outline: none;
+}
+.chev {
+  transition: transform 180ms ease-out;
+}
+.head[aria-expanded='true'] .chev {
+  transform: rotate(90deg);
+}
+
+/* Fold: grid rows 0fr -> 1fr animates to the content's height. */
+.fold {
+  display: grid;
+  grid-template-rows: 0fr;
+  transition: grid-template-rows 200ms ease-out;
+}
+.open {
+  grid-template-rows: 1fr;
+}
+.inner {
+  overflow: hidden;
+  min-height: 0;
+}
+.fold:not(.open) .inner {
+  visibility: hidden;
+  transition: visibility 0s 200ms;
+}
+.text {
+  margin: var(--s2) 0 var(--s1);
+  padding-left: var(--s3);
+  border-left: 1px solid var(--line);
+  font: 400 13px/20px var(--font-ui);
+  color: var(--mute);
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}

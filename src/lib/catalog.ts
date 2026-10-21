@@ -1,0 +1,188 @@
+import { fetchModels, type RawModel } from './openrouter'
+import { storage } from './storage'
+
+export interface ModelInfo {
+  id: string
+  name: string
+  created: number
+  contextLength: number
+  priceIn: number
+  priceOut: number
+  inputModalities: string[]
+  outputModalities: string[]
+  efforts: string[] | null
+  defaultEffort: string | null
+  free: boolean
+  /** True for a stand-in: the id is not in the catalog we have (not loaded yet, offline, retired). */
+  unlisted?: boolean
+}
+
+/** A text-only stand-in for a model id that is not in the catalog (offline, retired). */
+export function fallbackModelInfo(id: string): ModelInfo {
+  return {
+    id,
+    name: id,
+    created: 0,
+    contextLength: 0,
+    priceIn: 0,
+    priceOut: 0,
+    inputModalities: ['text'],
+    outputModalities: ['text'],
+    efforts: null,
+    defaultEffort: null,
+    free: false,
+    unlisted: true,
+  }
+}
+
+const CACHE_KEY = 'catalog'
+const MAX_AGE = 60 * 60 * 1000
+const NON_CHAT = new Set(['embeddings', 'rerank', 'decisions', 'transcription'])
+
+// Per-token price string -> USD per 1M tokens. Missing, negative ("-1" on routers)
+// or non-finite values count as 0.
+function perMillion(s: string | undefined): number {
+  const n = Number(s)
+  return Number.isFinite(n) && n > 0 ? n * 1_000_000 : 0
+}
+
+/** A price we can trust as exactly zero: present, numeric and 0. "-1" (routers) is unknown. */
+const isZeroPrice = (s: string | undefined): boolean => s !== undefined && s.trim() !== '' && Number(s) === 0
+
+export function toModelInfo(raw: RawModel): ModelInfo {
+  const priceIn = perMillion(raw.pricing?.prompt)
+  const priceOut = perMillion(raw.pricing?.completion)
+  const efforts = raw.reasoning?.supported_efforts
+  return {
+    id: raw.id,
+    name: raw.name ?? raw.id,
+    created: raw.created ?? 0,
+    contextLength: raw.context_length ?? 0,
+    priceIn,
+    priceOut,
+    inputModalities: raw.architecture?.input_modalities ?? ['text'],
+    outputModalities: raw.architecture?.output_modalities ?? ['text'],
+    efforts: efforts && efforts.length > 0 ? efforts : null,
+    defaultEffort: raw.reasoning?.default_effort ?? null,
+    free:
+      (isZeroPrice(raw.pricing?.prompt) && isZeroPrice(raw.pricing?.completion)) || raw.id.endsWith(':free'),
+  }
+}
+
+export function chatModels(models: ModelInfo[]): ModelInfo[] {
+  return models.filter((m) => {
+    const out = m.outputModalities
+    return out.length === 0 || !out.every((o) => NON_CHAT.has(o))
+  })
+}
+
+export const sortNewest = (models: ModelInfo[]): ModelInfo[] =>
+  [...models].sort((a, b) => b.created - a.created || a.name.localeCompare(b.name))
+
+export const sortAZ = (models: ModelInfo[]): ModelInfo[] =>
+  [...models].sort((a, b) => a.name.localeCompare(b.name))
+
+export function groupByMonth(
+  models: ModelInfo[],
+  locale = 'en-GB',
+): { label: string; models: ModelInfo[] }[] {
+  const fmt = new Intl.DateTimeFormat(locale, { month: 'long', year: 'numeric', timeZone: 'UTC' })
+  const groups: { label: string; models: ModelInfo[] }[] = []
+  for (const m of sortNewest(models)) {
+    const label = fmt.format(new Date(m.created * 1000))
+    const last = groups[groups.length - 1]
+    if (last && last.label === label) last.models.push(m)
+    else groups.push({ label, models: [m] })
+  }
+  return groups
+}
+
+export function search(models: ModelInfo[], q: string): ModelInfo[] {
+  const terms = q.toLowerCase().split(/\s+/).filter(Boolean)
+  if (terms.length === 0) return models
+  return models.filter((m) => {
+    const hay = `${m.id} ${m.name}`.toLowerCase()
+    return terms.every((t) => hay.includes(t))
+  })
+}
+
+export async function loadCatalog(
+  opts: { force?: boolean } = {},
+): Promise<{ models: ModelInfo[]; fetchedAt: number; stale: boolean; error?: string }> {
+  const cached = await storage.getCache<ModelInfo[]>(CACHE_KEY)
+  const age = cached ? Date.now() - cached.at : Infinity
+  if (cached && age <= MAX_AGE && !opts.force) {
+    return { models: cached.value, fetchedAt: cached.at, stale: false }
+  }
+  try {
+    const models = (await fetchModels()).map(toModelInfo)
+    await storage.setCache(CACHE_KEY, models)
+    return { models, fetchedAt: Date.now(), stale: false }
+  } catch (e) {
+    const error = e instanceof Error ? e.message : String(e)
+    if (cached) return { models: cached.value, fetchedAt: cached.at, stale: age > MAX_AGE, error }
+    return { models: [], fetchedAt: 0, stale: true, error }
+  }
+}
+
+// ---- Shared catalog store (stale-while-revalidate) ----
+// One copy for the whole app, so the composer, transcript and model sheet share
+// one list and one request.
+
+export interface CatalogState {
+  models: ModelInfo[]
+  /** The list is older than an hour (a refresh is running or failed). */
+  stale: boolean
+  error?: string
+}
+
+const EMPTY: CatalogState = { models: [], stale: false }
+let current: CatalogState = EMPTY
+let inflight: Promise<void> | null = null
+const listeners = new Set<() => void>()
+
+function publish(next: CatalogState): void {
+  current = next
+  for (const fn of listeners) fn()
+}
+
+/** The current catalog. The same object until it changes (for useSyncExternalStore). */
+export const getCatalog = (): CatalogState => current
+
+export function subscribeCatalog(fn: () => void): () => void {
+  listeners.add(fn)
+  return () => {
+    listeners.delete(fn)
+  }
+}
+
+/**
+ * Shows the saved list at once, then fetches when it is older than an hour (or `force`).
+ * Callers while a refresh runs get that same refresh.
+ */
+export function refreshCatalog(opts: { force?: boolean } = {}): Promise<void> {
+  if (inflight) return inflight
+  const run = async (): Promise<void> => {
+    const cached = await storage.getCache<ModelInfo[]>(CACHE_KEY)
+    const fresh = cached !== undefined && Date.now() - cached.at <= MAX_AGE
+    if (cached && current.models.length === 0) publish({ models: cached.value, stale: !fresh })
+    if (fresh && !opts.force) return
+    const r = await loadCatalog({ force: true })
+    // On failure loadCatalog falls back to the saved list; keep what we show if it has none.
+    publish({ models: r.models.length > 0 ? r.models : current.models, stale: r.stale, error: r.error })
+  }
+  const p = run()
+    .catch((e: unknown) => publish({ ...current, error: e instanceof Error ? e.message : String(e) }))
+    .finally(() => {
+      inflight = null
+    })
+  inflight = p
+  return p
+}
+
+/** Tests only: forget the in-memory list. */
+export function resetCatalog(): void {
+  current = EMPTY
+  inflight = null
+  listeners.clear()
+}

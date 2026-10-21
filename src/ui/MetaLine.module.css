@@ -1,0 +1,25 @@
+.meta {
+  display: block;
+  min-width: 0;
+  font: 400 11px/16px var(--font-mono);
+  color: var(--mute);
+  text-align: left;
+  overflow-wrap: anywhere;
+}
+/* Wrap between details, never inside one ("412 in / 186 out" stays whole). */
+.part {
+  white-space: nowrap;
+}
+/* The hit area grows by 8 px around the 16 px line without moving the text. */
+.button {
+  margin: calc(-1 * var(--s2)) 0;
+  padding: var(--s2) 0;
+  border: 0;
+  background: none;
+  cursor: pointer;
+  -webkit-tap-highlight-color: transparent;
+}
+.button:focus-visible {
+  outline: none;
+  color: var(--ink);
+}

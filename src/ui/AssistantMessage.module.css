@@ -1,0 +1,281 @@
+/* Spacing between turns lives here and in UserMessage: user 16 / 24, reply 24 (collapsing margins). */
+.assistant {
+  margin: var(--s5) 0 0;
+  outline: none;
+  -webkit-tap-highlight-color: transparent;
+}
+.afterDivider {
+  margin-top: 0;
+}
+.assistant:focus-visible {
+  box-shadow: -12px 0 0 -11px var(--mute);
+}
+
+.head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--s3);
+  margin-bottom: var(--s1);
+}
+
+/* ---------- Note: stopped, interrupted, error ---------- */
+.note {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 0 var(--s3);
+  margin-top: var(--s2);
+  font: 400 11px/16px var(--font-mono);
+  color: var(--mute);
+}
+.noteText {
+  overflow-wrap: anywhere;
+}
+.noteAction {
+  margin: calc(-1 * var(--s2)) 0;
+  padding: var(--s2) 0;
+  border: 0;
+  background: none;
+  font: inherit;
+  color: var(--ink);
+  text-decoration: underline;
+  text-decoration-color: var(--line);
+  text-underline-offset: 3px;
+  cursor: pointer;
+}
+.noteAction:hover:not(:disabled),
+.noteAction:focus-visible {
+  text-decoration-color: currentColor;
+  outline: none;
+}
+.noteAction:disabled {
+  color: var(--faint);
+  cursor: default;
+}
+
+/* ---------- Prose: the model's book voice ---------- */
+.prose {
+  font: 400 17px/26px var(--font-prose);
+  font-optical-sizing: auto;
+  color: var(--prose);
+  overflow-wrap: break-word;
+  hyphens: manual;
+  /* Inline styles pass through for now (Plan 5 adds the property allowlist). Containment
+     keeps a reply's position:fixed / z-index inside its own box: layout containment makes
+     .prose the containing block for fixed children, and the clip stops it painting over
+     the header. The 4 px margin spares italic overhangs and the caret. */
+  contain: layout;
+  isolation: isolate;
+  overflow: clip;
+  overflow-clip-margin: 4px;
+}
+.prose :global(:where(p, ul, ol, pre, blockquote, details, h1, h2, h3, h4, h5, h6, .table-wrap)) {
+  margin: 0;
+}
+/* Half a line between blocks, as in the reference. */
+.prose > * + *,
+.prose :global(li) > * + *,
+.prose :global(blockquote) > * + * {
+  margin-top: 13px;
+}
+
+.prose :global(:is(h1, h2, h3, h4, h5, h6)) {
+  color: var(--ink);
+  font-weight: 600;
+  text-wrap: balance;
+}
+.prose :global(h1) {
+  font-size: 22px;
+  line-height: 28px;
+  font-weight: 500;
+}
+.prose :global(h2) {
+  font-size: 18px;
+  line-height: 26px;
+}
+.prose :global(:is(h3, h4, h5, h6)) {
+  font-size: 17px;
+  line-height: 26px;
+}
+.prose > * + :global(:is(h1, h2, h3, h4, h5, h6)) {
+  margin-top: var(--s5);
+}
+.prose > :global(:is(h1, h2, h3, h4, h5, h6)) + * {
+  margin-top: var(--s1);
+}
+
+.prose :global(:is(strong, b)) {
+  font-weight: 600;
+  color: var(--ink);
+}
+
+.prose :global(a) {
+  color: var(--ink);
+  text-decoration: underline;
+  text-decoration-thickness: 1px;
+  text-decoration-color: var(--mute);
+  text-underline-offset: 3px;
+}
+
+/* Lists */
+.prose :global(:is(ul, ol)) {
+  padding-left: 22px;
+}
+.prose :global(li) + :global(li) {
+  margin-top: var(--s1);
+}
+.prose :global(li) > :global(:is(ul, ol)) {
+  margin-top: var(--s1);
+}
+.prose :global(li::marker) {
+  color: var(--mute);
+}
+.prose :global(ol > li::marker) {
+  font-variant-numeric: tabular-nums;
+}
+.prose :global(ul.contains-task-list) {
+  list-style: none;
+  padding-left: 0;
+}
+.prose :global(.task-box) {
+  display: inline-block;
+  position: relative;
+  width: 14px;
+  height: 14px;
+  /* Box + gap + word space lands the text on the 22 px list indent. */
+  margin-right: 4px;
+  vertical-align: -1px;
+  box-shadow: inset 0 0 0 1px var(--mute);
+}
+.prose :global(.task-box.done) {
+  background: var(--mute);
+}
+.prose :global(.task-box.done)::after {
+  content: '';
+  position: absolute;
+  left: 5px;
+  top: 2px;
+  width: 4px;
+  height: 8px;
+  border: solid var(--bg);
+  border-width: 0 1.5px 1.5px 0;
+  transform: rotate(45deg);
+}
+
+/* Code: mono without a chip for inline, a surface block for fenced. */
+.prose :global(code) {
+  font-family: var(--font-mono);
+  font-size: 0.82em;
+  color: var(--ink);
+}
+.prose :global(pre) {
+  padding: var(--s3) var(--s4);
+  border-radius: var(--radius);
+  background: var(--surface);
+  overflow-x: auto;
+  font: 400 13px/20px var(--font-mono);
+  color: var(--ink);
+  tab-size: 2;
+}
+.prose :global(pre code) {
+  font-size: inherit;
+}
+.prose :global(kbd) {
+  padding: 0 4px;
+  font-family: var(--font-mono);
+  font-size: 0.76em;
+  color: var(--ink);
+  box-shadow: inset 0 0 0 1px var(--line), inset 0 -1px 0 var(--line);
+}
+
+/* Tables: the UI face, hairline rows, scroll sideways when wide. */
+.prose :global(.table-wrap) {
+  overflow-x: auto;
+}
+.prose :global(table) {
+  min-width: 100%;
+  border-collapse: collapse;
+  font: 400 15px/22px var(--font-ui);
+  font-variant-numeric: tabular-nums;
+  color: var(--ink);
+}
+.prose :global(:is(th, td)) {
+  padding: 5px var(--s4) 5px 0;
+  text-align: left;
+  vertical-align: top;
+  border-bottom: 1px solid var(--line);
+}
+.prose :global(:is(th, td):last-child) {
+  padding-right: 0;
+}
+.prose :global(th) {
+  font: 400 11px/16px var(--font-mono);
+  color: var(--mute);
+  padding-top: 0;
+}
+.prose :global(tbody tr:last-child td) {
+  border-bottom: 0;
+}
+.prose :global(:is(th, td)[style*='right']) {
+  padding-right: 0;
+  padding-left: var(--s4);
+}
+
+.prose :global(blockquote) {
+  padding-left: var(--s4);
+  border-left: 1px solid var(--line);
+  font-style: italic;
+}
+.prose :global(hr) {
+  height: 1px;
+  margin: var(--s5) 0;
+  border: 0;
+  background: var(--line);
+}
+.prose :global(mark) {
+  background: color-mix(in oklab, var(--ink) 16%, transparent);
+  color: inherit;
+}
+.prose :global(small) {
+  font-size: 15px;
+}
+.prose :global(summary) {
+  cursor: pointer;
+}
+.prose :global(summary::marker) {
+  color: var(--mute);
+}
+
+/* Footnotes */
+.prose :global(.footnote-ref a) {
+  text-decoration: none;
+  font-family: var(--font-mono);
+  font-size: 11px;
+}
+.prose :global(.footnotes-list) {
+  font-size: 15px;
+  line-height: 22px;
+  color: var(--mute);
+}
+
+/* Streaming caret: trails the last word. */
+.prose :global(.caret) {
+  display: inline-block;
+  width: 2px;
+  height: 1.05em;
+  margin-left: 2px;
+  vertical-align: -0.15em;
+  background: var(--prose);
+  animation: blink 1s steps(1, end) infinite;
+}
+@keyframes blink {
+  50% {
+    opacity: 0;
+  }
+}
+@media (prefers-reduced-motion: reduce) {
+  .prose :global(.caret) {
+    animation: none;
+  }
+}

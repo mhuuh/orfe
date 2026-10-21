@@ -1,0 +1,17 @@
+.transcript {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  /* Bottom: room for the floating composer plus a breath. */
+  padding: var(--s2) 20px calc(var(--composer-h, 96px) + var(--s5));
+  /* Text fades out under the header instead of being cut. */
+  -webkit-mask-image: linear-gradient(transparent, black var(--s5));
+  mask-image: linear-gradient(transparent, black var(--s5));
+  scrollbar-width: thin;
+  scrollbar-color: var(--line) transparent;
+}
+/* A plain block: sibling margins collapse, which keeps the turn rhythm simple. */
+.content {
+  display: flow-root;
+}

@@ -1,0 +1,33 @@
+.versions {
+  display: inline-flex;
+  align-items: center;
+  flex: none;
+  font: 400 11px/16px var(--font-mono);
+  color: var(--mute);
+  /* The arrows' hit areas overhang the line so the text stays on the 16 px grid. */
+  margin: calc(-1 * var(--s2)) calc(-1 * var(--s2));
+}
+.count {
+  font-variant-numeric: tabular-nums;
+}
+.step {
+  min-width: 32px;
+  height: 32px;
+  padding: 0;
+  border: 0;
+  background: none;
+  font: inherit;
+  font-size: 13px;
+  color: var(--mute);
+  cursor: pointer;
+  -webkit-tap-highlight-color: transparent;
+}
+.step:hover:not(:disabled),
+.step:focus-visible {
+  color: var(--ink);
+  outline: none;
+}
+.step:disabled {
+  color: var(--line);
+  cursor: default;
+}

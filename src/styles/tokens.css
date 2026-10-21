@@ -1,0 +1,75 @@
+/* ORFE design tokens. Palette: spec section 10. See DESIGN.md. */
+:root {
+  --font-ui: 'Geist Variable', system-ui, sans-serif;
+  --font-mono: 'Geist Mono', ui-monospace, monospace;
+  --font-prose: 'Newsreader Variable', Georgia, serif;
+
+  --radius: 14px;
+
+  --s1: 4px;
+  --s2: 8px;
+  --s3: 12px;
+  --s4: 16px;
+  --s5: 24px;
+  --s6: 32px;
+  --s7: 48px;
+
+  /* dark (default) */
+  --bg: #0e0e0f;
+  --surface: #18181a;
+  --line: #27272a;
+  --ink: #e9e7e2;
+  --prose: #dcdad5;
+  --mute: #8b8a86;
+  --faint: #75746f;
+  /* Composer glass only: edge highlight, edge shade, drop shadow. */
+  --glass-hi: rgb(255 255 255 / 0.22);
+  --glass-lo: rgb(255 255 255 / 0.03);
+  --glass-shadow: rgb(0 0 0 / 0.5);
+  color-scheme: dark;
+}
+
+@media (prefers-color-scheme: light) {
+  :root:not([data-theme='dark']) {
+    --bg: #f5f5f3;
+    --surface: #e9e9e6;
+    --line: #dcdcd8;
+    --ink: #1a1a19;
+    --prose: #262624;
+    --mute: #686763;
+    --faint: #82817b;
+    --glass-hi: rgb(255 255 255 / 0.95);
+    --glass-lo: rgb(0 0 0 / 0.04);
+    --glass-shadow: rgb(0 0 0 / 0.16);
+    color-scheme: light;
+  }
+}
+
+:root[data-theme='light'] {
+  --bg: #f5f5f3;
+  --surface: #e9e9e6;
+  --line: #dcdcd8;
+  --ink: #1a1a19;
+  --prose: #262624;
+  --mute: #686763;
+  --faint: #82817b;
+  --glass-hi: rgb(255 255 255 / 0.95);
+  --glass-lo: rgb(0 0 0 / 0.04);
+  --glass-shadow: rgb(0 0 0 / 0.16);
+  color-scheme: light;
+}
+
+:root[data-theme='dark'] {
+  --bg: #0e0e0f;
+  --surface: #18181a;
+  --line: #27272a;
+  --ink: #e9e7e2;
+  --prose: #dcdad5;
+  --mute: #8b8a86;
+  --faint: #75746f;
+  /* Composer glass only: edge highlight, edge shade, drop shadow. */
+  --glass-hi: rgb(255 255 255 / 0.22);
+  --glass-lo: rgb(255 255 255 / 0.03);
+  --glass-shadow: rgb(0 0 0 / 0.5);
+  color-scheme: dark;
+}

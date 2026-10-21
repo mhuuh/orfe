@@ -1,0 +1,93 @@
+/* A quiet row under a tapped message. Text buttons, hit area 32 px tall. */
+.row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0 var(--s1);
+  margin: var(--s1) calc(-1 * var(--s2)) 0;
+  animation: rise 160ms ease-out;
+}
+.end {
+  justify-content: flex-end;
+}
+.action {
+  min-height: 32px;
+  padding: 0 var(--s2);
+  border: 0;
+  border-radius: 999px;
+  background: none;
+  font: 400 13px/20px var(--font-ui);
+  color: var(--mute);
+  cursor: pointer;
+  -webkit-tap-highlight-color: transparent;
+}
+.action:hover:not(:disabled),
+.action:focus-visible {
+  color: var(--ink);
+  background: var(--surface);
+  outline: none;
+}
+.action:disabled {
+  color: var(--faint);
+  cursor: default;
+}
+
+@keyframes rise {
+  from {
+    opacity: 0;
+    transform: translateY(-2px);
+  }
+}
+
+/* Edit in place */
+.edit {
+  width: 100%;
+}
+.field {
+  display: block;
+  width: 100%;
+  min-height: 44px;
+  resize: none;
+  overflow: hidden;
+  padding: 10px 14px;
+  border: 0;
+  border-radius: var(--radius);
+  background: var(--surface);
+  box-shadow: inset 0 0 0 1px var(--line);
+  font: 400 15px/22px var(--font-ui);
+  color: var(--ink);
+  caret-color: var(--ink);
+}
+.field:focus {
+  outline: none;
+  box-shadow: inset 0 0 0 1px var(--mute);
+}
+.prose {
+  font: 400 17px/26px var(--font-prose);
+  font-optical-sizing: auto;
+  color: var(--prose);
+}
+.editBar {
+  display: flex;
+  justify-content: flex-end;
+  gap: var(--s1);
+  margin-top: var(--s2);
+}
+.save {
+  min-height: 32px;
+  padding: 0 var(--s3);
+  border: 0;
+  border-radius: 999px;
+  background: var(--ink);
+  color: var(--bg);
+  font: 500 13px/20px var(--font-ui);
+  cursor: pointer;
+}
+.save:disabled {
+  background: var(--surface);
+  color: var(--faint);
+  cursor: default;
+}
+.save:focus-visible {
+  outline: 2px solid var(--ink);
+  outline-offset: 2px;
+}
