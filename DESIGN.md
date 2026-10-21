@@ -22,7 +22,7 @@ Neutral, no colour in the chrome: off-blacks, dark greys, off-whites.
 | line | `#27272a` | `#dcdcd8` |
 | ink | `#e9e7e2` | `#1a1a19` |
 | prose | `#dcdad5` | `#262624` |
-| mute (meta) | `#8b8a86` | `#6b6a66` |
+| mute (meta) | `#8b8a86` | `#686763` |
 | faint (placeholder, 3:1 min) | `#75746f` | `#82817b` |
 
 Light follows `prefers-color-scheme`; `<html data-theme="light|dark">` overrides it.
@@ -42,7 +42,6 @@ Light follows `prefers-color-scheme`; `<html data-theme="light|dark">` overrides
 |---|---|---|---|---|
 | ink | 15.61 | 14.35 | 15.96 | 14.32 |
 | prose | 13.81 | 12.69 | 13.89 | 12.46 |
-| mute | 5.58 | 5.13 | 4.96 | 4.45 |
+| mute | 5.58 | 5.13 | 5.19 | 4.65 |
 | faint | 4.12 | 3.79 | 3.58 | 3.21 |
 
-Known gap: light `mute` on `surface` is 4.45, just under 4.5. Spec value kept; avoid mute text on surface in light until decided.
