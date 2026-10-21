@@ -43,6 +43,9 @@ function perMillion(s: string | undefined): number {
   return Number.isFinite(n) && n > 0 ? n * 1_000_000 : 0
 }
 
+/** A price we can trust as exactly zero: present, numeric and 0. "-1" (routers) is unknown. */
+const isZeroPrice = (s: string | undefined): boolean => s !== undefined && s.trim() !== '' && Number(s) === 0
+
 export function toModelInfo(raw: RawModel): ModelInfo {
   const priceIn = perMillion(raw.pricing?.prompt)
   const priceOut = perMillion(raw.pricing?.completion)
@@ -58,7 +61,8 @@ export function toModelInfo(raw: RawModel): ModelInfo {
     outputModalities: raw.architecture?.output_modalities ?? ['text'],
     efforts: efforts && efforts.length > 0 ? efforts : null,
     defaultEffort: raw.reasoning?.default_effort ?? null,
-    free: (priceIn === 0 && priceOut === 0) || raw.id.endsWith(':free'),
+    free:
+      (isZeroPrice(raw.pricing?.prompt) && isZeroPrice(raw.pricing?.completion)) || raw.id.endsWith(':free'),
   }
 }
 

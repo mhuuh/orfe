@@ -22,6 +22,10 @@
   --prose: #dcdad5;
   --mute: #8b8a86;
   --faint: #75746f;
+  /* Composer glass only: edge highlight, edge shade, drop shadow. */
+  --glass-hi: rgb(255 255 255 / 0.22);
+  --glass-lo: rgb(255 255 255 / 0.03);
+  --glass-shadow: rgb(0 0 0 / 0.5);
   color-scheme: dark;
 }
 
@@ -34,6 +38,9 @@
     --prose: #262624;
     --mute: #686763;
     --faint: #82817b;
+    --glass-hi: rgb(255 255 255 / 0.95);
+    --glass-lo: rgb(0 0 0 / 0.04);
+    --glass-shadow: rgb(0 0 0 / 0.16);
     color-scheme: light;
   }
 }
@@ -46,6 +53,9 @@
   --prose: #262624;
   --mute: #686763;
   --faint: #82817b;
+  --glass-hi: rgb(255 255 255 / 0.95);
+  --glass-lo: rgb(0 0 0 / 0.04);
+  --glass-shadow: rgb(0 0 0 / 0.16);
   color-scheme: light;
 }
 
@@ -57,5 +67,9 @@
   --prose: #dcdad5;
   --mute: #8b8a86;
   --faint: #75746f;
+  /* Composer glass only: edge highlight, edge shade, drop shadow. */
+  --glass-hi: rgb(255 255 255 / 0.22);
+  --glass-lo: rgb(255 255 255 / 0.03);
+  --glass-shadow: rgb(0 0 0 / 0.5);
   color-scheme: dark;
 }

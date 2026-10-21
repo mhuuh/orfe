@@ -7,6 +7,7 @@ import { Settings } from './ui/Settings'
 import { KeySetup } from './ui/KeySetup'
 import { ToastProvider } from './ui/Toast'
 import { Transcript } from './ui/Transcript'
+import { Composer } from './ui/Composer'
 import { applyTheme } from './ui/theme'
 import css from './App.module.css'
 
@@ -91,7 +92,8 @@ export function App() {
       <div className={css.app}>
         <Header conversationId={current} onMenu={() => setDrawer(true)} />
         <Transcript conversationId={current} />
-        <div className={css.composerSlot}>{/* Task 9 mounts the composer here. */}</div>
+        {/* Keyed: a new chat gets fresh composer state (its draft is kept per chat). */}
+        {current && <Composer key={current} conversationId={current} />}
         <Drawer
           open={drawer}
           onClose={() => setDrawer(false)}

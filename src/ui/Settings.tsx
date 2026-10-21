@@ -5,6 +5,7 @@ import { fetchKeyInfo } from '../lib/openrouter'
 import type { Settings as SettingsT } from '../lib/types'
 import { Sheet } from './Sheet'
 import { KeySetup } from './KeySetup'
+import { ModelSheet } from './ModelSheet'
 import css from './Settings.module.css'
 
 type KeyInfo = Awaited<ReturnType<typeof fetchKeyInfo>>
@@ -20,6 +21,7 @@ export function Settings({ open, onClose }: { open: boolean; onClose: () => void
   const [infoError, setInfoError] = useState(false)
   const [changing, setChanging] = useState(false)
   const [confirmRemove, setConfirmRemove] = useState(false)
+  const [picking, setPicking] = useState(false)
   const key = settings?.key ?? null
 
   useEffect(() => {
@@ -39,89 +41,105 @@ export function Settings({ open, onClose }: { open: boolean; onClose: () => void
     if (!open) {
       setChanging(false)
       setConfirmRemove(false)
+      setPicking(false)
     }
   }, [open])
 
   if (!settings) return null
 
   return (
-    <Sheet open={open} onClose={onClose} title="Settings">
-      <div className={css.body}>
-        <section className={css.group}>
-          <h3 className={css.label}>OpenRouter key</h3>
-          {changing ? (
-            <KeySetup inline onSaved={() => setChanging(false)} />
-          ) : (
-            <>
-              <div className={css.row}>
-                <span className={css.mono}>{key ? mask(key) : 'not set'}</span>
-                <span className={css.btns}>
-                  <button className={css.pill} onClick={() => setChanging(true)}>
-                    Change
-                  </button>
-                  <button
-                    className={css.pill}
-                    onClick={() => {
-                      if (!confirmRemove) return setConfirmRemove(true)
-                      void storage.setSettings({ key: null })
-                      onClose()
-                    }}
-                  >
-                    {confirmRemove ? 'Tap to confirm' : 'Remove'}
-                  </button>
-                </span>
-              </div>
-              <div className={css.meta}>
-                {infoError
-                  ? 'Could not load key info.'
-                  : info
-                    ? `limit ${money(info.limit)} · left ${money(info.limitRemaining)} · used $${info.usage.toFixed(2)}`
-                    : 'Loading key info...'}
-              </div>
-            </>
-          )}
-        </section>
-
-        <section className={css.group}>
-          <div className={css.row}>
-            <span id="stream-label">Stream replies</span>
-            <button
-              className={css.switch}
-              role="switch"
-              aria-checked={settings.streaming}
-              aria-labelledby="stream-label"
-              onClick={() => void storage.setSettings({ streaming: !settings.streaming })}
-            >
-              <span className={css.knob} />
-            </button>
-          </div>
-        </section>
-
-        <section className={css.group}>
-          <h3 className={css.label}>Theme</h3>
-          <div className={css.seg} role="radiogroup" aria-label="Theme">
-            {THEMES.map((t) => (
+    <>
+      <Sheet open={open} onClose={onClose} title="Settings">
+        <div className={css.body}>
+          <section className={css.group}>
+            <h3 className={css.label}>OpenRouter key</h3>
+            {changing ? (
+              <KeySetup inline onSaved={() => setChanging(false)} />
+            ) : (
+              <>
+                <div className={css.row}>
+                  <span className={css.mono}>{key ? mask(key) : 'not set'}</span>
+                  <span className={css.btns}>
+                    <button className={css.pill} onClick={() => setChanging(true)}>
+                      Change
+                    </button>
+                    <button
+                      className={css.pill}
+                      onClick={() => {
+                        if (!confirmRemove) return setConfirmRemove(true)
+                        void storage.setSettings({ key: null })
+                        onClose()
+                      }}
+                    >
+                      {confirmRemove ? 'Tap to confirm' : 'Remove'}
+                    </button>
+                  </span>
+                </div>
+                <div className={css.meta}>
+                  {infoError
+                    ? 'Could not load key info.'
+                    : info
+                      ? `limit ${money(info.limit)} · left ${money(info.limitRemaining)} · used $${info.usage.toFixed(2)}`
+                      : 'Loading key info...'}
+                </div>
+              </>
+            )}
+          </section>
+  
+          <section className={css.group}>
+            <div className={css.row}>
+              <span id="stream-label">Stream replies</span>
               <button
-                key={t}
-                role="radio"
-                aria-checked={settings.themeMode === t}
-                className={`${css.segBtn} ${settings.themeMode === t ? css.on : ''}`}
-                onClick={() => void storage.setSettings({ themeMode: t })}
+                className={css.switch}
+                role="switch"
+                aria-checked={settings.streaming}
+                aria-labelledby="stream-label"
+                onClick={() => void storage.setSettings({ streaming: !settings.streaming })}
               >
-                {t[0].toUpperCase() + t.slice(1)}
+                <span className={css.knob} />
               </button>
-            ))}
-          </div>
-        </section>
-
-        <section className={css.group}>
-          <h3 className={css.label}>Default model</h3>
-          {/* Read-only for now; the model sheet is wired in a later task. */}
-          <div className={css.row}>
-            <span className={css.mono}>{settings.defaultModel}</span>
-          </div>
-        </section>
-      </div>
-    </Sheet>
+            </div>
+          </section>
+  
+          <section className={css.group}>
+            <h3 className={css.label}>Theme</h3>
+            <div className={css.seg} role="radiogroup" aria-label="Theme">
+              {THEMES.map((t) => (
+                <button
+                  key={t}
+                  role="radio"
+                  aria-checked={settings.themeMode === t}
+                  className={`${css.segBtn} ${settings.themeMode === t ? css.on : ''}`}
+                  onClick={() => void storage.setSettings({ themeMode: t })}
+                >
+                  {t[0].toUpperCase() + t.slice(1)}
+                </button>
+              ))}
+            </div>
+          </section>
+  
+          <section className={css.group}>
+            <h3 className={css.label}>Default model</h3>
+            <div className={css.row}>
+              <span className={css.mono}>{settings.defaultModel}</span>
+              <button className={css.pill} onClick={() => setPicking(true)}>
+                Change
+              </button>
+            </div>
+            <div className={css.meta}>New chats start with this model.</div>
+          </section>
+        </div>
+      </Sheet>
+      <ModelSheet
+        open={picking}
+        title="Default model"
+        current={settings.defaultModel}
+        onClose={() => setPicking(false)}
+        onPick={(m) => {
+          setPicking(false)
+          void storage.setSettings({ defaultModel: m.id })
+        }}
+      />
+    </>
   )
 }

@@ -1,0 +1,62 @@
+import { describe, expect, it } from 'vitest'
+import { fallbackModelInfo, type ModelInfo } from '../lib/catalog'
+import { clean, nextEffort, sendAction, shownEffort } from './Composer'
+import { modelMeta } from './ModelSheet'
+
+const reasoning: ModelInfo = {
+  ...fallbackModelInfo('anthropic/claude-sonnet-5.5'),
+  efforts: ['low', 'medium', 'high'],
+  defaultEffort: 'medium',
+}
+
+describe('sendAction', () => {
+  it('is Stop while a reply runs, even with text typed', () => {
+    expect(sendAction('hello', 'assistant', true)).toBe('stop')
+  })
+  it('sends when there is text', () => {
+    expect(sendAction('hello', 'assistant', false)).toBe('send')
+  })
+  it('asks for a reply when empty after your own message', () => {
+    expect(sendAction('  \n', 'user', false)).toBe('reply')
+  })
+  it('does nothing when empty after a reply or in a new chat', () => {
+    expect(sendAction('', 'assistant', false)).toBe('none')
+    expect(sendAction('', undefined, false)).toBe('none')
+  })
+})
+
+describe('clean', () => {
+  it('drops leading blank lines and trailing space but keeps the first indent', () => {
+    expect(clean('\n  \n    code()\n\n')).toBe('    code()')
+  })
+})
+
+describe('effort chip', () => {
+  it('shows the model default until one is chosen', () => {
+    expect(shownEffort(reasoning, null)).toBe('medium')
+    expect(shownEffort(reasoning, 'high')).toBe('high')
+  })
+  it('ignores a chosen effort the model does not offer', () => {
+    expect(shownEffort(reasoning, 'minimal')).toBe('medium')
+  })
+  it('is absent for models without efforts', () => {
+    expect(shownEffort(fallbackModelInfo('x/y'), 'high')).toBeNull()
+  })
+  it('cycles through the list and wraps', () => {
+    expect(nextEffort(['low', 'medium', 'high'], 'medium')).toBe('high')
+    expect(nextEffort(['low', 'medium', 'high'], 'high')).toBe('low')
+    expect(nextEffort(['low', 'medium', 'high'], null)).toBe('low')
+  })
+})
+
+describe('modelMeta', () => {
+  const m = (p: Partial<ModelInfo>): ModelInfo => ({ ...fallbackModelInfo('a/b'), ...p })
+  it('shows price per 1M in and out, and context', () => {
+    expect(modelMeta(m({ priceIn: 3, priceOut: 15, contextLength: 200_000 }))).toBe('$3 / $15 · 200k')
+    expect(modelMeta(m({ priceIn: 0.075, priceOut: 0.3, contextLength: 1_048_576 }))).toBe('$0.075 / $0.3 · 1M')
+  })
+  it('says free for free models and "price varies" for routers', () => {
+    expect(modelMeta(m({ free: true, contextLength: 131_072 }))).toBe('free · 131k')
+    expect(modelMeta(m({ free: false, contextLength: 2_000_000 }))).toBe('price varies · 2M')
+  })
+})

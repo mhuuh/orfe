@@ -33,6 +33,13 @@ describe('catalog', () => {
     expect(toModelInfo(raw[6]).free).toBe(true)
   })
 
+  it('does not mark routers with negative or unknown prices as free', () => {
+    expect(toModelInfo(raw[5]).free).toBe(false) // openrouter/auto, price "-1"
+    expect(toModelInfo({ ...raw[6], id: 'x/no-price', pricing: undefined } as unknown as RawModel).free).toBe(false)
+    expect(toModelInfo({ ...raw[6], id: 'x/half', pricing: { prompt: '0', completion: 'n/a' } }).free).toBe(false)
+    expect(toModelInfo({ ...raw[6], id: 'x/zero', pricing: { prompt: '0', completion: '0' } }).free).toBe(true)
+  })
+
   it('chatModels removes embeddings, rerank and decisions models', () => {
     const ids = chatModels(all).map((m) => m.id)
     expect(ids).not.toContain('openai/text-embedding-4')

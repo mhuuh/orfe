@@ -1,0 +1,152 @@
+/*
+ * The one glass object (spec §10). Values follow mockup child 1:
+ * 12 px from the edges, radius 22, blur 22 + saturate 1.4, inset top highlight,
+ * and a 1 px gradient edge that catches light top-left and bottom-right.
+ */
+.composer {
+  position: absolute;
+  left: var(--s3);
+  right: var(--s3);
+  bottom: calc(var(--s3) + env(safe-area-inset-bottom));
+  z-index: 2;
+  display: flex;
+  flex-direction: column;
+  gap: var(--s3);
+  padding: 14px 14px 10px;
+  border-radius: 22px;
+  background: color-mix(in oklab, var(--bg) 62%, transparent);
+  -webkit-backdrop-filter: blur(22px) saturate(1.4);
+  backdrop-filter: blur(22px) saturate(1.4);
+  box-shadow:
+    inset 0 1px 0 var(--glass-hi),
+    0 12px 40px -12px var(--glass-shadow);
+}
+/* The edge: a 1 px ring cut out of a gradient with mask-composite. */
+.composer::before {
+  content: '';
+  position: absolute;
+  inset: 0;
+  border-radius: inherit;
+  padding: 1px;
+  pointer-events: none;
+  background: linear-gradient(165deg, var(--glass-hi), var(--glass-lo) 38%, var(--glass-lo) 70%, var(--glass-hi));
+  -webkit-mask:
+    linear-gradient(#000 0 0) content-box,
+    linear-gradient(#000 0 0);
+  -webkit-mask-composite: xor;
+  mask:
+    linear-gradient(#000 0 0) content-box,
+    linear-gradient(#000 0 0);
+  mask-composite: exclude;
+}
+
+.field {
+  display: block;
+  width: 100%;
+  margin: 0;
+  padding: 0 4px;
+  border: 0;
+  background: none;
+  color: var(--ink);
+  font: 400 15px/22px var(--font-ui);
+  resize: none;
+  outline: none;
+  overflow-y: auto;
+  scrollbar-width: thin;
+  scrollbar-color: var(--line) transparent;
+}
+.field::placeholder {
+  color: var(--faint);
+  opacity: 1;
+}
+
+.tools {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+}
+.chip {
+  position: relative;
+  flex: none;
+  display: inline-flex;
+  align-items: center;
+  gap: var(--s1);
+  min-width: 0;
+  padding: 6px 10px;
+  border: 0;
+  border-radius: 999px;
+  background: color-mix(in oklab, var(--surface) 55%, transparent);
+  box-shadow: inset 0 0 0 1px var(--line);
+  color: var(--ink);
+  font: 400 11px/16px var(--font-mono);
+  white-space: nowrap;
+  cursor: pointer;
+  transition: box-shadow 150ms ease-out;
+}
+/* The model chip gives way first when ids are long. */
+.chip:first-child {
+  flex: 0 1 auto;
+}
+/* A 44 px tall touch target around a 28 px chip. */
+.chip::after {
+  content: '';
+  position: absolute;
+  inset: -8px -3px;
+}
+.chipText {
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.caret {
+  flex: none;
+  color: var(--mute);
+}
+@media (hover: hover) {
+  .chip:hover {
+    box-shadow: inset 0 0 0 1px var(--mute);
+  }
+}
+
+.send {
+  position: relative;
+  flex: none;
+  margin-left: auto;
+  display: grid;
+  place-items: center;
+  width: 32px;
+  height: 32px;
+  padding: 0;
+  border: 0;
+  border-radius: 999px;
+  background: var(--ink);
+  color: var(--bg);
+  cursor: pointer;
+  touch-action: manipulation;
+  -webkit-touch-callout: none;
+  -webkit-user-select: none;
+  user-select: none;
+  transition:
+    background 150ms ease-out,
+    color 150ms ease-out,
+    transform 150ms ease-out;
+}
+.send::after {
+  content: '';
+  position: absolute;
+  inset: -6px;
+  border-radius: inherit;
+}
+.send:active:not(:disabled) {
+  transform: scale(0.94);
+}
+/* Nothing to send: it keeps the ink look of the approved reference at rest, it just does nothing. */
+.send:disabled {
+  cursor: default;
+}
+
+.chip:focus-visible,
+.send:focus-visible {
+  outline: 2px solid var(--ink);
+  outline-offset: 2px;
+}

@@ -47,11 +47,13 @@ export function Transcript({ conversationId }: { conversationId: string | null }
   }, [data, toBottom])
 
   // Streaming text, folding thoughts and late fonts change the height without a new message.
+  // The scroller itself is watched too: a growing composer raises its bottom padding.
   useEffect(() => {
     const el = content.current
     if (!el) return
     const ro = new ResizeObserver(toBottom)
     ro.observe(el)
+    if (scroller.current) ro.observe(scroller.current)
     return () => ro.disconnect()
   }, [toBottom])
 

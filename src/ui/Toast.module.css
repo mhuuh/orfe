@@ -2,7 +2,8 @@
   position: fixed;
   left: var(--s4);
   right: var(--s4);
-  bottom: calc(var(--s4) + env(safe-area-inset-bottom));
+  /* Just above the composer when there is one (it sets --composer-h, which includes the safe area). */
+  bottom: calc(var(--composer-h, calc(var(--s2) + env(safe-area-inset-bottom))) + var(--s2));
   z-index: 40;
   display: flex;
   justify-content: center;
