@@ -8,6 +8,7 @@ import { KeySetup } from './ui/KeySetup'
 import { ToastProvider } from './ui/Toast'
 import { Transcript } from './ui/Transcript'
 import { Composer } from './ui/Composer'
+import { onSheetEntry } from './ui/sheetHistory'
 import { applyTheme } from './ui/theme'
 import css from './App.module.css'
 
@@ -22,7 +23,9 @@ function useConversationId(): [string | null, (id: string, replace?: boolean) =>
   }, [])
   const go = useCallback((next: string, replace = false) => {
     const hash = `#/c/${next}`
-    if (replace) history.replaceState(null, '', hash)
+    // An open sheet's Back entry is on top (picking a chat from the drawer): take its place,
+    // so Back from the new chat goes to the previous chat, not to a dead duplicate entry.
+    if (replace || onSheetEntry()) history.replaceState(null, '', hash)
     else location.hash = hash
     setId(next)
   }, [])

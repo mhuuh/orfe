@@ -77,3 +77,56 @@ test('survives reload', async ({ page }) => {
   await expect(page.getByText(/^Reply 1 /)).toBeVisible()
   await expect(page.getByLabel('Message')).toBeVisible()
 })
+
+test('back closes the open sheet and stays on the chat', async ({ page }) => {
+  await signIn(page)
+  await send(page, 'hello')
+  await expect(page.getByText(/^Reply 1 /)).toBeVisible()
+  const chat = page.url()
+  await page.getByLabel('Message').fill('unsent draft')
+
+  // Drawer: back closes it; same chat, draft kept.
+  await page.getByRole('button', { name: 'Open menu' }).click()
+  const drawer = page.getByRole('dialog', { name: 'Chats' })
+  await expect(drawer).toBeVisible()
+  await page.goBack()
+  await expect(drawer).toHaveCount(0)
+  expect(page.url()).toBe(chat)
+  await expect(page.getByText('hello')).toBeVisible()
+  await expect(page.getByLabel('Message')).toHaveValue('unsent draft')
+
+  // Model sheet over Settings: back closes only the top one, then Settings.
+  await page.getByRole('button', { name: 'Open menu' }).click()
+  await page.getByRole('button', { name: 'Settings' }).click()
+  const settings = page.getByRole('dialog', { name: 'Settings' })
+  await expect(settings).toBeVisible()
+  await expect(drawer).toHaveCount(0)
+  await settings.getByRole('button', { name: 'Change' }).last().click() // the default model's Change
+  const models = page.getByRole('dialog', { name: 'Default model' })
+  await expect(models).toBeVisible()
+  await expect(page.getByRole('dialog')).toHaveCount(2)
+  await page.goBack()
+  await expect(models).toHaveCount(0)
+  await expect(settings).toBeVisible()
+  await page.goBack()
+  await expect(settings).toHaveCount(0)
+  expect(page.url()).toBe(chat)
+
+  // Closing by other means steps back off the sheet's entry, so no dead Back press is left behind.
+  await page.getByRole('button', { name: 'Open menu' }).click()
+  await expect(drawer).toBeVisible()
+  await expect.poll(() => page.evaluate(() => history.state as unknown)).toEqual({ orfeSheet: true })
+  await page.keyboard.press('Escape')
+  await expect(drawer).toHaveCount(0)
+  await expect.poll(() => page.evaluate(() => history.state as unknown)).toBeNull()
+  expect(page.url()).toBe(chat)
+
+  // Hash routing still works: a new chat from the drawer, then back returns to the first chat.
+  await page.getByRole('button', { name: 'Open menu' }).click()
+  await page.getByRole('button', { name: 'New chat', exact: true }).click()
+  await expect(drawer).toHaveCount(0)
+  await expect.poll(() => page.url()).not.toBe(chat)
+  await page.goBack()
+  await expect.poll(() => page.url()).toBe(chat)
+  await expect(page.getByText('hello')).toBeVisible()
+})

@@ -1,4 +1,5 @@
 import { useEffect, useRef, useState, type ReactNode } from 'react'
+import { openSheet } from './sheetHistory'
 import css from './Sheet.module.css'
 
 interface Props {
@@ -11,9 +12,6 @@ interface Props {
 }
 
 const EXIT_MS = 180
-
-/** Open sheets, oldest first. Escape closes only the top one (the model sheet over Settings). */
-const stack: symbol[] = []
 
 export function Sheet({ open, onClose, title, children, side = 'bottom' }: Props) {
   const [mounted, setMounted] = useState(open)
@@ -34,15 +32,15 @@ export function Sheet({ open, onClose, title, children, side = 'bottom' }: Props
   close.current = onClose
   useEffect(() => {
     if (!open) return
-    const me = Symbol('sheet')
-    stack.push(me)
+    // Back and Escape close only the top sheet (the model sheet over Settings).
+    const me = openSheet(() => close.current())
     const onKey = (e: KeyboardEvent) => {
-      if (e.key === 'Escape' && stack[stack.length - 1] === me) close.current()
+      if (e.key === 'Escape' && me.isTop()) close.current()
     }
     window.addEventListener('keydown', onKey)
     return () => {
       window.removeEventListener('keydown', onKey)
-      stack.splice(stack.indexOf(me), 1)
+      me.release()
     }
   }, [open])
 
