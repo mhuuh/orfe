@@ -10,6 +10,7 @@ import './styles/base.css'
 import { App } from './App'
 import { DEFAULT_SETTINGS, storage } from './lib/storage'
 import { recoverInterrupted } from './lib/send'
+import { applyUpdateIfIdle, setUpdatePending } from './lib/appUpdate'
 import { applyTheme } from './ui/theme'
 
 async function start() {
@@ -32,17 +33,22 @@ async function start() {
 }
 
 /**
- * Registers the service worker. An installed app is rarely cold-started, so it also asks
- * for an update each time it comes back to the foreground. (autoUpdate: a new version
- * activates and the page reloads.)
+ * Registers the service worker. registerType is 'prompt': a new version waits instead of
+ * taking over, because taking over reloads the page. We apply it only when idle (no draft,
+ * nothing generating): at once if idle, else when the app is hidden or a reply finishes.
+ * An installed app is rarely cold-started, so it also checks for updates on each return.
  */
 function registerServiceWorker() {
-  registerSW({
+  const updateSW = registerSW({
     immediate: true,
+    onNeedRefresh() {
+      setUpdatePending(() => void updateSW(true))
+    },
     onRegisteredSW(_url, registration) {
-      if (!registration) return
       document.addEventListener('visibilitychange', () => {
-        if (document.visibilityState === 'visible') registration.update().catch(() => {})
+        if (document.visibilityState === 'visible') registration?.update().catch(() => {})
+        // The user left the app: the best moment to swap versions.
+        else applyUpdateIfIdle()
       })
     },
   })

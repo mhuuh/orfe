@@ -7,7 +7,8 @@ export default defineConfig({
   plugins: [
     react(),
     VitePWA({
-      registerType: 'autoUpdate',
+      // 'prompt': a new version waits; main.tsx applies it only when idle (it reloads the page).
+      registerType: 'prompt',
       includeAssets: ['icon.svg'],
       manifest: {
         name: 'ORFE',

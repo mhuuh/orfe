@@ -1,6 +1,7 @@
 import { useLayoutEffect, useRef, useState, type KeyboardEvent } from 'react'
 import { useLiveQuery } from 'dexie-react-hooks'
 import type { ModelInfo } from '../lib/catalog'
+import { noteDraft } from '../lib/appUpdate'
 import { generate, isGenerating, sendUserMessage, stop } from '../lib/send'
 import { storage } from '../lib/storage'
 import type { Conversation, Role } from '../lib/types'
@@ -108,6 +109,7 @@ export function Composer({ conversationId: id }: { conversationId: string }) {
     setText(next)
     if (next) drafts.set(id, next)
     else drafts.delete(id)
+    noteDraft(id, next) // an app update waits while any draft holds text
   }
 
   /** Puts unsent text back, unless something new was typed meanwhile. */

@@ -27,6 +27,18 @@ export function isGenerating(conversationId: string): boolean {
   return controllers.has(conversationId)
 }
 
+/** Whether a reply is running in any chat. */
+export const isAnyGenerating = (): boolean => controllers.size > 0
+
+const endListeners = new Set<() => void>()
+/** Calls `fn` each time a generation ends (done, stopped or failed). */
+export function onGenerationEnd(fn: () => void): () => void {
+  endListeners.add(fn)
+  return () => {
+    endListeners.delete(fn)
+  }
+}
+
 export function stop(conversationId: string): void {
   controllers.get(conversationId)?.abort()
 }
@@ -137,6 +149,13 @@ export async function generate(conversationId: string, target: GenerateTarget, m
     await generateInner(conversationId, target, model, controller)
   } finally {
     if (controllers.get(conversationId) === controller) controllers.delete(conversationId)
+    for (const fn of endListeners) {
+      try {
+        fn()
+      } catch (e) {
+        console.error(e)
+      }
+    }
   }
 }
 
