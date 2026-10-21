@@ -33,9 +33,14 @@ const ALLOWED_ATTR = ['href', 'title', 'class', 'style']
 
 DOMPurify.addHook('afterSanitizeAttributes', (node) => {
   if (node.tagName !== 'A') return
-  const href = node.getAttribute('href') ?? ''
-  // In-page anchors (footnotes) stay in the tab.
-  if (href.startsWith('#')) return
+  const href = (node.getAttribute('href') ?? '').trim()
+  // The app routes on location.hash, so an in-page link (footnotes, or a raw
+  // "#/c/<id>") would switch or lose the chat. Ids are stripped anyway, so
+  // such links could never reach a target: keep the text, drop the link.
+  if (href.startsWith('#')) {
+    node.removeAttribute('href')
+    return
+  }
   node.setAttribute('target', '_blank')
   node.setAttribute('rel', 'noopener noreferrer')
 })

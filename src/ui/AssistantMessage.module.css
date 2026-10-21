@@ -61,6 +61,14 @@
   color: var(--prose);
   overflow-wrap: break-word;
   hyphens: manual;
+  /* Inline styles pass through for now (Plan 5 adds the property allowlist). Containment
+     keeps a reply's position:fixed / z-index inside its own box: layout containment makes
+     .prose the containing block for fixed children, and the clip stops it painting over
+     the header. The 4 px margin spares italic overhangs and the caret. */
+  contain: layout;
+  isolation: isolate;
+  overflow: clip;
+  overflow-clip-margin: 4px;
 }
 .prose :global(:where(p, ul, ol, pre, blockquote, details, h1, h2, h3, h4, h5, h6, .table-wrap)) {
   margin: 0;

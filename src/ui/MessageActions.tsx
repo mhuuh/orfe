@@ -1,9 +1,9 @@
 import { useCallback, useLayoutEffect, useMemo, useRef, useState } from 'react'
 import type { ModelInfo } from '../lib/catalog'
-import { generate } from '../lib/send'
+import { generate, stop } from '../lib/send'
 import { storage } from '../lib/storage'
 import type { Conversation, Message } from '../lib/types'
-import { editedVersion, versionText, withActive, withNewVersion, withoutActiveVersion, withVersionAt } from '../lib/versions'
+import { editedVersion, settled, versionText, withActive, withNewVersion, withoutActiveVersion, withVersionAt } from '../lib/versions'
 import { useToast } from './Toast'
 import { findModel } from './useCatalog'
 import css from './MessageActions.module.css'
@@ -15,7 +15,7 @@ export interface MessageOps {
   reroll(id: string): void
   cont(id: string): void
   copy(m: Message): void
-  remove(id: string): void
+  remove(m: Message): void
   removeVersion(id: string): void
   setActive(id: string, index: number): void
 }
@@ -64,10 +64,15 @@ export function useMessageOps(
           () => toast.show("Couldn't copy"),
         )
       },
-      remove(id) {
+      remove(message) {
         deselect()
-        void storage.deleteMessage(id).then((removed) => {
-          if (removed) toast.show('Message deleted', { label: 'Undo', run: () => void storage.restoreMessage(removed) })
+        // A hidden version may still be streaming: stop it, or it keeps running with nowhere to write.
+        if (message.versions.some((v) => v.status === 'streaming')) stop(message.conversationId)
+        void storage.deleteMessage(message.id).then((removed) => {
+          if (!removed) return
+          // Never restore a version stuck in 'streaming'; it would block Reroll/Continue until reload.
+          const snapshot = settled(removed)
+          toast.show('Message deleted', { label: 'Undo', run: () => void storage.restoreMessage(snapshot) })
         })
       },
       removeVersion(id) {
@@ -83,7 +88,10 @@ export function useMessageOps(
             if (!u) return
             toast.show('Version deleted', {
               label: 'Undo',
-              run: () => void storage.mutateMessage(id, (m) => withVersionAt(m, u.removed, u.index)),
+              run: () => {
+                const v = u.removed.status === 'streaming' ? { ...u.removed, status: 'stopped' as const } : u.removed
+                void storage.mutateMessage(id, (m) => withVersionAt(m, v, u.index))
+              },
             })
           })
       },
@@ -112,7 +120,7 @@ export function MessageActions({ message, isLast, busy, ops }: ActionsProps) {
   if (assistant && isLast) items.push({ label: 'Continue', run: () => ops.cont(message.id), disabled: busy })
   items.push({ label: 'Copy', run: () => ops.copy(message) })
   if (!streamingHere) {
-    items.push({ label: 'Delete', run: () => ops.remove(message.id) })
+    items.push({ label: 'Delete', run: () => ops.remove(message) })
     if (message.versions.length > 1) items.push({ label: 'Delete this version', run: () => ops.removeVersion(message.id) })
   }
   return (

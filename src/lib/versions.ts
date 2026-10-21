@@ -33,6 +33,12 @@ export function withVersionAt(m: Message, v: Version, index: number): Message {
   return { ...m, versions, activeVersion: at }
 }
 
+/** For an undo snapshot: a version still marked streaming would block Reroll/Continue forever. */
+export function settled(m: Message): Message {
+  if (!m.versions.some((v) => v.status === 'streaming')) return m
+  return { ...m, versions: m.versions.map((v) => (v.status === 'streaming' ? { ...v, status: 'stopped' as const } : v)) }
+}
+
 /** A new version holding edited text. Media parts stay; text parts become one. */
 export function editedVersion(source: Version, text: string, now = Date.now()): Version {
   const media = source.content.filter((p) => p.type !== 'text')

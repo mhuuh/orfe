@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest'
 import type { Message, Version } from './types'
-import { editedVersion, versionText, withActive, withNewVersion, withoutActiveVersion, withVersionAt } from './versions'
+import { editedVersion, settled, versionText, withActive, withNewVersion, withoutActiveVersion, withVersionAt } from './versions'
 
 const v = (id: string, text = id): Version => ({
   id,
@@ -67,5 +67,12 @@ describe('versions', () => {
     expect(e.model).toBe('a/m')
     expect(e.editedAt).toBe(42)
     expect(versionText(e)).toBe('new')
+  })
+
+  it('settled turns streaming versions into stopped ones for an undo snapshot', () => {
+    const m = msg([v('a'), { ...v('b'), status: 'streaming' }], 0)
+    const s = settled(m)
+    expect(s.versions.map((x) => x.status)).toEqual(['done', 'stopped'])
+    expect(settled(msg([v('a')]))).toEqual(msg([v('a')]))
   })
 })

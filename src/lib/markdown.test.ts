@@ -44,4 +44,20 @@ describe('renderMarkdown', () => {
     const span = el.querySelector('span')
     expect(span?.getAttribute('style')).toBe('color: #c96; font-style: italic')
   })
+
+  it('strips in-page hash links so they cannot change the route', () => {
+    const el = dom(renderMarkdown('note[^1] and <a href="#/c/other">other chat</a>\n\n[^1]: the footnote'))
+    for (const a of el.querySelectorAll('a')) expect(a.hasAttribute('href')).toBe(false)
+    expect(el.textContent).toContain('other chat')
+    expect(el.textContent).toContain('the footnote')
+  })
+
+  it('strips javascript: and data: links', () => {
+    const el = dom(renderMarkdown('<a href="javascript:alert(1)">js</a> <a href="data:text/html,<b>x</b>">data</a> [md](javascript:alert(2))'))
+    for (const a of el.querySelectorAll('a')) {
+      const href = a.getAttribute('href') ?? ''
+      expect(href).not.toMatch(/^\s*(javascript|data):/i)
+    }
+    expect(el.textContent).toContain('js')
+  })
 })
