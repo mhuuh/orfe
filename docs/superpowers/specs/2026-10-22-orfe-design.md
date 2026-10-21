@@ -334,7 +334,7 @@ Reasons   A daily tool for dense use: quiet ratio, one UI face. The model gets a
 | line | `#27272a` | `#dcdcd8` |
 | ink | `#e9e7e2` | `#1a1a19` |
 | prose | `#dcdad5` | `#262624` |
-| mute (meta) | `#8b8a86` | `#6b6a66` |
+| mute (meta) | `#8b8a86` | `#686763` |
 | faint (placeholder) | raise to pass 4.5:1 for real text; ≥3:1 for placeholder | same |
 
 - **User messages:** a grey bubble (`surface`), right-aligned, max 84% width, radius 14.
