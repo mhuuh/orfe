@@ -30,6 +30,8 @@ export function Transcript({ conversationId }: { conversationId: string | null }
   const scroller = useRef<HTMLElement>(null)
   const content = useRef<HTMLDivElement>(null)
   const stick = useRef(true)
+  /** The scroller height the last resize callback saw. */
+  const viewH = useRef(0)
   const seen = useRef<{ id: string | null; count: number }>({ id: null, count: 0 })
 
   const toBottom = useCallback(() => {
@@ -51,7 +53,10 @@ export function Transcript({ conversationId }: { conversationId: string | null }
   useEffect(() => {
     const el = content.current
     if (!el) return
-    const ro = new ResizeObserver(toBottom)
+    const ro = new ResizeObserver(() => {
+      if (scroller.current) viewH.current = scroller.current.clientHeight
+      toBottom()
+    })
     ro.observe(el)
     if (scroller.current) ro.observe(scroller.current)
     return () => ro.disconnect()
@@ -73,7 +78,11 @@ export function Transcript({ conversationId }: { conversationId: string | null }
 
   const onScroll = () => {
     const el = scroller.current
-    if (el) stick.current = el.scrollHeight - el.scrollTop - el.clientHeight <= STICK_PX
+    if (!el) return
+    // The view just changed height (keyboard, rotation): this scroll is the browser's, not the reader's.
+    // Leave "stick" alone so the resize callback can pin the bottom again.
+    if (el.clientHeight !== viewH.current) return
+    stick.current = el.scrollHeight - el.scrollTop - el.clientHeight <= STICK_PX
   }
 
   const messages = data?.id === conversationId ? (data?.messages ?? []) : []

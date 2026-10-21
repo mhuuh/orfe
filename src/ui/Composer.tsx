@@ -13,6 +13,8 @@ import css from './Composer.module.css'
 const LONG_PRESS_MS = 500
 const LINE_PX = 22
 const MAX_LINES = 8
+/** A second tap this soon after sending is a double tap, not a request to stop. */
+export const STOP_GRACE_MS = 400
 
 /** Unsent text per chat, kept while switching chats (not across reloads). */
 const drafts = new Map<string, string>()
@@ -28,6 +30,9 @@ export function sendAction(text: string, lastRole: Role | undefined, busy: boole
 
 /** Drops leading blank lines and trailing space; keeps the first line's indent (code). */
 export const clean = (text: string): string => text.replace(/^(?:[ \t]*\n)+/, '').trimEnd()
+
+/** Whether a tap on Stop counts, given when we last started a send or reply. */
+export const canStop = (now: number, startedAt: number): boolean => now - startedAt >= STOP_GRACE_MS
 
 /** The effort the chip shows: the chosen one when this model has it, else the model's default. */
 export function shownEffort(model: ModelInfo, chosen: string | null): string | null {
@@ -64,6 +69,7 @@ export function Composer({ conversationId: id }: { conversationId: string }) {
   const field = useRef<HTMLTextAreaElement>(null)
   const pressTimer = useRef<ReturnType<typeof setTimeout> | undefined>(undefined)
   const longPressed = useRef(false)
+  const startedAt = useRef(-Infinity)
 
   const conv: Conversation | undefined = data?.conversation
   const modelId = conv?.nextModel ?? ''
@@ -104,7 +110,13 @@ export function Composer({ conversationId: id }: { conversationId: string }) {
     else drafts.delete(id)
   }
 
+  /** Puts unsent text back, unless something new was typed meanwhile. */
+  const restore = (body: string) => {
+    if (!drafts.get(id)) edit(body)
+  }
+
   const run = (work: Promise<void>) => {
+    startedAt.current = Date.now()
     setPending(true)
     work
       .catch((e: unknown) => {
@@ -120,14 +132,25 @@ export function Composer({ conversationId: id }: { conversationId: string }) {
     if (!body || !data || busy || isGenerating(id)) return
     edit('')
     if (reply) {
-      run(sendUserMessage(id, body, { reply: true, model }))
+      // Two steps instead of sendUserMessage({reply:true}), so a failed append can give the text back.
+      run(
+        (async () => {
+          try {
+            await sendUserMessage(id, body, { reply: false })
+          } catch (e) {
+            restore(body)
+            throw e
+          }
+          await generate(id, { kind: 'new' }, model)
+        })(),
+      )
       return
     }
     sendUserMessage(id, body, { reply: false }).then(
       () => toast.show('Added without reply', undefined, 2500),
       (e: unknown) => {
         console.error(e)
-        edit(body)
+        restore(body)
         toast.show("Couldn't add the message.")
       },
     )
@@ -162,8 +185,9 @@ export function Composer({ conversationId: id }: { conversationId: string }) {
       longPressed.current = false
       return
     }
-    if (action === 'stop') stop(id)
-    else primary()
+    if (action === 'stop') {
+      if (canStop(Date.now(), startedAt.current)) stop(id)
+    } else primary()
   }
 
   const pick = (m: ModelInfo) => {

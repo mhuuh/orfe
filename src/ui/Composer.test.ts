@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest'
 import { fallbackModelInfo, type ModelInfo } from '../lib/catalog'
-import { clean, nextEffort, sendAction, shownEffort } from './Composer'
+import { canStop, clean, nextEffort, sendAction, shownEffort, STOP_GRACE_MS } from './Composer'
 import { modelMeta } from './ModelSheet'
 
 const reasoning: ModelInfo = {
@@ -22,6 +22,16 @@ describe('sendAction', () => {
   it('does nothing when empty after a reply or in a new chat', () => {
     expect(sendAction('', 'assistant', false)).toBe('none')
     expect(sendAction('', undefined, false)).toBe('none')
+  })
+})
+
+describe('canStop', () => {
+  it('ignores Stop right after a send (a double tap) and allows it after the grace period', () => {
+    expect(canStop(1000 + 150, 1000)).toBe(false)
+    expect(canStop(1000 + STOP_GRACE_MS, 1000)).toBe(true)
+  })
+  it('allows Stop for a reply this composer did not start', () => {
+    expect(canStop(1000, -Infinity)).toBe(true)
   })
 })
 
