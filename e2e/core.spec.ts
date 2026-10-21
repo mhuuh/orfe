@@ -56,7 +56,15 @@ test('reroll creates a version and stop keeps partial text', async ({ page }) =>
   await expect(page.getByText(PARTIAL)).toBeVisible()
   await page.getByRole('button', { name: 'Stop' }).click()
   await expect(page.getByText('Stopped', { exact: true })).toBeVisible()
+  await expect(page.getByRole('button', { name: 'Stop' })).toHaveCount(0)
+  await expect(page.getByRole('button', { name: /^Send/ })).toBeDisabled() // empty field again, idle
   await expect(page.getByText(PARTIAL)).toBeVisible()
+
+  // Reload: the partial text and the note must come from storage (status 'stopped'), not from live state.
+  await page.reload()
+  await expect(page.getByText(PARTIAL)).toBeVisible()
+  await expect(page.getByText('Stopped', { exact: true })).toBeVisible()
+  await expect(page.getByText('Interrupted', { exact: true })).toHaveCount(0)
 })
 
 test('survives reload', async ({ page }) => {
