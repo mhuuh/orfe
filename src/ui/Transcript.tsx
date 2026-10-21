@@ -9,8 +9,25 @@ import { UserMessage } from './UserMessage'
 import { useCatalog } from './useCatalog'
 import css from './Transcript.module.css'
 
-/** Within this distance of the bottom, the view follows new text. */
+/** Coming back down to within this distance of the bottom makes the view follow new text again. */
 const STICK_PX = 80
+/** Closer than this counts as at the bottom (scrollTop can be fractional on phones). */
+const BOTTOM_PX = 1
+
+/**
+ * Whether the view follows new text after a scroll. `dist` is the distance from the bottom,
+ * `delta` the change in scrollTop (negative = up). Any upward scroll lets go, so a reader
+ * scrolling up a little while text streams is not pulled back down.
+ */
+export function followAfterScroll(dist: number, delta: number, following: boolean): boolean {
+  if (dist <= BOTTOM_PX) return true
+  if (delta < 0) return false
+  if (delta > 0) return dist <= STICK_PX
+  return following && dist <= STICK_PX
+}
+
+const UP_KEYS = new Set(['PageUp', 'ArrowUp', 'Home'])
+const TOUCH_SLOP_PX = 8
 
 export function Transcript({ conversationId }: { conversationId: string | null }) {
   const data = useLiveQuery(async () => {
@@ -32,6 +49,8 @@ export function Transcript({ conversationId }: { conversationId: string | null }
   const stick = useRef(true)
   /** The scroller height the last resize callback saw. */
   const viewH = useRef(0)
+  const lastTop = useRef(0)
+  const touchY = useRef<number | null>(null)
   const seen = useRef<{ id: string | null; count: number }>({ id: null, count: 0 })
 
   const toBottom = useCallback(() => {
@@ -79,10 +98,18 @@ export function Transcript({ conversationId }: { conversationId: string | null }
   const onScroll = () => {
     const el = scroller.current
     if (!el) return
+    const delta = el.scrollTop - lastTop.current
+    lastTop.current = el.scrollTop
     // The view just changed height (keyboard, rotation): this scroll is the browser's, not the reader's.
     // Leave "stick" alone so the resize callback can pin the bottom again.
     if (el.clientHeight !== viewH.current) return
-    stick.current = el.scrollHeight - el.scrollTop - el.clientHeight <= STICK_PX
+    stick.current = followAfterScroll(el.scrollHeight - el.scrollTop - el.clientHeight, delta, stick.current)
+  }
+
+  // An upward gesture lets go at once, before its scroll event, so a resize in between cannot snap back.
+  // Nothing above to scroll to (short chat): ignore, or nothing would turn following back on.
+  const letGo = () => {
+    if ((scroller.current?.scrollTop ?? 0) > 0) stick.current = false
   }
 
   const messages = data?.id === conversationId ? (data?.messages ?? []) : []
@@ -121,6 +148,21 @@ export function Transcript({ conversationId }: { conversationId: string | null }
       className={css.transcript}
       aria-label="Conversation"
       onScroll={onScroll}
+      onWheel={(e) => {
+        if (e.deltaY < 0) letGo()
+      }}
+      onTouchStart={(e) => {
+        touchY.current = e.touches[0]?.clientY ?? null
+      }}
+      onTouchMove={(e) => {
+        const y = e.touches[0]?.clientY
+        if (y === undefined) return
+        // Finger moving down the screen scrolls the text up. A few pixels of tap jitter do not count.
+        if (touchY.current !== null && y - touchY.current > TOUCH_SLOP_PX) letGo()
+      }}
+      onKeyDown={(e) => {
+        if (UP_KEYS.has(e.key)) letGo()
+      }}
       onClick={(e) => {
         if (selected && !(e.target as HTMLElement).closest('article')) setSelected(null)
       }}
