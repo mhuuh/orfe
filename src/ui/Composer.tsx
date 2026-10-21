@@ -235,7 +235,7 @@ export function Composer({ conversationId: id }: { conversationId: string }) {
             </button>
           )}
           <button
-            className={`${css.send} ${action === 'stop' ? css.stop : ''}`}
+            className={css.send}
             disabled={action === 'none'}
             aria-label={label}
             title={label}
