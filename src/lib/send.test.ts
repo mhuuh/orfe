@@ -1,7 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { fallbackModelInfo, type ModelInfo } from './catalog'
 import { db, newId, storage } from './storage'
-import { errorText, generate, patchVersion, isGenerating, recoverInterrupted, sendUserMessage, stop } from './send'
+import { deleteChat, errorText, generate, patchVersion, isGenerating, recoverInterrupted, restoreChat, sendUserMessage, stop } from './send'
 import type { Version } from './types'
 
 const enc = new TextEncoder()
@@ -380,6 +380,43 @@ describe('generate', () => {
     const v = msgs.at(-1)!.versions[0]
     expect(msgs.at(-1)!.role === 'assistant' ? v.status : 'stopped').toBe('stopped')
     expect(isGenerating(convId)).toBe(false)
+  })
+
+  it('deleting a chat stops its stream; undo brings it back settled, not streaming', async () => {
+    // A stream that hangs after one chunk until aborted.
+    vi.stubGlobal('fetch', async (_u: string, init: RequestInit) => {
+      let sent = false
+      return new Response(
+        new ReadableStream<Uint8Array>({
+          pull(c) {
+            if (!sent) {
+              sent = true
+              c.enqueue(enc.encode(ev({ choices: [{ delta: { content: 'part' } }] })))
+              return
+            }
+            return new Promise<void>((_, rej) =>
+              init.signal!.addEventListener('abort', () => rej(new DOMException('aborted', 'AbortError'))),
+            )
+          },
+        }),
+        { status: 200 },
+      )
+    })
+    await sendUserMessage(convId, 'hi', { reply: false })
+    const p = generate(convId, { kind: 'new' }, A)
+    await vi.waitFor(async () => expect((await lastMsg()).role).toBe('assistant'))
+    const undo = await deleteChat(convId)
+    await p
+    expect(isGenerating(convId)).toBe(false)
+    expect(await storage.getConversation(convId)).toBeUndefined()
+    expect(await storage.listMessages(convId)).toEqual([])
+    expect(undo).not.toBeNull()
+    expect(undo!.messages.flatMap((m) => m.versions).some((v) => v.status === 'streaming')).toBe(false)
+    await restoreChat(undo!)
+    const back = await storage.listMessages(convId)
+    expect(back.map((m) => m.role)).toEqual(['user', 'assistant'])
+    expect(back[1].versions[0].status).toBe('stopped')
+    expect(await deleteChat('missing')).toBeNull()
   })
 
   it('patchVersion keeps a concurrent activeVersion change', async () => {

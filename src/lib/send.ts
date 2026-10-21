@@ -2,7 +2,8 @@ import { fallbackModelInfo, type ModelInfo } from './catalog'
 import { buildOutgoing } from './normalise'
 import { streamChat, type OutMessage, type StreamEvent } from './openrouter'
 import { db, newId, storage } from './storage'
-import type { ContentPart, Conversation, Reasoning, Usage, Version } from './types'
+import type { ContentPart, Conversation, Message, Reasoning, Usage, Version } from './types'
+import { settled } from './versions'
 
 const WRITE_INTERVAL_MS = 200
 const controllers = new Map<string, AbortController>()
@@ -28,6 +29,31 @@ export function isGenerating(conversationId: string): boolean {
 
 export function stop(conversationId: string): void {
   controllers.get(conversationId)?.abort()
+}
+
+export interface ChatSnapshot {
+  conversation: Conversation
+  messages: Message[]
+}
+
+/**
+ * Stops the chat's stream, then deletes it. Returns what Undo puts back, with any
+ * streaming version marked stopped (it would otherwise block Reroll/Continue).
+ */
+export async function deleteChat(id: string): Promise<ChatSnapshot | null> {
+  stop(id)
+  const conversation = await storage.getConversation(id)
+  if (!conversation) return null
+  const messages = (await storage.listMessages(id)).map(settled)
+  await storage.deleteConversation(id)
+  return { conversation, messages }
+}
+
+export async function restoreChat(s: ChatSnapshot): Promise<void> {
+  await db.transaction('rw', db.conversations, db.messages, async () => {
+    await db.conversations.put(s.conversation)
+    await db.messages.bulkPut(s.messages)
+  })
 }
 
 export async function recoverInterrupted(): Promise<number> {

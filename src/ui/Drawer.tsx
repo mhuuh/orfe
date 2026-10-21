@@ -1,6 +1,7 @@
 import { useRef, useState } from 'react'
 import { useLiveQuery } from 'dexie-react-hooks'
-import { db, storage } from '../lib/storage'
+import { deleteChat, restoreChat } from '../lib/send'
+import { storage } from '../lib/storage'
 import { Sheet } from './Sheet'
 import { useToast } from './Toast'
 import css from './Drawer.module.css'
@@ -41,19 +42,9 @@ export function Drawer({ open, onClose, currentId, onSelect, onNew, onSettings }
 
   const remove = async (id: string) => {
     setMenuId(null)
-    const conv = await storage.getConversation(id)
-    if (!conv) return
-    const msgs = await storage.listMessages(id)
-    await storage.deleteConversation(id)
-    toast.show('Chat deleted', {
-      label: 'Undo',
-      run: () => {
-        void db.transaction('rw', db.conversations, db.messages, async () => {
-          await db.conversations.put(conv)
-          await db.messages.bulkPut(msgs)
-        })
-      },
-    })
+    const undo = await deleteChat(id)
+    if (!undo) return
+    toast.show('Chat deleted', { label: 'Undo', run: () => void restoreChat(undo) })
   }
 
   return (
