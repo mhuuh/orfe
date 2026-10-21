@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
-import type { ModelInfo } from './catalog'
+import { fallbackModelInfo, type ModelInfo } from './catalog'
 import { db, newId, storage } from './storage'
 import { errorText, generate, patchVersion, isGenerating, recoverInterrupted, sendUserMessage, stop } from './send'
 import type { Version } from './types'
@@ -327,6 +327,14 @@ describe('generate', () => {
     await storage.updateConversation(convId, { nextEffort: null })
     await sendUserMessage(convId, 'third', { reply: true, model: M })
     expect(bodyOf(f, 2).reasoning).toBeUndefined()
+  })
+
+  it('still sends the chosen effort when the model is an unlisted stand-in (catalog not loaded)', async () => {
+    const f = stubFetch(() => sse(reply('x')))
+    await storage.updateConversation(convId, { nextEffort: 'low' })
+    await sendUserMessage(convId, 'hi', { reply: true, model: fallbackModelInfo('c/reasoner') })
+    expect(bodyOf(f, 0).reasoning).toEqual({ effort: 'low' })
+    expect((await lastMsg()).versions[0].reasoningEffort).toBe('low')
   })
 
   it('throttles intermediate writes to at most one per 200 ms', async () => {

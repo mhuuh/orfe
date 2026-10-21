@@ -125,8 +125,10 @@ async function generateInner(
   const settings = await storage.getSettings()
   const messages = await storage.listMessages(conversationId)
 
-  // Rule 5: send effort only when one is chosen and the model supports it.
-  const effort = conversation.nextEffort !== null && model.efforts !== null ? conversation.nextEffort : undefined
+  // Rule 5: send effort only when one is chosen and the model supports it. For a stand-in
+  // (catalog not loaded) we cannot know, so a chosen effort is still sent rather than dropped.
+  const effort =
+    conversation.nextEffort !== null && (model.efforts !== null || model.unlisted === true) ? conversation.nextEffort : undefined
   // Built before the new version exists, so a continue prefills with the old text.
   const outgoing = buildOutgoing(messages, {
     system: null,

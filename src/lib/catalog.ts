@@ -13,6 +13,8 @@ export interface ModelInfo {
   efforts: string[] | null
   defaultEffort: string | null
   free: boolean
+  /** True for a stand-in: the id is not in the catalog we have (not loaded yet, offline, retired). */
+  unlisted?: boolean
 }
 
 /** A text-only stand-in for a model id that is not in the catalog (offline, retired). */
@@ -29,6 +31,7 @@ export function fallbackModelInfo(id: string): ModelInfo {
     efforts: null,
     defaultEffort: null,
     free: false,
+    unlisted: true,
   }
 }
 
@@ -120,4 +123,66 @@ export async function loadCatalog(
     if (cached) return { models: cached.value, fetchedAt: cached.at, stale: age > MAX_AGE, error }
     return { models: [], fetchedAt: 0, stale: true, error }
   }
+}
+
+// ---- Shared catalog store (stale-while-revalidate) ----
+// One copy for the whole app, so the composer, transcript and model sheet share
+// one list and one request.
+
+export interface CatalogState {
+  models: ModelInfo[]
+  /** The list is older than an hour (a refresh is running or failed). */
+  stale: boolean
+  error?: string
+}
+
+const EMPTY: CatalogState = { models: [], stale: false }
+let current: CatalogState = EMPTY
+let inflight: Promise<void> | null = null
+const listeners = new Set<() => void>()
+
+function publish(next: CatalogState): void {
+  current = next
+  for (const fn of listeners) fn()
+}
+
+/** The current catalog. The same object until it changes (for useSyncExternalStore). */
+export const getCatalog = (): CatalogState => current
+
+export function subscribeCatalog(fn: () => void): () => void {
+  listeners.add(fn)
+  return () => {
+    listeners.delete(fn)
+  }
+}
+
+/**
+ * Shows the saved list at once, then fetches when it is older than an hour (or `force`).
+ * Callers while a refresh runs get that same refresh.
+ */
+export function refreshCatalog(opts: { force?: boolean } = {}): Promise<void> {
+  if (inflight) return inflight
+  const run = async (): Promise<void> => {
+    const cached = await storage.getCache<ModelInfo[]>(CACHE_KEY)
+    const fresh = cached !== undefined && Date.now() - cached.at <= MAX_AGE
+    if (cached && current.models.length === 0) publish({ models: cached.value, stale: !fresh })
+    if (fresh && !opts.force) return
+    const r = await loadCatalog({ force: true })
+    // On failure loadCatalog falls back to the saved list; keep what we show if it has none.
+    publish({ models: r.models.length > 0 ? r.models : current.models, stale: r.stale, error: r.error })
+  }
+  const p = run()
+    .catch((e: unknown) => publish({ ...current, error: e instanceof Error ? e.message : String(e) }))
+    .finally(() => {
+      inflight = null
+    })
+  inflight = p
+  return p
+}
+
+/** Tests only: forget the in-memory list. */
+export function resetCatalog(): void {
+  current = EMPTY
+  inflight = null
+  listeners.clear()
 }

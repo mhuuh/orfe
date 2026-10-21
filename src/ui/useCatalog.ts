@@ -1,37 +1,18 @@
-import { useCallback, useEffect, useRef, useState } from 'react'
-import { fallbackModelInfo, loadCatalog, type ModelInfo } from '../lib/catalog'
+import { useCallback, useEffect, useSyncExternalStore } from 'react'
+import { fallbackModelInfo, getCatalog, refreshCatalog, subscribeCatalog, type CatalogState, type ModelInfo } from '../lib/catalog'
 
-interface CatalogState {
-  models: ModelInfo[]
-  error?: string
-  stale: boolean
-}
-
-/** The model catalog (cached for an hour by `loadCatalog`). `reload` forces a fetch. */
+/**
+ * The model catalog, shared by every caller. The saved list shows at once; a list older
+ * than an hour is refreshed in the background (one request for all callers). `reload` forces a fetch.
+ */
 export function useCatalog(): CatalogState & { reload(): void } {
-  const [state, setState] = useState<CatalogState>({ models: [], stale: false })
-  const seq = useRef(0)
-
-  const load = useCallback((force: boolean) => {
-    const id = ++seq.current
-    void loadCatalog({ force }).then(
-      (r) => {
-        if (id === seq.current) setState({ models: r.models, error: r.error, stale: r.stale })
-      },
-      (e: unknown) => {
-        if (id === seq.current) setState((s) => ({ ...s, error: e instanceof Error ? e.message : String(e) }))
-      },
-    )
-  }, [])
+  const state = useSyncExternalStore(subscribeCatalog, getCatalog)
 
   useEffect(() => {
-    load(false)
-    return () => {
-      seq.current++
-    }
-  }, [load])
+    void refreshCatalog()
+  }, [])
 
-  const reload = useCallback(() => load(true), [load])
+  const reload = useCallback(() => void refreshCatalog({ force: true }), [])
   return { ...state, reload }
 }
 
