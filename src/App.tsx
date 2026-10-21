@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState } from 'react'
+import { useCallback, useEffect, useRef, useState } from 'react'
 import { useLiveQuery } from 'dexie-react-hooks'
 import { storage } from './lib/storage'
 import { Header } from './ui/Header'
@@ -33,6 +33,9 @@ export function App() {
   const [id, go] = useConversationId()
   const [drawer, setDrawer] = useState(false)
   const [settingsOpen, setSettingsOpen] = useState(false)
+  // Id of a chat we just created that the live query has not delivered yet.
+  const pendingId = useRef<string | null>(null)
+  const creating = useRef(false)
 
   useEffect(() => {
     if (settings) applyTheme(settings.themeMode)
@@ -41,13 +44,30 @@ export function App() {
   // Open the requested chat; otherwise the most recent; otherwise create one.
   useEffect(() => {
     if (!convs || !settings?.key) return
+    if (pendingId.current) {
+      if (!convs.some((c) => c.id === pendingId.current)) return
+      pendingId.current = null
+    }
     if (id && convs.some((c) => c.id === id)) return
-    if (convs.length > 0) go(convs[0].id, true)
-    else void storage.createConversation().then((c) => go(c.id, true))
+    if (convs.length > 0) {
+      go(convs[0].id, true)
+    } else if (!creating.current) {
+      creating.current = true
+      void storage
+        .createConversation()
+        .then((c) => {
+          pendingId.current = c.id
+          go(c.id, true)
+        })
+        .finally(() => {
+          creating.current = false
+        })
+    }
   }, [convs, id, settings?.key, go])
 
   const newChat = async () => {
     const c = await storage.createConversation()
+    pendingId.current = c.id
     setDrawer(false)
     go(c.id)
   }

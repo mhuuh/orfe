@@ -6,13 +6,22 @@ import '@fontsource-variable/newsreader'
 import './styles/tokens.css'
 import './styles/base.css'
 import { App } from './App'
-import { storage } from './lib/storage'
+import { DEFAULT_SETTINGS, storage } from './lib/storage'
 import { recoverInterrupted } from './lib/send'
 import { applyTheme } from './ui/theme'
 
 async function start() {
-  await recoverInterrupted()
-  applyTheme((await storage.getSettings()).themeMode)
+  try {
+    await recoverInterrupted()
+  } catch (e) {
+    console.error('recoverInterrupted failed', e)
+  }
+  try {
+    applyTheme((await storage.getSettings()).themeMode)
+  } catch (e) {
+    console.error('could not load settings; using defaults', e)
+    applyTheme(DEFAULT_SETTINGS.themeMode)
+  }
   createRoot(document.getElementById('root')!).render(
     <StrictMode>
       <App />
