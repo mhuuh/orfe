@@ -1,0 +1,22 @@
+.divider {
+  display: flex;
+  align-items: center;
+  gap: var(--s2);
+  margin: var(--s6) 0 var(--s4);
+  font: 400 11px/16px var(--font-mono);
+  color: var(--mute);
+}
+.divider::before,
+.divider::after {
+  content: '';
+  flex: 1;
+  height: 1px;
+  background: var(--line);
+}
+.label {
+  flex: none;
+  max-width: 70%;
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+}

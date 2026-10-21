@@ -1,4 +1,4 @@
-import type { ModelInfo } from './catalog'
+import { fallbackModelInfo, type ModelInfo } from './catalog'
 import { buildOutgoing } from './normalise'
 import { streamChat, type OutMessage, type StreamEvent } from './openrouter'
 import { db, newId, storage } from './storage'
@@ -43,22 +43,6 @@ export async function recoverInterrupted(): Promise<number> {
   return count
 }
 
-function fallbackModel(id: string): ModelInfo {
-  return {
-    id,
-    name: id,
-    created: 0,
-    contextLength: 0,
-    priceIn: 0,
-    priceOut: 0,
-    inputModalities: ['text'],
-    outputModalities: ['text'],
-    efforts: null,
-    defaultEffort: null,
-    free: false,
-  }
-}
-
 /**
  * Appends a user message. When `reply` is set, asks for an assistant turn.
  * The UI passes the resolved `model`; without it a text-only stand-in for
@@ -78,7 +62,7 @@ export async function sendUserMessage(
   if (!opts.reply) return
   const c = await storage.getConversation(conversationId)
   if (!c) return
-  await generate(conversationId, { kind: 'new' }, opts.model ?? fallbackModel(c.nextModel))
+  await generate(conversationId, { kind: 'new' }, opts.model ?? fallbackModelInfo(c.nextModel))
 }
 
 /** Visible thinking text from reasoning_details when the plain text field is empty. */

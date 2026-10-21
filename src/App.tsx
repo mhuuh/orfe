@@ -6,6 +6,7 @@ import { Drawer } from './ui/Drawer'
 import { Settings } from './ui/Settings'
 import { KeySetup } from './ui/KeySetup'
 import { ToastProvider } from './ui/Toast'
+import { Transcript } from './ui/Transcript'
 import { applyTheme } from './ui/theme'
 import css from './App.module.css'
 
@@ -89,9 +90,7 @@ export function App() {
     <ToastProvider>
       <div className={css.app}>
         <Header conversationId={current} onMenu={() => setDrawer(true)} />
-        <main className={css.transcript} aria-label="Conversation">
-          {/* Task 8 fills the transcript. */}
-        </main>
+        <Transcript conversationId={current} />
         <div className={css.composerSlot}>{/* Task 9 mounts the composer here. */}</div>
         <Drawer
           open={drawer}

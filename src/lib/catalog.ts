@@ -15,6 +15,23 @@ export interface ModelInfo {
   free: boolean
 }
 
+/** A text-only stand-in for a model id that is not in the catalog (offline, retired). */
+export function fallbackModelInfo(id: string): ModelInfo {
+  return {
+    id,
+    name: id,
+    created: 0,
+    contextLength: 0,
+    priceIn: 0,
+    priceOut: 0,
+    inputModalities: ['text'],
+    outputModalities: ['text'],
+    efforts: null,
+    defaultEffort: null,
+    free: false,
+  }
+}
+
 const CACHE_KEY = 'catalog'
 const MAX_AGE = 60 * 60 * 1000
 const NON_CHAT = new Set(['embeddings', 'rerank', 'decisions', 'transcription'])

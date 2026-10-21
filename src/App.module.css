@@ -6,12 +6,6 @@
   margin: 0 auto;
   overflow: hidden;
 }
-.transcript {
-  flex: 1;
-  min-height: 0;
-  overflow-y: auto;
-  padding: var(--s2) 20px;
-}
 .composerSlot {
   flex: none;
   padding-bottom: env(safe-area-inset-bottom);

@@ -118,4 +118,17 @@ describe('storage', () => {
     expect(new Set(list.map((m) => m.order)).size).toBe(3)
     expect(list.map((m) => m.id).slice(1)).toEqual([removed.id, newer.id])
   })
+
+  it('mutateMessage applies the change to the stored copy, not a stale one', async () => {
+    const c = await storage.createConversation()
+    const m = await storage.appendMessage(c.id, 'assistant', { ...v('a'), status: 'streaming' })
+    const stale = { ...m }
+    await storage.putMessage({ ...m, versions: [{ ...m.versions[0], status: 'done' }] })
+    const next = await storage.mutateMessage(stale.id, (x) => ({ ...x, pinned: true }))
+    expect(next?.versions[0].status).toBe('done')
+    const stored = await db.messages.get(m.id)
+    expect(stored?.pinned).toBe(true)
+    expect(stored?.versions[0].status).toBe('done')
+    expect(await storage.mutateMessage('missing', (x) => x)).toBeUndefined()
+  })
 })

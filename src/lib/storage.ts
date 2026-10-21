@@ -31,6 +31,8 @@ export interface Storage {
   putMessage(m: Message): Promise<void>
   deleteMessage(id: string): Promise<Message | undefined>
   restoreMessage(m: Message): Promise<void>
+  /** Re-reads the message inside a write transaction and stores what `fn` returns. */
+  mutateMessage(id: string, fn: (m: Message) => Message): Promise<Message | undefined>
   appendMessage(conversationId: string, role: Role, first: Version): Promise<Message>
   getSettings(): Promise<Settings>
   setSettings(patch: Partial<Settings>): Promise<void>
@@ -108,6 +110,15 @@ export const storage: Storage = {
         await db.messages.bulkPut(later.map((x) => ({ ...x, order: x.order + 1 })))
       }
       await db.messages.put(m)
+    })
+  },
+  async mutateMessage(id, fn) {
+    return db.transaction('rw', db.messages, async () => {
+      const m = await db.messages.get(id)
+      if (!m) return undefined
+      const next = fn(m)
+      await db.messages.put(next)
+      return next
     })
   },
   async appendMessage(conversationId, role, first) {
