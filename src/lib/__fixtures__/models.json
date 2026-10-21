@@ -1,0 +1,10 @@
+[
+  {"id":"anthropic/claude-sonnet-5.5","name":"Anthropic: Claude Sonnet 5.5","created":1792065600,"context_length":1000000,"pricing":{"prompt":"0.000003","completion":"0.000015"},"architecture":{"input_modalities":["text","image"],"output_modalities":["text"]},"reasoning":{"supported_efforts":["low","medium","high"],"default_effort":"medium"}},
+  {"id":"openai/gpt-6","name":"OpenAI: GPT-6","created":1790942400,"context_length":400000,"pricing":{"prompt":"0.000002","completion":"0.00001"},"architecture":{"input_modalities":["text","image"],"output_modalities":["text"]},"reasoning":{"supported_efforts":["minimal","low","high"],"default_effort":"low"}},
+  {"id":"google/imagen-5","name":"Google: Imagen 5","created":1789905600,"context_length":8192,"pricing":{"prompt":"0.000001","completion":"0.000004"},"architecture":{"input_modalities":["text"],"output_modalities":["image"]}},
+  {"id":"openai/text-embedding-4","name":"OpenAI: Text Embedding 4","created":1789905600,"context_length":8192,"pricing":{"prompt":"0.0000001","completion":"0"},"architecture":{"input_modalities":["text"],"output_modalities":["embeddings"]}},
+  {"id":"cohere/rerank-4","name":"Cohere: Rerank 4","created":1785931200,"context_length":4096,"pricing":{"prompt":"0.000002","completion":"0"},"architecture":{"input_modalities":["text"],"output_modalities":["rerank"]}},
+  {"id":"openrouter/auto","name":"Auto Router","created":1788091200,"context_length":2000000,"pricing":{"prompt":"-1","completion":"-1"},"architecture":{"input_modalities":["text","image"],"output_modalities":["text"]}},
+  {"id":"meta/llama-5-70b:free","name":"Meta: Llama 5 70B (free)","created":1785931200,"context_length":131072,"pricing":{"prompt":"0","completion":"0"},"architecture":{"input_modalities":["text"],"output_modalities":["text"]}},
+  {"id":"acme/router-decisions","name":"Acme: Decisions","created":1788091200,"context_length":4096,"pricing":{"prompt":"0.000001","completion":"0.000001"},"architecture":{"input_modalities":["text"],"output_modalities":["decisions"]}}
+]
