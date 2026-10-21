@@ -1,6 +1,6 @@
 // @vitest-environment node
 import { afterEach, describe, expect, it, vi } from 'vitest'
-import { streamChat, type ChatRequest, type StreamEvent } from './openrouter'
+import { fetchKeyInfo, fetchModels, streamChat, type ChatRequest, type StreamEvent } from './openrouter'
 
 const enc = new TextEncoder()
 
@@ -199,5 +199,25 @@ describe('streamChat', () => {
         usage: { promptTokens: 10, completionTokens: 5, cachedTokens: 4, cacheWriteTokens: 0, reasoningTokens: 2, cost: 0.001 },
       },
     ])
+  })
+})
+
+describe('GET requests', () => {
+  it('send attribution headers but no Content-Type (there is no body)', async () => {
+    const fetchMock = vi.fn(async (url: string, _init: RequestInit) =>
+      new Response(JSON.stringify(url.includes('/key') ? { data: { usage: 1 } } : { data: [] }), { status: 200 }),
+    )
+    vi.stubGlobal('fetch', fetchMock)
+    await fetchModels()
+    await fetchKeyInfo('sk-test')
+    for (const [, init] of fetchMock.mock.calls) {
+      const h = init.headers as Record<string, string>
+      expect('Content-Type' in h).toBe(false)
+      expect(h['HTTP-Referer']).toBe('https://mhuuh.github.io/orfe/')
+      expect(h['X-OpenRouter-Title']).toBe('ORFE')
+      expect(h['X-OpenRouter-App-Visibility']).toBe('hidden')
+    }
+    expect((fetchMock.mock.calls[0][1].headers as Record<string, string>)['Authorization']).toBeUndefined()
+    expect((fetchMock.mock.calls[1][1].headers as Record<string, string>)['Authorization']).toBe('Bearer sk-test')
   })
 })

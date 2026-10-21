@@ -33,13 +33,14 @@ export interface RawModel {
   reasoning?: { supported_efforts?: string[]; default_effort?: string }
 }
 
-export function headers(key?: string | null): Record<string, string> {
+/** Attribution headers for every call. `json` adds Content-Type, for requests with a JSON body only. */
+export function headers(key?: string | null, json = false): Record<string, string> {
   const h: Record<string, string> = {
-    'Content-Type': 'application/json',
     'HTTP-Referer': 'https://mhuuh.github.io/orfe/',
     'X-OpenRouter-Title': 'ORFE',
     'X-OpenRouter-App-Visibility': 'hidden',
   }
+  if (json) h['Content-Type'] = 'application/json'
   if (key) h['Authorization'] = `Bearer ${key}`
   return h
 }
@@ -128,7 +129,7 @@ export async function* streamChat(req: ChatRequest, key: string, signal: AbortSi
   try {
     res = await fetch(`${API}/chat/completions`, {
       method: 'POST',
-      headers: headers(key),
+      headers: headers(key, true),
       body: JSON.stringify(body),
       signal,
     })
