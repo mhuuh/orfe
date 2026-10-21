@@ -6,6 +6,7 @@ import type { ContentPart, Conversation, Reasoning, Usage, Version } from './typ
 
 const WRITE_INTERVAL_MS = 200
 const controllers = new Map<string, AbortController>()
+const NO_CONNECTION = "Couldn't reach OpenRouter."
 
 export type GenerateTarget =
   | { kind: 'new' }
@@ -16,6 +17,8 @@ export function errorText(code: number | undefined, message: string): string {
   if (code === 401) return 'Your OpenRouter key was rejected. Check it in Settings.'
   if (code === 402) return 'Out of credits on OpenRouter.'
   if (code === 429) return 'Rate limited. Try again in a moment.'
+  // Chrome "Failed to fetch" / "network error", Safari "Load failed", Firefox "NetworkError when…".
+  if (code === undefined && /failed to fetch|network ?error|load failed/i.test(message)) return NO_CONNECTION
   return message
 }
 
@@ -76,6 +79,8 @@ function textFromDetails(details: unknown[]): string {
   }
   return out
 }
+
+const versionHasText = (content: ContentPart[]): boolean => content.some((p) => p.type === 'text' && p.text.trim() !== '')
 
 function addUsage(a: Usage, b: Usage, sign: 1 | -1 = 1): Usage {
   return {
@@ -250,7 +255,9 @@ async function run(a: RunArgs): Promise<void> {
         break
       }
       case 'error':
-        errored = errorText(e.code, e.message)
+        // A dropped connection after some text is an interruption: keep the text and offer Continue.
+        // Not an error then: the version ends 'interrupted' below, as no finish arrived.
+        if (!(e.kind === 'network' && versionHasText(content))) errored = e.kind === 'network' ? NO_CONNECTION : errorText(e.code, e.message)
         return false
     }
     return true

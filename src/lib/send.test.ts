@@ -280,6 +280,38 @@ describe('generate', () => {
     expect(v.content).toEqual([{ type: 'text', text: 'cut of' }])
   })
 
+  it('a connection drop after some text ends interrupted (Continue), keeping the text', async () => {
+    let pulls = 0
+    stubFetch(
+      () =>
+        new Response(
+          new ReadableStream<Uint8Array>({
+            pull(c) {
+              if (pulls++ === 0) c.enqueue(enc.encode(ev({ choices: [{ delta: { content: 'half a rep' } }] })))
+              else c.error(new TypeError('network error'))
+            },
+          }),
+          { status: 200 },
+        ),
+    )
+    await sendUserMessage(convId, 'hi', { reply: true, model: A })
+    const v = (await lastMsg()).versions[0]
+    expect(v.status).toBe('interrupted')
+    expect(v.error).toBeUndefined()
+    expect(v.content).toEqual([{ type: 'text', text: 'half a rep' }])
+  })
+
+  it('a connection failure before any text is an error with a readable message', async () => {
+    vi.stubGlobal('fetch', vi.fn(async () => Promise.reject(new TypeError('Failed to fetch'))))
+    await sendUserMessage(convId, 'hi', { reply: true, model: A })
+    const v = (await lastMsg()).versions[0]
+    expect(v.status).toBe('error')
+    expect(v.error).toBe("Couldn't reach OpenRouter.")
+    expect(errorText(undefined, 'network error')).toBe("Couldn't reach OpenRouter.")
+    expect(errorText(undefined, 'Load failed')).toBe("Couldn't reach OpenRouter.")
+    expect(errorText(undefined, 'NetworkError when attempting to fetch resource.')).toBe("Couldn't reach OpenRouter.")
+  })
+
   it('sends reasoning effort only when set and the model supports efforts', async () => {
     const f = stubFetch(() => sse(reply('x')))
     const M = model('c/reasoner', { efforts: ['low', 'high'], defaultEffort: 'low' })

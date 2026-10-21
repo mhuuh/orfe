@@ -123,7 +123,23 @@ describe('streamChat', () => {
 
   it('yields a network error event when fetch rejects', async () => {
     vi.stubGlobal('fetch', vi.fn(async () => Promise.reject(new TypeError('Failed to fetch'))))
-    expect(await run()).toEqual([{ type: 'error', message: 'Failed to fetch' }])
+    expect(await run()).toEqual([{ type: 'error', kind: 'network', message: 'Failed to fetch' }])
+  })
+
+  it('tags a connection drop mid-stream as a network error, after the text that arrived', async () => {
+    let pulls = 0
+    const body = new ReadableStream<Uint8Array>({
+      pull(c) {
+        // First read gives a chunk; the next one fails like Android dropping the socket.
+        if (pulls++ === 0) c.enqueue(enc.encode(ev({ choices: [{ delta: { content: 'half' } }] })))
+        else c.error(new TypeError('network error'))
+      },
+    })
+    vi.stubGlobal('fetch', vi.fn(async () => new Response(body, { status: 200 })))
+    expect(await run()).toEqual([
+      { type: 'content', text: 'half' },
+      { type: 'error', kind: 'network', message: 'network error' },
+    ])
   })
 
   it('rethrows AbortError so the caller sees the abort', async () => {

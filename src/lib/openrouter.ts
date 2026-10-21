@@ -21,7 +21,8 @@ export type StreamEvent =
   | { type: 'usage'; usage: Usage }
   | { type: 'meta'; generationId?: string; provider?: string }
   | { type: 'finish'; reason: string }
-  | { type: 'error'; message: string; code?: number }
+  /** `kind: 'network'`: the connection failed or dropped (no HTTP status), not a reply from OpenRouter. */
+  | { type: 'error'; message: string; code?: number; kind?: 'network' }
 
 export interface RawModel {
   id: string
@@ -135,7 +136,7 @@ export async function* streamChat(req: ChatRequest, key: string, signal: AbortSi
     })
   } catch (e) {
     if (isAbort(e)) throw e
-    yield { type: 'error', message: e instanceof Error ? e.message : 'Network error' }
+    yield { type: 'error', kind: 'network', message: e instanceof Error ? e.message : 'Network error' }
     return
   }
 
@@ -197,7 +198,8 @@ export async function* streamChat(req: ChatRequest, key: string, signal: AbortSi
     }
   } catch (e) {
     if (isAbort(e)) throw e
-    yield { type: 'error', message: e instanceof Error ? e.message : 'Stream failed' }
+    // A read that throws is the connection dropping (Android kills it when the app is hidden).
+    yield { type: 'error', kind: 'network', message: e instanceof Error ? e.message : 'Stream failed' }
   }
 }
 
