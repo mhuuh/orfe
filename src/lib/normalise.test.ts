@@ -113,6 +113,50 @@ describe('buildOutgoing', () => {
     expect(out).toEqual([{ role: 'user', content: 'q' }])
   })
 
+  it('reroll of a message at or before the window start sends everything before it', () => {
+    const ms = [
+      msg('m1', 'user', 'u1'),
+      msg('m2', 'assistant', 'a2'),
+      msg('m3', 'user', 'u3'),
+      msg('m4', 'assistant', 'a4'),
+      msg('m5', 'user', 'u5'),
+    ]
+    expect(buildOutgoing(ms, { ...base, windowStartId: 'm4', upToId: 'm2' })).toEqual([
+      { role: 'user', content: 'u1' },
+    ])
+    expect(buildOutgoing(ms, { ...base, windowStartId: 'm4', upToId: 'm4' })).toEqual([
+      { role: 'user', content: 'u1' },
+      { role: 'assistant', content: 'a2' },
+      { role: 'user', content: 'u3' },
+    ])
+  })
+
+  it('media-only message that maps to a stand-in is kept', () => {
+    const media: ContentPart = { type: 'media', blobId: 'b1', mime: 'image/png', name: 'x.png' }
+    expect(buildOutgoing([msg('m1', 'user', [media])], base)).toEqual([
+      { role: 'user', content: '[image not shown to this model: "x.png"]' },
+    ])
+  })
+
+  it('image then text order survives a merge', () => {
+    const media: ContentPart = { type: 'media', blobId: 'b1', mime: 'image/png', name: 'x.png' }
+    const out = buildOutgoing([msg('m1', 'user', [media]), msg('m2', 'user', 'after')], {
+      ...base,
+      inputModalities: ['image'],
+      blobUrl: () => 'data:image/png;base64,Z',
+    })
+    expect(out[0].content).toEqual([
+      { type: 'image_url', image_url: { url: 'data:image/png;base64,Z' } },
+      { type: 'text', text: 'after' },
+    ])
+  })
+
+  it('whitespace-only system is omitted', () => {
+    expect(buildOutgoing([msg('m1', 'user', 'hi')], { ...base, system: '  \n ' })).toEqual([
+      { role: 'user', content: 'hi' },
+    ])
+  })
+
   it('image becomes image_url for image-capable model and a stand-in otherwise', () => {
     const media: ContentPart = { type: 'media', blobId: 'b1', mime: 'image/jpeg', name: 'sunset.jpg' }
     const ms = [msg('m1', 'user', [{ type: 'text', text: 'look' }, media])]

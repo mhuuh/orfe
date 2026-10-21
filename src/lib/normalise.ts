@@ -10,9 +10,9 @@ export interface BuildOptions {
   blobUrl: (blobId: string) => string | undefined
 }
 
-type Role = 'user' | 'assistant'
+type TurnRole = 'user' | 'assistant'
 interface Turn {
-  role: Role
+  role: TurnRole
   parts: OutPart[]
 }
 
