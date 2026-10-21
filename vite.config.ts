@@ -24,7 +24,12 @@ export default defineConfig({
           { src: 'icon.svg', sizes: 'any', type: 'image/svg+xml' },
         ],
       },
-      workbox: { navigateFallback: '/orfe/index.html' },
+      workbox: {
+        navigateFallback: '/orfe/index.html',
+        // Fonts are bundled for offline use. woff too: geist-mono's symbols2 subset ships only as woff.
+        // Icons are added from includeAssets and the manifest, so they are not globbed again.
+        globPatterns: ['**/*.{js,css,html,woff2,woff}'],
+      },
     }),
   ],
 })
