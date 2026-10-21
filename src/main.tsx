@@ -1,4 +1,5 @@
 import { StrictMode } from 'react'
+import { registerSW } from 'virtual:pwa-register'
 import { createRoot } from 'react-dom/client'
 import '@fontsource-variable/geist'
 import '@fontsource/geist-mono/400.css'
@@ -30,4 +31,34 @@ async function start() {
   )
 }
 
+/**
+ * Registers the service worker. An installed app is rarely cold-started, so it also asks
+ * for an update each time it comes back to the foreground. (autoUpdate: a new version
+ * activates and the page reloads.)
+ */
+function registerServiceWorker() {
+  registerSW({
+    immediate: true,
+    onRegisteredSW(_url, registration) {
+      if (!registration) return
+      document.addEventListener('visibilitychange', () => {
+        if (document.visibilityState === 'visible') registration.update().catch(() => {})
+      })
+    },
+  })
+}
+
+/** Ask the browser not to evict our IndexedDB under storage pressure. Never blocks start-up. */
+function requestPersistentStorage() {
+  try {
+    void navigator.storage
+      ?.persist?.()
+      .catch(() => {})
+  } catch {
+    // Not supported: nothing to do.
+  }
+}
+
 void start()
+registerServiceWorker()
+requestPersistentStorage()
