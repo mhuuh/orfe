@@ -1,7 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import type { ModelInfo } from './catalog'
 import { db, newId, storage } from './storage'
-import { errorText, generate, isGenerating, recoverInterrupted, sendUserMessage, stop } from './send'
+import { errorText, generate, patchVersion, isGenerating, recoverInterrupted, sendUserMessage, stop } from './send'
 import type { Version } from './types'
 
 const enc = new TextEncoder()
@@ -311,5 +311,52 @@ describe('generate', () => {
     // initial append goes through appendMessage; the burst yields one final write only
     expect(put.mock.calls.length).toBeLessThanOrEqual(2)
     put.mockRestore()
+  })
+
+  it('a second generate while one is starting is ignored and stop cancels the first', async () => {
+    const f = stubFetch(() => sse(reply('x')))
+    await sendUserMessage(convId, 'hi', { reply: false })
+    const p1 = generate(convId, { kind: 'new' }, A)
+    const p2 = generate(convId, { kind: 'new' }, A)
+    expect(isGenerating(convId)).toBe(true)
+    await Promise.all([p1, p2])
+    expect(f).toHaveBeenCalledTimes(1)
+    expect(isGenerating(convId)).toBe(false)
+  })
+
+  it('stop during the initial fetch ends stopped', async () => {
+    vi.stubGlobal(
+      'fetch',
+      (_u: string, init: RequestInit) =>
+        new Promise((_res, rej) => {
+          init.signal!.addEventListener('abort', () => rej(new DOMException('aborted', 'AbortError')))
+        }),
+    )
+    await sendUserMessage(convId, 'hi', { reply: false })
+    const p = generate(convId, { kind: 'new' }, A)
+    stop(convId) // before the controller is otherwise reachable: registered synchronously
+    await p
+    const msgs = await storage.listMessages(convId)
+    const v = msgs.at(-1)!.versions[0]
+    expect(msgs.at(-1)!.role === 'assistant' ? v.status : 'stopped').toBe('stopped')
+    expect(isGenerating(convId)).toBe(false)
+  })
+
+  it('patchVersion keeps a concurrent activeVersion change', async () => {
+    const v0: Version = { id: newId(), content: [], status: 'streaming', createdAt: 1 }
+    const v1: Version = { id: newId(), content: [], status: 'done', createdAt: 2 }
+    const m = await storage.appendMessage(convId, 'assistant', v0)
+    await storage.putMessage({ ...m, versions: [v0, v1] })
+    await Promise.all([
+      patchVersion(m.id, v0.id, { status: 'done' }),
+      db.transaction('rw', db.messages, async () => {
+        const cur = (await db.messages.get(m.id))!
+        await db.messages.put({ ...cur, activeVersion: 1, pinned: true })
+      }),
+    ])
+    const after = (await db.messages.get(m.id))!
+    expect(after.activeVersion).toBe(1)
+    expect(after.pinned).toBe(true)
+    expect(after.versions[0].status).toBe('done')
   })
 })

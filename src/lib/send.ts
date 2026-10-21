@@ -2,7 +2,7 @@ import type { ModelInfo } from './catalog'
 import { buildOutgoing } from './normalise'
 import { streamChat, type OutMessage, type StreamEvent } from './openrouter'
 import { db, newId, storage } from './storage'
-import type { ContentPart, Conversation, Message, Reasoning, Usage, Version } from './types'
+import type { ContentPart, Conversation, Reasoning, Usage, Version } from './types'
 
 const WRITE_INTERVAL_MS = 200
 const controllers = new Map<string, AbortController>()
@@ -104,17 +104,33 @@ function addUsage(a: Usage, b: Usage, sign: 1 | -1 = 1): Usage {
   }
 }
 
-const readMessage = (id: string): Promise<Message | undefined> => db.messages.get(id)
-
 /** Re-reads the message so edits made elsewhere during a stream are not clobbered. */
-async function patchVersion(messageId: string, versionId: string, patch: Partial<Version>): Promise<void> {
-  const m = await readMessage(messageId)
-  if (!m) return
-  await storage.putMessage({ ...m, versions: m.versions.map((v) => (v.id === versionId ? { ...v, ...patch } : v)) })
+export async function patchVersion(messageId: string, versionId: string, patch: Partial<Version>): Promise<void> {
+  await db.transaction('rw', db.messages, async () => {
+    const m = await db.messages.get(messageId)
+    if (!m) return
+    await db.messages.put({ ...m, versions: m.versions.map((v) => (v.id === versionId ? { ...v, ...patch } : v)) })
+  })
 }
 
 export async function generate(conversationId: string, target: GenerateTarget, model: ModelInfo): Promise<void> {
   if (controllers.has(conversationId)) return
+  // Register before any await so a second call (double tap) sees it and stop() works at once.
+  const controller = new AbortController()
+  controllers.set(conversationId, controller)
+  try {
+    await generateInner(conversationId, target, model, controller)
+  } finally {
+    if (controllers.get(conversationId) === controller) controllers.delete(conversationId)
+  }
+}
+
+async function generateInner(
+  conversationId: string,
+  target: GenerateTarget,
+  model: ModelInfo,
+  controller: AbortController,
+): Promise<void> {
   const conversation = await storage.getConversation(conversationId)
   if (!conversation) return
   const settings = await storage.getSettings()
@@ -149,19 +165,17 @@ export async function generate(conversationId: string, target: GenerateTarget, m
   if (target.kind === 'new') {
     messageId = (await storage.appendMessage(conversationId, 'assistant', version)).id
   } else {
-    const m = await readMessage(target.messageId)
-    if (!m) return
-    await storage.putMessage({ ...m, versions: [...m.versions, version], activeVersion: m.versions.length })
-    messageId = m.id
+    const added = await db.transaction('rw', db.messages, async () => {
+      const m = await db.messages.get(target.messageId)
+      if (!m) return false
+      await db.messages.put({ ...m, versions: [...m.versions, version], activeVersion: m.versions.length })
+      return true
+    })
+    if (!added) return
+    messageId = target.messageId
   }
 
-  const controller = new AbortController()
-  controllers.set(conversationId, controller)
-  try {
-    await run({ conversation, stream: settings.streaming, key: settings.key, messageId, version, outgoing, model, effort, initial, controller })
-  } finally {
-    controllers.delete(conversationId)
-  }
+  await run({ conversation, stream: settings.streaming, key: settings.key, messageId, version, outgoing, model, effort, initial, controller })
 }
 
 interface RunArgs {
@@ -181,6 +195,11 @@ async function run(a: RunArgs): Promise<void> {
   const { conversation, messageId, version, controller } = a
   if (a.key === null) {
     await patchVersion(messageId, version.id, { status: 'error', error: errorText(401, 'No OpenRouter key set.') })
+    return
+  }
+
+  if (controller.signal.aborted) {
+    await patchVersion(messageId, version.id, { status: 'stopped' })
     return
   }
 
