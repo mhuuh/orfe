@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { estimateTokens, fingerprint, isCold, planWindow, ttlFor, viewWindow } from './context'
+import { estimateTokens, fingerprint, isCold, planWindow, raisesLimit, ttlFor, viewWindow } from './context'
 import { buildOutgoing } from './normalise'
 import type { OutMessage } from './openrouter'
 import type { ContentPart, ContextSetting, LastRequest, Message, Role } from './types'
@@ -324,5 +324,25 @@ describe('viewWindow', () => {
   it('a deleted start snaps to the next message by order, as when sending', () => {
     const messages = transcript(6).filter((m) => m.id !== 'm3')
     expect(viewWindow({ ...view, messages, windowStartId: 'm3', windowStartOrder: 3 }).startId).toBe('m4')
+  })
+})
+
+describe('raisesLimit', () => {
+  const t = (limit: number, trimTo = 0.7): ContextSetting => ({ mode: 'tokens', limit, trimTo })
+
+  it('is true only when the mode stays and the limit goes up', () => {
+    expect(raisesLimit(t(32000), t(48000))).toBe(true)
+    expect(raisesLimit({ mode: 'messages', limit: 4, trimTo: 0.7 }, { mode: 'messages', limit: 10, trimTo: 0.7 })).toBe(true)
+  })
+
+  it('lowering, keeping the limit, or moving only trim-to never raises', () => {
+    expect(raisesLimit(t(32000), t(16000))).toBe(false)
+    expect(raisesLimit(t(32000), t(32000))).toBe(false)
+    expect(raisesLimit(t(32000, 0.7), t(32000, 0.9))).toBe(false)
+  })
+
+  it('a mode switch is not a raise: the two limits do not compare', () => {
+    expect(raisesLimit(t(32000), { mode: 'messages', limit: 40, trimTo: 0.7 })).toBe(false)
+    expect(raisesLimit({ mode: 'messages', limit: 4, trimTo: 0.7 }, t(1000))).toBe(false)
   })
 })

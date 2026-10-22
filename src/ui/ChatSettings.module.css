@@ -112,3 +112,8 @@
   font-variant-numeric: tabular-nums;
   text-align: right;
 }
+
+/* Reset context window: a plain row, under the context fields when a start is stored. */
+.reset {
+  margin-top: var(--s2);
+}

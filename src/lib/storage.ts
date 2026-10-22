@@ -1,8 +1,12 @@
+import { raisesLimit } from './context'
 import { db } from './db'
 import { hashText } from './hash'
 import type { Conversation, ContextSetting, Message, Prompt, Role, Settings, Usage, Version } from './types'
 
 export { db }
+
+/** The patch that clears a chat's stored window start: the next send starts from the beginning (trimming if needed). */
+export const NO_WINDOW_START = { windowStartMessageId: null, windowStartOrder: null } as const satisfies Partial<Conversation>
 
 export const newId = (): string => crypto.randomUUID()
 
@@ -42,6 +46,17 @@ export interface Storage {
   updateConversation(id: string, patch: Partial<Conversation>): Promise<void>
   /** Re-reads the conversation (defaults filled) inside a write transaction and applies the patch `fn` returns. False if it is gone. */
   mutateConversation(id: string, fn: (c: Conversation) => Partial<Conversation>): Promise<boolean>
+  /**
+   * Sets the chat's own context. `fn` gets the chat's own setting (null = it uses the default) and
+   * the default, and returns the new own setting (null = use the default). When the effective limit
+   * goes up, the stored window start is cleared so trimmed messages can come back. False if it is gone.
+   */
+  setChatContext(
+    id: string,
+    fn: (own: ContextSetting | null, def: ContextSetting) => ContextSetting | null,
+  ): Promise<boolean>
+  /** Patches the default context. Raising its limit clears the stored window start of every chat that uses the default. */
+  setDefaultContext(patch: Partial<ContextSetting>): Promise<void>
   deleteConversation(id: string): Promise<void>
   listMessages(conversationId: string): Promise<Message[]>
   putMessage(m: Message): Promise<void>
@@ -111,6 +126,31 @@ export const storage: Storage = {
       if (!c) return false
       await db.conversations.update(id, fn(withConversationDefaults(c)))
       return true
+    })
+  },
+  async setChatContext(id, fn) {
+    return db.transaction('rw', db.conversations, db.settings, async () => {
+      const row = await db.conversations.get(id)
+      if (!row) return false
+      const c = withConversationDefaults(row)
+      const def = (await getSettings()).context
+      const next = fn(c.context, def)
+      const patch: Partial<Conversation> = { context: next }
+      if (raisesLimit(c.context ?? def, next ?? def)) Object.assign(patch, NO_WINDOW_START)
+      await db.conversations.update(id, patch)
+      return true
+    })
+  },
+  async setDefaultContext(patch) {
+    await db.transaction('rw', db.settings, db.conversations, async () => {
+      const s = await getSettings()
+      const next = { ...s.context, ...patch }
+      // setSettings replaces nested objects: always write the whole context.
+      await db.settings.put({ k: SETTINGS_KEY, value: { ...s, context: next }, at: Date.now() })
+      if (!raisesLimit(s.context, next)) return
+      await db.conversations
+        .filter((c) => (c.context ?? null) === null && ((c.windowStartMessageId ?? null) !== null || (c.windowStartOrder ?? null) !== null))
+        .modify(NO_WINDOW_START)
     })
   },
   async deleteConversation(id) {

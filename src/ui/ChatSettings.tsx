@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useId, useRef, useState, type InputHTMLAttributes } from 'react'
 import { useLiveQuery } from 'dexie-react-hooks'
-import { storage } from '../lib/storage'
+import { NO_WINDOW_START, storage } from '../lib/storage'
 import type { ContextSetting, Conversation, Settings } from '../lib/types'
 import { Sheet } from './Sheet'
 import shared from './Settings.module.css'
@@ -196,9 +196,10 @@ function Body({ conv, settings }: { conv: Conversation; settings: Settings }) {
   const custom = conv.context
   const t = conv.totals
 
-  /** Context writes re-read the chat, so a patch never lands on a stale copy. */
+  /** Context writes re-read the chat, so a patch never lands on a stale copy. Raising the limit clears the stored start. */
   const patchContext = (patch: Partial<ContextSetting>) =>
-    void storage.mutateConversation(id, (c) => ({ context: { ...(c.context ?? settings.context), ...patch } }))
+    void storage.setChatContext(id, (own, def) => ({ ...(own ?? def), ...patch }))
+  const stored = conv.windowStartMessageId !== null || conv.windowStartOrder !== null
 
   return (
     <div className={shared.body}>
@@ -223,11 +224,26 @@ function Body({ conv, settings }: { conv: Conversation; settings: Settings }) {
           id="ctx-default"
           label={`Use default (${contextSummary(settings.context)})`}
           checked={custom === null}
-          onToggle={() =>
-            void storage.mutateConversation(id, (c) => ({ context: c.context === null ? { ...settings.context } : null }))
-          }
+          onToggle={() => void storage.setChatContext(id, (own, def) => (own === null ? { ...def } : null))}
         />
         {custom !== null && <ContextFields value={custom} onChange={patchContext} />}
+        {stored && (
+          <>
+            <div className={`${shared.row} ${css.reset}`}>
+              <span id="ctx-reset">Reset context window</span>
+              <button
+                className={shared.pill}
+                aria-describedby="ctx-reset-note"
+                onClick={() => void storage.mutateConversation(id, () => NO_WINDOW_START)}
+              >
+                Reset
+              </button>
+            </div>
+            <div id="ctx-reset-note" className={shared.meta}>
+              Sends from the beginning again; trims to the limit if needed.
+            </div>
+          </>
+        )}
       </section>
 
       <section className={shared.group}>

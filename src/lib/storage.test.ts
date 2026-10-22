@@ -154,6 +154,68 @@ describe('storage', () => {
   })
 })
 
+describe('raising the context limit lets a trimmed window grow back', () => {
+  const start = { windowStartMessageId: 'm7', windowStartOrder: 7 }
+  const cleared = { windowStartMessageId: null, windowStartOrder: null }
+  const own = (limit: number) => ({ mode: 'tokens' as const, limit, trimTo: 0.7 })
+  const windowOf = async (id: string) => {
+    const c = (await storage.getConversation(id))!
+    return { windowStartMessageId: c.windowStartMessageId, windowStartOrder: c.windowStartOrder }
+  }
+
+  it('setChatContext: raising the chat limit clears the stored start; lowering keeps it', async () => {
+    const c = await storage.createConversation({ ...start, context: own(16000) })
+    await storage.setChatContext(c.id, (cur) => ({ ...cur!, limit: 8000 }))
+    expect(await windowOf(c.id)).toEqual(start)
+    expect((await storage.getConversation(c.id))!.context).toEqual(own(8000))
+    await storage.setChatContext(c.id, (cur) => ({ ...cur!, trimTo: 0.9 }))
+    expect(await windowOf(c.id)).toEqual(start)
+    await storage.setChatContext(c.id, (cur) => ({ ...cur!, limit: 48000 }))
+    expect(await windowOf(c.id)).toEqual(cleared)
+    expect((await storage.getConversation(c.id))!.context).toEqual({ mode: 'tokens', limit: 48000, trimTo: 0.9 })
+  })
+
+  it('setChatContext: the fn gets the default for a chat without its own setting', async () => {
+    const c = await storage.createConversation({ ...start })
+    const seen: unknown[] = []
+    await storage.setChatContext(c.id, (cur, def) => {
+      seen.push(cur, def)
+      return { ...(cur ?? def) }
+    })
+    expect(seen).toEqual([null, { mode: 'tokens', limit: 32000, trimTo: 0.7 }])
+    expect(await windowOf(c.id)).toEqual(start) // same limit: not a raise
+    expect(await storage.setChatContext('missing', () => null)).toBe(false)
+  })
+
+  it('setChatContext: switching back to a higher default is a raise; to a lower one is not', async () => {
+    const low = await storage.createConversation({ ...start, context: own(8000) })
+    await storage.setChatContext(low.id, () => null)
+    expect(await windowOf(low.id)).toEqual(cleared)
+    const high = await storage.createConversation({ ...start, context: own(64000) })
+    await storage.setChatContext(high.id, () => null)
+    expect(await windowOf(high.id)).toEqual(start)
+  })
+
+  it('setDefaultContext: raising clears the start only for chats that use the default', async () => {
+    const inherits = await storage.createConversation({ ...start })
+    const custom = await storage.createConversation({ ...start, context: own(8000) })
+    // A v1 row has no context field at all: it uses the default too.
+    const v1 = await storage.createConversation({ ...start })
+    const { context: _c, ...v1row } = v1
+    await db.conversations.put(v1row as typeof v1)
+
+    await storage.setDefaultContext({ limit: 16000 })
+    expect((await storage.getSettings()).context).toEqual(own(16000))
+    expect(await windowOf(inherits.id)).toEqual(start)
+
+    await storage.setDefaultContext({ limit: 64000 })
+    expect((await storage.getSettings()).context).toEqual(own(64000))
+    expect(await windowOf(inherits.id)).toEqual(cleared)
+    expect(await windowOf(v1.id)).toEqual(cleared)
+    expect(await windowOf(custom.id)).toEqual(start)
+  })
+})
+
 describe('schema v2 and prompts', () => {
   it('v1 database upgrades to v2 without losing rows', async () => {
     db.close()

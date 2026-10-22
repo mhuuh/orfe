@@ -74,6 +74,15 @@ export function isCold(
   return hashText(JSON.stringify(next.outgoing.slice(0, last.prefixCount))) !== last.prefixHash
 }
 
+/**
+ * True when `next` lets more in than `prev`: same mode, higher limit. Then the stored window start
+ * should be cleared, or messages trimmed under the old limit stay out for good (the start only
+ * moves forward). Lowering, a trim-to change, or a mode switch (the limits do not compare) is not a raise.
+ */
+export function raisesLimit(prev: ContextSetting, next: ContextSetting): boolean {
+  return prev.mode === next.mode && next.limit > prev.limit
+}
+
 export interface PlanInput {
   messages: Message[]
   windowStartId: string | null

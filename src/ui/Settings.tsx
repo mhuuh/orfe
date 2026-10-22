@@ -134,10 +134,9 @@ export function Settings({ open, onClose }: { open: boolean; onClose: () => void
             <h3 className={css.label}>Context</h3>
             <ContextFields
               value={settings.context}
-              onChange={(patch) =>
-                // setSettings replaces nested objects: always write the whole context, from a fresh read.
-                void storage.getSettings().then((s) => storage.setSettings({ context: { ...s.context, ...patch } }))
-              }
+              // Writes the whole context from a fresh read; raising the limit clears the stored
+              // window start of the chats that use this default.
+              onChange={(patch) => void storage.setDefaultContext(patch)}
             />
           </section>
 
