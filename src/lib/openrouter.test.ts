@@ -170,6 +170,18 @@ describe('streamChat', () => {
     expect(h['Content-Type']).toBe('application/json')
   })
 
+  it('sends cache_control when given', async () => {
+    const fetchMock = vi.fn(async (_url: string, _init: RequestInit) => sseResponse(['data: [DONE]\n\n']))
+    vi.stubGlobal('fetch', fetchMock)
+    await run({ ...req, cacheControl: { type: 'ephemeral', ttl: '1h' } })
+    await run({ ...req, cacheControl: { type: 'ephemeral' } })
+    await run()
+    const bodies = fetchMock.mock.calls.map((c) => JSON.parse(c[1].body as string))
+    expect(bodies[0].cache_control).toEqual({ type: 'ephemeral', ttl: '1h' })
+    expect(bodies[1].cache_control).toEqual({ type: 'ephemeral' })
+    expect('cache_control' in bodies[2]).toBe(false)
+  })
+
   it('omits reasoning and provider from the body when undefined', async () => {
     const fetchMock = vi.fn(async (_url: string, _init: RequestInit) => sseResponse(['data: [DONE]\n\n']))
     vi.stubGlobal('fetch', fetchMock)

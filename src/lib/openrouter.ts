@@ -13,6 +13,8 @@ export interface ChatRequest {
   stream: boolean
   reasoning?: { effort: string }
   provider?: unknown
+  /** Top-level prompt caching (Anthropic models). Sent as `cache_control`. */
+  cacheControl?: { type: 'ephemeral'; ttl?: '1h' }
 }
 
 export type StreamEvent =
@@ -125,6 +127,7 @@ export async function* streamChat(req: ChatRequest, key: string, signal: AbortSi
   }
   if (req.reasoning !== undefined) body.reasoning = req.reasoning
   if (req.provider !== undefined) body.provider = req.provider
+  if (req.cacheControl !== undefined) body.cache_control = req.cacheControl
 
   let res: Response
   try {

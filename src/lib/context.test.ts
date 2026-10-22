@@ -264,6 +264,32 @@ describe('planWindow', () => {
     expect(r.size).toBe(70)
   })
 
+  it('bad settings are clamped', () => {
+    const msgs4: ContextSetting = { mode: 'messages', limit: 4, trimTo: 0.7 }
+    const ten = transcript(10)
+    // limit: below 1 → 1, NaN / Infinity → 32000
+    expect(planWindow({ ...base, messages: ten, setting: { ...msgs4, limit: 0 } }).limit).toBe(1)
+    expect(planWindow({ ...base, messages: ten, setting: { ...msgs4, limit: -5 } }).limit).toBe(1)
+    expect(planWindow({ ...base, messages: ten, setting: { ...msgs4, limit: Number.NaN } }).limit).toBe(32000)
+    expect(planWindow({ ...base, messages: ten, setting: { ...msgs4, limit: Infinity } }).limit).toBe(32000)
+    // trimTo: above 0.95 → 0.95 (target 3.8 → 3 kept), NaN → 0.7 (target 2.8 → 2 kept)
+    expect(planWindow({ ...base, messages: ten, setting: { ...msgs4, trimTo: 5 } }).size).toBe(3)
+    expect(planWindow({ ...base, messages: ten, setting: { ...msgs4, trimTo: Number.NaN } }).size).toBe(2)
+    // trimTo below 0.1 → 0.1: with limit 40 the target is 4 kept, not trimmed down to the last user turn
+    const forty: ContextSetting = { mode: 'messages', limit: 40, trimTo: -1 }
+    expect(planWindow({ ...base, messages: transcript(50), setting: forty }).size).toBe(4)
+    // soft: below trimTo → trimTo; above 1 → 1; NaN → 0.85
+    expect(planWindow({ ...base, messages: transcript(3), setting: msgs4, cold: true, soft: 0 }).trimmed).toBe(true) // 3 > 0.7×4
+    expect(planWindow({ ...base, messages: transcript(4), setting: msgs4, cold: true, soft: Number.NaN }).trimmed).toBe(true) // 4 > 0.85×4
+    expect(planWindow({ ...base, messages: transcript(4), setting: msgs4, cold: true, soft: 5 }).trimmed).toBe(false) // 4 ≤ 1×4
+    // ratio 0 / NaN / negative → 1, so tokens mode still trims (12 × 10 tokens > 100)
+    for (const ratio of [0, Number.NaN, -2]) {
+      const p = planWindow({ ...base, messages: transcript(12), ratio })
+      expect(p.trimmed).toBe(true)
+      expect(p.size).toBeLessThanOrEqual(70)
+    }
+  })
+
   it('empty transcript', () => {
     expect(planWindow({ ...base, messages: [], system: 'abcd' })).toEqual({
       startId: null,

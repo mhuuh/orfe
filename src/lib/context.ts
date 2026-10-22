@@ -55,6 +55,13 @@ export function fingerprint(outgoing: OutMessage[]): { prefixHash: string; prefi
  * True when the provider's prompt cache is surely gone: no last request, another model or
  * provider, the TTL ran out, or the old request is no longer an exact prefix of the new one
  * (an edit, delete, trim, or system prompt change).
+ *
+ * `provider` on both sides is the user's provider preference (null until Plan 4), never the
+ * provider that served the reply.
+ *
+ * Known trade-off: a continue sends the partial reply as an assistant prefill. The next request
+ * carries the finished reply in that slot instead, so it does not extend the old one and reads as
+ * cold. Accepted: continues are rare, and a cold reading at worst allows an early trim.
  */
 export function isCold(
   last: LastRequest | null,
@@ -90,6 +97,23 @@ export interface Plan {
   limit: number
 }
 
+const fin = (x: number, fallback: number): number => (Number.isFinite(x) ? x : fallback)
+const clamp = (x: number, lo: number, hi: number): number => Math.min(hi, Math.max(lo, x))
+
+/**
+ * Bad stored settings (a hand-edited or corrupt row) must not stop trimming or trim everything:
+ * non-finite values take the defaults (32000 / 0.7 / 0.85 / ratio 1), then limit ≥ 1,
+ * trimTo in [0.1, 0.95], soft in [trimTo, 1], ratio > 0.
+ */
+function sane(input: PlanInput): { setting: ContextSetting; limit: number; trimTo: number; soft: number; ratio: number } {
+  const limit = Math.max(1, fin(input.setting.limit, 32000))
+  const trimTo = clamp(fin(input.setting.trimTo, 0.7), 0.1, 0.95)
+  const soft = clamp(fin(input.soft, 0.85), trimTo, 1)
+  const r = fin(input.ratio, 1)
+  const ratio = r > 0 ? r : 1
+  return { setting: { ...input.setting, limit, trimTo }, limit, trimTo, soft, ratio }
+}
+
 /**
  * Decide where the sent window starts. Agrees with `buildOutgoing`: it sends every message from
  * the start on, plus pinned messages before it, and drops dividers.
@@ -99,8 +123,7 @@ export interface Plan {
  * size ≤ trimTo × limit. Pinned messages always count and never leave.
  */
 export function planWindow(input: PlanInput): Plan {
-  const { setting, ratio } = input
-  const limit = setting.limit
+  const { setting, limit, trimTo, soft, ratio } = sane(input)
   const sorted = [...input.messages].sort((a, b) => a.order - b.order)
   const n = sorted.length
 
@@ -135,9 +158,9 @@ export function planWindow(input: PlanInput): Plan {
 
   let size = sizeOf(sum)
   let trimmed = false
-  const mustTrim = size > limit || (input.cold && size > input.soft * limit)
+  const mustTrim = size > limit || (input.cold && size > soft * limit)
   if (mustTrim && lastUser >= 0) {
-    const target = setting.trimTo * limit
+    const target = trimTo * limit
     while (size > target && idx < lastUser) {
       // Leave sorted[idx]: it stops counting unless pinned. Then land on the next non-divider.
       if (!sorted[idx].pinned) sum -= weight(sorted[idx])
