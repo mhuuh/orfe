@@ -1,5 +1,6 @@
 import { db } from './db'
-import type { Conversation, Message, Role, Settings, Usage, Version } from './types'
+import { hashText } from './hash'
+import type { Conversation, ContextSetting, Message, Prompt, Role, Settings, Usage, Version } from './types'
 
 export { db }
 
@@ -10,6 +11,19 @@ export const DEFAULT_SETTINGS: Settings = {
   streaming: true,
   themeMode: 'system',
   defaultModel: 'anthropic/claude-sonnet-5.5',
+  context: { mode: 'tokens', limit: 32000, trimTo: 0.7 },
+  anthropicCacheHour: false,
+}
+
+/** Fills fields that rows written before schema v2 do not have. Not written back. */
+function withConversationDefaults(c: Conversation): Conversation {
+  return {
+    ...c,
+    context: c.context ?? null,
+    windowStartOrder: c.windowStartOrder ?? null,
+    lastRequest: c.lastRequest ?? null,
+    tokenRatio: c.tokenRatio ?? 1,
+  }
 }
 
 export const zeroUsage = (): Usage => ({
@@ -34,6 +48,11 @@ export interface Storage {
   /** Re-reads the message inside a write transaction and stores what `fn` returns. */
   mutateMessage(id: string, fn: (m: Message) => Message): Promise<Message | undefined>
   appendMessage(conversationId: string, role: Role, first: Version): Promise<Message>
+  listPrompts(): Promise<Prompt[]>
+  getPrompt(id: string): Promise<Prompt | undefined>
+  savePrompt(p: { id?: string; name: string; parentId: string | null; text: string }): Promise<Prompt>
+  /** Refuses (and deletes nothing) while other prompts name this one as their parent. */
+  deletePrompt(id: string): Promise<'deleted' | 'has-variants'>
   getSettings(): Promise<Settings>
   setSettings(patch: Partial<Settings>): Promise<void>
   getCache<T>(key: string): Promise<{ value: T; at: number } | undefined>
@@ -44,14 +63,19 @@ const SETTINGS_KEY = 'settings'
 
 async function getSettings(): Promise<Settings> {
   const row = await db.settings.get(SETTINGS_KEY)
-  return { ...DEFAULT_SETTINGS, ...(row?.value as Partial<Settings> | undefined) }
+  const stored = (row?.value ?? {}) as Partial<Settings>
+  const context: ContextSetting = { ...DEFAULT_SETTINGS.context, ...stored.context }
+  return { ...DEFAULT_SETTINGS, ...stored, context }
 }
 
 export const storage: Storage = {
   async listConversations() {
-    return db.conversations.orderBy('updatedAt').reverse().toArray()
+    return (await db.conversations.orderBy('updatedAt').reverse().toArray()).map(withConversationDefaults)
   },
-  getConversation: (id) => db.conversations.get(id),
+  async getConversation(id) {
+    const c = await db.conversations.get(id)
+    return c && withConversationDefaults(c)
+  },
   async createConversation(init = {}) {
     const now = Date.now()
     const settings = await getSettings()
@@ -67,6 +91,10 @@ export const storage: Storage = {
       nextModel: settings.defaultModel,
       nextEffort: null,
       totals: zeroUsage(),
+      context: null,
+      windowStartOrder: null,
+      lastRequest: null,
+      tokenRatio: 1,
       ...init,
     }
     await db.conversations.add(c)
@@ -141,6 +169,30 @@ export const storage: Storage = {
       await db.messages.add(m)
       await db.conversations.update(conversationId, { updatedAt: now })
       return m
+    })
+  },
+  async listPrompts() {
+    const all = await db.prompts.toArray()
+    return all.sort((a, b) => a.name.localeCompare(b.name))
+  },
+  getPrompt: (id) => db.prompts.get(id),
+  async savePrompt(p) {
+    const row: Prompt = {
+      id: p.id ?? newId(),
+      name: p.name,
+      parentId: p.parentId,
+      text: p.text,
+      updatedAt: Date.now(),
+      versionHash: hashText(p.text),
+    }
+    await db.prompts.put(row)
+    return row
+  },
+  async deletePrompt(id) {
+    return db.transaction('rw', db.prompts, async () => {
+      if ((await db.prompts.where('parentId').equals(id).count()) > 0) return 'has-variants'
+      await db.prompts.delete(id)
+      return 'deleted'
     })
   },
   getSettings,

@@ -1,3 +1,4 @@
+import Dexie from 'dexie'
 import { beforeEach, describe, expect, it } from 'vitest'
 import { db, newId, storage } from './storage'
 import type { Message, Version } from './types'
@@ -89,6 +90,8 @@ describe('storage', () => {
       key: null,
       streaming: true,
       themeMode: 'system',
+      context: { mode: 'tokens', limit: 32000, trimTo: 0.7 },
+      anthropicCacheHour: false,
       defaultModel: 'anthropic/claude-sonnet-5.5',
     })
     await storage.setSettings({ streaming: false, key: 'k' })
@@ -130,5 +133,93 @@ describe('storage', () => {
     expect(stored?.pinned).toBe(true)
     expect(stored?.versions[0].status).toBe('done')
     expect(await storage.mutateMessage('missing', (x) => x)).toBeUndefined()
+  })
+})
+
+describe('schema v2 and prompts', () => {
+  it('v1 database upgrades to v2 without losing rows', async () => {
+    db.close()
+    await Dexie.delete('orfe')
+    const old = new Dexie('orfe')
+    old.version(1).stores({
+      conversations: 'id, updatedAt',
+      messages: 'id, conversationId, [conversationId+order]',
+      settings: 'k',
+      cache: 'k',
+    })
+    await old.table('conversations').add({
+      id: 'c1',
+      title: 'Old chat',
+      createdAt: 1,
+      updatedAt: 2,
+      sessionId: 's',
+      systemPromptRef: null,
+      capabilityNote: true,
+      windowStartMessageId: null,
+      nextModel: 'm',
+      nextEffort: null,
+      totals: { promptTokens: 0, completionTokens: 0, cachedTokens: 0, cacheWriteTokens: 0, reasoningTokens: 0, cost: 0 },
+    })
+    await old.table('messages').add({
+      id: 'm1',
+      conversationId: 'c1',
+      order: 1,
+      role: 'user',
+      versions: [v('hi')],
+      activeVersion: 0,
+      pinned: false,
+      createdAt: 1,
+    })
+    old.close()
+    await db.open()
+    expect(await db.messages.count()).toBe(1)
+    expect(await db.conversations.count()).toBe(1)
+    const c = await storage.getConversation('c1')
+    expect(c?.title).toBe('Old chat')
+    expect(c?.context).toBeNull()
+    expect(c?.tokenRatio).toBe(1)
+    expect(c?.lastRequest).toBeNull()
+    expect(c?.windowStartOrder).toBeNull()
+    expect((await storage.listConversations())[0].context).toBeNull()
+  })
+
+  it('savePrompt sets versionHash and updatedAt', async () => {
+    const before = Date.now()
+    const p = await storage.savePrompt({ name: 'Terse', parentId: null, text: 'Be brief.' })
+    expect(p.id).toBeTruthy()
+    expect(p.versionHash).toMatch(/^[0-9a-f]{8}$/)
+    expect(p.updatedAt).toBeGreaterThanOrEqual(before)
+    const p2 = await storage.savePrompt({ id: p.id, name: 'Terse', parentId: null, text: 'Be very brief.' })
+    expect(p2.id).toBe(p.id)
+    expect(p2.versionHash).not.toBe(p.versionHash)
+    expect(await storage.getPrompt(p.id)).toEqual(p2)
+  })
+
+  it('listPrompts sorts by name', async () => {
+    await storage.savePrompt({ name: 'banana', parentId: null, text: 'x' })
+    await storage.savePrompt({ name: 'Apple', parentId: null, text: 'x' })
+    await storage.savePrompt({ name: 'cherry', parentId: null, text: 'x' })
+    expect((await storage.listPrompts()).map((p) => p.name)).toEqual(['Apple', 'banana', 'cherry'])
+  })
+
+  it('deletePrompt refuses while variants exist', async () => {
+    const parent = await storage.savePrompt({ name: 'Parent', parentId: null, text: 'x' })
+    const child = await storage.savePrompt({ name: 'Child', parentId: parent.id, text: 'y' })
+    expect(await storage.deletePrompt(parent.id)).toBe('has-variants')
+    expect(await storage.getPrompt(parent.id)).toBeDefined()
+    expect(await storage.deletePrompt(child.id)).toBe('deleted')
+    expect(await storage.deletePrompt(parent.id)).toBe('deleted')
+    expect(await storage.listPrompts()).toEqual([])
+  })
+
+  it('settings default context is tokens 32000 at 0.7', async () => {
+    const s = await storage.getSettings()
+    expect(s.context).toEqual({ mode: 'tokens', limit: 32000, trimTo: 0.7 })
+    expect(s.anthropicCacheHour).toBe(false)
+    // an old stored row without the new fields, and a partial context, still resolve
+    await db.settings.put({ k: 'settings', value: { key: 'k', context: { limit: 100 } }, at: 1 })
+    const s2 = await storage.getSettings()
+    expect(s2.key).toBe('k')
+    expect(s2.context).toEqual({ mode: 'tokens', limit: 100, trimTo: 0.7 })
   })
 })

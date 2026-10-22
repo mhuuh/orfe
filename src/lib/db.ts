@@ -1,5 +1,5 @@
 import Dexie, { type EntityTable } from 'dexie'
-import type { Conversation, Message } from './types'
+import type { Conversation, Message, Prompt } from './types'
 
 export interface KvRow {
   k: string
@@ -12,6 +12,7 @@ class OrfeDb extends Dexie {
   messages!: EntityTable<Message, 'id'>
   settings!: EntityTable<KvRow, 'k'>
   cache!: EntityTable<KvRow, 'k'>
+  prompts!: EntityTable<Prompt, 'id'>
 
   constructor() {
     super('orfe')
@@ -20,6 +21,13 @@ class OrfeDb extends Dexie {
       messages: 'id, conversationId, [conversationId+order]',
       settings: 'k',
       cache: 'k',
+    })
+    // New fields on old rows get their defaults on read (storage.ts), so no upgrade function.
+    this.version(2).stores({ prompts: 'id, parentId' })
+    // Another tab opened a newer schema: let it upgrade, and tell the UI to offer a reload.
+    this.on('versionchange', () => {
+      this.close()
+      if (typeof window !== 'undefined') window.dispatchEvent(new Event('orfe:db-outdated'))
     })
   }
 }
