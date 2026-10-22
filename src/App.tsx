@@ -5,7 +5,7 @@ import { Header } from './ui/Header'
 import { Drawer } from './ui/Drawer'
 import { Settings } from './ui/Settings'
 import { KeySetup } from './ui/KeySetup'
-import { ToastProvider } from './ui/Toast'
+import { ToastProvider, useToast } from './ui/Toast'
 import { Transcript } from './ui/Transcript'
 import { Composer } from './ui/Composer'
 import { onSheetEntry } from './ui/sheetHistory'
@@ -30,6 +30,18 @@ function useConversationId(): [string | null, (id: string, replace?: boolean) =>
     setId(next)
   }, [])
   return [id, go]
+}
+
+/** Another tab upgraded the database: this tab's connection was closed, so offer a reload. */
+function DbOutdatedToast() {
+  const toast = useToast()
+  useEffect(() => {
+    const on = () =>
+      toast.show('ORFE was updated in another tab', { label: 'Reload', run: () => location.reload() }, 600000)
+    window.addEventListener('orfe:db-outdated', on)
+    return () => window.removeEventListener('orfe:db-outdated', on)
+  }, [toast])
+  return null
 }
 
 export function App() {
@@ -81,6 +93,7 @@ export function App() {
   if (!settings.key) {
     return (
       <ToastProvider>
+        <DbOutdatedToast />
         <div className={css.app}>
           <KeySetup />
         </div>
@@ -92,6 +105,7 @@ export function App() {
 
   return (
     <ToastProvider>
+      <DbOutdatedToast />
       <div className={css.app}>
         <Header conversationId={current} onMenu={() => setDrawer(true)} />
         <Transcript conversationId={current} />

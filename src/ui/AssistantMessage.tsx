@@ -3,7 +3,7 @@ import { renderMarkdown } from '../lib/markdown'
 import type { Message, Version } from '../lib/types'
 import { versionText } from '../lib/versions'
 import { EditBox, MessageActions, type MessageOps } from './MessageActions'
-import { MetaLine } from './MetaLine'
+import { MetaLine, type PromptIndex } from './MetaLine'
 import { Thinking } from './Thinking'
 import { Versions } from './Versions'
 import css from './AssistantMessage.module.css'
@@ -94,11 +94,15 @@ interface Props {
   selected: boolean
   editing: boolean
   afterDivider: boolean
+  /** For the meta line's "prompt: …" detail. */
+  prompts?: PromptIndex
   ops: MessageOps
   onToggle(): void
+  /** Before the context window start and not pinned: not sent, shown in mute. */
+  outside?: boolean
 }
 
-export function AssistantMessage({ message, isLast, busy, selected, editing, afterDivider, ops, onToggle }: Props) {
+export function AssistantMessage({ message, isLast, busy, selected, editing, afterDivider, prompts, ops, onToggle, outside }: Props) {
   const version = message.versions[message.activeVersion] ?? message.versions[0]
   const text = versionText(version)
   const streaming = version.status === 'streaming'
@@ -111,14 +115,17 @@ export function AssistantMessage({ message, isLast, busy, selected, editing, aft
 
   return (
     <article
-      className={`${css.assistant} ${afterDivider ? css.afterDivider : ''}`}
+      className={`${css.assistant} ${afterDivider ? css.afterDivider : ''} ${outside ? css.outside : ''}`}
       aria-label={`Reply from ${version.model ?? 'assistant'}`}
       aria-busy={streaming}
       tabIndex={0}
       {...tapHandlers(onToggle)}
     >
       <div className={css.head}>
-        <MetaLine version={version} />
+        <span className={css.lead}>
+          <MetaLine version={version} prompts={prompts} />
+          {message.pinned && <span className={css.pinned}>pinned</span>}
+        </span>
         <Versions count={message.versions.length} active={message.activeVersion} onPick={(i) => ops.setActive(message.id, i)} />
       </div>
       {version.reasoning && <Thinking key={version.id} reasoning={version.reasoning} thinking={streaming && text === ''} />}

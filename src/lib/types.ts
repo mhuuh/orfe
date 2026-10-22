@@ -51,6 +51,29 @@ export interface Message {
   createdAt: number
 }
 
+export interface Prompt {
+  id: string
+  name: string
+  parentId: string | null
+  text: string
+  updatedAt: number
+  versionHash: string
+}
+
+export interface ContextSetting {
+  mode: 'tokens' | 'messages'
+  limit: number
+  trimTo: number
+}
+
+export interface LastRequest {
+  model: string
+  provider: string | null
+  prefixHash: string
+  prefixCount: number
+  at: number
+}
+
 export interface Conversation {
   id: string
   title: string
@@ -63,6 +86,11 @@ export interface Conversation {
   nextModel: string
   nextEffort: string | null
   totals: Usage
+  /** null = use the global setting */
+  context: ContextSetting | null
+  windowStartOrder: number | null
+  lastRequest: LastRequest | null
+  tokenRatio: number
 }
 
 export interface Settings {
@@ -70,4 +98,6 @@ export interface Settings {
   streaming: boolean
   themeMode: 'system' | 'light' | 'dark'
   defaultModel: string
+  context: ContextSetting
+  anthropicCacheHour: boolean
 }

@@ -1,7 +1,9 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { fallbackModelInfo, type ModelInfo } from './catalog'
 import { db, newId, storage } from './storage'
-import { deleteChat, errorText, generate, patchVersion, isGenerating, recoverInterrupted, restoreChat, sendUserMessage, stop } from './send'
+import { computeCold, deleteChat, errorText, generate, patchVersion, isGenerating, recoverInterrupted, replacePromptRef, restoreChat, sendUserMessage, setPrompt, stop } from './send'
+import { CAPABILITY_NOTE, systemFor } from './system'
+import { fingerprint } from './context'
 import type { Version } from './types'
 
 const enc = new TextEncoder()
@@ -74,7 +76,7 @@ async function setup() {
 const lastMsg = async () => (await storage.listMessages(convId)).at(-1)!
 
 beforeEach(async () => {
-  await Promise.all([db.conversations.clear(), db.messages.clear(), db.settings.clear(), db.cache.clear()])
+  await Promise.all([db.conversations.clear(), db.messages.clear(), db.settings.clear(), db.cache.clear(), db.prompts.clear()])
   await setup()
 })
 afterEach(() => {
@@ -107,7 +109,7 @@ describe('generate', () => {
     expect(second.model).toBe(B.id)
     expect(second.session_id).toBeTruthy()
     expect(JSON.stringify(second.messages)).toContain('Reply from A')
-    expect(second.messages.map((m) => m.role)).toEqual(['user', 'assistant', 'user'])
+    expect(second.messages.map((m) => m.role)).toEqual(['system', 'user', 'assistant', 'user'])
   })
 
   it('reroll: adds a version, keeps the old one, and sends context only up to the target', async () => {
@@ -123,7 +125,10 @@ describe('generate', () => {
     expect(after.versions[1].content).toEqual([{ type: 'text', text: 'new' }])
     expect(after.versions[1].model).toBe(B.id)
     const body = bodyOf(f, 1)
-    expect(body.messages).toEqual([{ role: 'user', content: 'q1' }])
+    expect(body.messages).toEqual([
+      { role: 'system', content: CAPABILITY_NOTE },
+      { role: 'user', content: 'q1' },
+    ])
   })
 
   it('continue: new version starts with old text and request ends with assistant prefill', async () => {
@@ -435,5 +440,253 @@ describe('generate', () => {
     expect(after.activeVersion).toBe(1)
     expect(after.pinned).toBe(true)
     expect(after.versions[0].status).toBe('done')
+  })
+})
+
+/** What generateInner computes as `cold` for the next request, from the stored state. */
+async function coldNow(m: ModelInfo = A): Promise<boolean> {
+  const c = (await storage.getConversation(convId))!
+  const s = await storage.getSettings()
+  const { system } = await systemFor(c)
+  return computeCold({
+    lastRequest: c.lastRequest,
+    messages: await storage.listMessages(convId),
+    system,
+    windowStartId: c.windowStartMessageId,
+    model: m,
+    anthropicCacheHour: s.anthropicCacheHour,
+    now: Date.now(),
+  })
+}
+
+/** The non-system message contents of request `i`. */
+const texts = (f: ReturnType<typeof stubFetch>, i: number) =>
+  bodyOf(f, i).messages.filter((m) => m.role !== 'system').map((m) => m.content)
+
+const doneVersion = (text: string): Version => ({ id: newId(), content: [{ type: 'text', text }], status: 'done', createdAt: 1 })
+
+describe('generate: prompts, window and cache', () => {
+  it('sends the active prompt plus capability note as the system message', async () => {
+    const f = stubFetch(() => sse(reply('ok')))
+    const p = await storage.savePrompt({ name: 'Chef', parentId: null, text: 'You are a chef.' })
+    await storage.updateConversation(convId, { systemPromptRef: p.id })
+    await sendUserMessage(convId, 'hi', { reply: true, model: A })
+    expect(bodyOf(f, 0).messages[0]).toEqual({ role: 'system', content: `You are a chef.\n\n${CAPABILITY_NOTE}` })
+    const v = (await lastMsg()).versions[0]
+    expect(v.promptRef).toBe(p.id)
+    expect(v.promptVersionHash).toBe(p.versionHash)
+
+    // No prompt and no capability note: no system message, promptRef null.
+    await storage.updateConversation(convId, { systemPromptRef: null, capabilityNote: false })
+    await sendUserMessage(convId, 'again', { reply: true, model: A })
+    expect(bodyOf(f, 1).messages.some((m) => m.role === 'system')).toBe(false)
+    const v2 = (await lastMsg()).versions[0]
+    expect(v2.promptRef).toBeNull()
+    expect(v2.promptVersionHash).toBeUndefined()
+  })
+
+  it('consecutive normal turns are warm', async () => {
+    stubFetch(() => sse(reply('a')))
+    expect(await coldNow()).toBe(true) // no last request yet
+    await sendUserMessage(convId, 'one', { reply: true, model: A })
+    await sendUserMessage(convId, 'two', { reply: false })
+    expect(await coldNow()).toBe(false)
+    expect(await coldNow(B)).toBe(true) // another model
+  })
+
+  it('editing the active prompt makes the next request cold', async () => {
+    // messages mode, limit 5: 5 messages is not over the limit (no hard trim) but is over
+    // the soft threshold (0.85 × 5), so only a cold request trims.
+    const f = stubFetch(() => sse(reply('r')))
+    const p = await storage.savePrompt({ name: 'Chef', parentId: null, text: 'Old text.' })
+    await storage.updateConversation(convId, {
+      systemPromptRef: p.id,
+      context: { mode: 'messages', limit: 5, trimTo: 0.7 },
+    })
+    await sendUserMessage(convId, 'u1', { reply: true, model: A })
+    await sendUserMessage(convId, 'u2', { reply: true, model: A })
+    await storage.savePrompt({ id: p.id, name: 'Chef', parentId: null, text: 'New text.' })
+    await sendUserMessage(convId, 'u3', { reply: false })
+    expect(await coldNow()).toBe(true)
+    await generate(convId, { kind: 'new' }, A)
+    expect(bodyOf(f, 2).messages[0].content).toBe(`New text.\n\n${CAPABILITY_NOTE}`)
+    expect(texts(f, 2)).toEqual(['u2', 'r', 'u3']) // cold trim to ≤ 0.7 × 5
+    const u2 = (await storage.listMessages(convId))[2]
+    const c = (await storage.getConversation(convId))!
+    expect(c.windowStartMessageId).toBe(u2.id)
+    expect(c.windowStartOrder).toBe(u2.order)
+  })
+
+  it('the same chat without the edit stays warm and does not trim', async () => {
+    const f = stubFetch(() => sse(reply('r')))
+    const p = await storage.savePrompt({ name: 'Chef', parentId: null, text: 'Old text.' })
+    await storage.updateConversation(convId, {
+      systemPromptRef: p.id,
+      context: { mode: 'messages', limit: 5, trimTo: 0.7 },
+    })
+    await sendUserMessage(convId, 'u1', { reply: true, model: A })
+    await sendUserMessage(convId, 'u2', { reply: true, model: A })
+    await sendUserMessage(convId, 'u3', { reply: true, model: A })
+    expect(texts(f, 2)).toEqual(['u1', 'r', 'u2', 'r', 'u3'])
+    expect((await storage.getConversation(convId))!.windowStartMessageId).toBeNull()
+  })
+
+  it('trims and stores the new window start when over the limit', async () => {
+    const f = stubFetch(() => sse(reply('r')))
+    await storage.updateConversation(convId, { context: { mode: 'messages', limit: 4, trimTo: 0.7 } })
+    await sendUserMessage(convId, 'u1', { reply: true, model: A })
+    await sendUserMessage(convId, 'u2', { reply: true, model: A })
+    await sendUserMessage(convId, 'u3', { reply: true, model: A })
+    // 5 messages > 4 → trim to ≤ 2.8: the window starts at the second reply.
+    expect(texts(f, 2)).toEqual(['…', 'r', 'u3'])
+    const msgs = await storage.listMessages(convId)
+    const c = (await storage.getConversation(convId))!
+    expect(c.windowStartMessageId).toBe(msgs[3].id)
+    expect(c.windowStartOrder).toBe(msgs[3].order)
+    // The global setting applies when the chat has none.
+    await storage.updateConversation(convId, { context: null })
+    await storage.setSettings({ context: { mode: 'messages', limit: 2, trimTo: 0.5 } })
+    await sendUserMessage(convId, 'u4', { reply: true, model: A })
+    expect(texts(f, 3)).toEqual(['u4'])
+  })
+
+  it('reroll of a non-last reply in an over-limit chat stays inside the window', async () => {
+    const f = stubFetch(() => sse(reply('new')))
+    await storage.updateConversation(convId, { context: { mode: 'messages', limit: 4, trimTo: 0.7 } })
+    const replies: string[] = []
+    for (let i = 1; i <= 5; i++) {
+      await storage.appendMessage(convId, 'user', doneVersion(`u${i}`))
+      replies.push((await storage.appendMessage(convId, 'assistant', doneVersion(`a${i}`))).id)
+    }
+    await generate(convId, { kind: 'reroll', messageId: replies[3] }, A) // a4
+    // Cut before a4: u1 a1 u2 a2 u3 a3 u4 = 7 > 4 → trim to ≤ 2.8 inside the cut.
+    expect(texts(f, 0)).toEqual(['…', 'a3', 'u4'])
+    // A reroll's window is a local view: the chat's stored start does not move.
+    expect((await storage.getConversation(convId))!.windowStartMessageId).toBeNull()
+  })
+
+  it('reroll before the stored window start plans from the beginning of the cut', async () => {
+    const f = stubFetch(() => sse(reply('new')))
+    await storage.updateConversation(convId, { context: { mode: 'messages', limit: 10, trimTo: 0.7 } })
+    const all = []
+    for (let i = 1; i <= 4; i++) {
+      all.push(await storage.appendMessage(convId, 'user', doneVersion(`u${i}`)))
+      all.push(await storage.appendMessage(convId, 'assistant', doneVersion(`a${i}`)))
+    }
+    await storage.updateConversation(convId, { windowStartMessageId: all[6].id, windowStartOrder: all[6].order }) // u4
+    await generate(convId, { kind: 'reroll', messageId: all[3].id }, A) // a2
+    expect(texts(f, 0)).toEqual(['u1', 'a1', 'u2'])
+    const c = (await storage.getConversation(convId))!
+    expect(c.windowStartMessageId).toBe(all[6].id)
+    expect(c.windowStartOrder).toBe(all[6].order)
+  })
+
+  it('adds cache_control for anthropic models and ttl 1h when the setting is on', async () => {
+    const f = stubFetch(() => sse(reply('x')))
+    const C = model('anthropic/claude-x')
+    await sendUserMessage(convId, 'one', { reply: true, model: C })
+    expect((bodyOf(f, 0) as { cache_control?: unknown }).cache_control).toEqual({ type: 'ephemeral' })
+    await storage.setSettings({ anthropicCacheHour: true })
+    await sendUserMessage(convId, 'two', { reply: true, model: C })
+    expect((bodyOf(f, 1) as { cache_control?: unknown }).cache_control).toEqual({ type: 'ephemeral', ttl: '1h' })
+    await sendUserMessage(convId, 'three', { reply: true, model: A })
+    expect('cache_control' in bodyOf(f, 2)).toBe(false)
+  })
+
+  it('stores lastRequest fingerprint and updates tokenRatio from usage', async () => {
+    await storage.updateConversation(convId, { capabilityNote: false })
+    const withProvider = (prompt: number) => () => {
+      const r = sse([
+        ev({ choices: [{ delta: { content: 'ok' } }] }),
+        ev({ choices: [{ delta: {}, finish_reason: 'stop' }] }),
+        usageChunk(prompt),
+      ])
+      return new Response(r.body, { status: 200, headers: { 'X-Provider-Name': 'Anthropic' } })
+    }
+    const f = stubFetch(withProvider(150), withProvider(0), withProvider(100000))
+    const before = Date.now()
+    await sendUserMessage(convId, 'x'.repeat(400), { reply: true, model: A }) // estimate 100 tokens
+    let c = (await storage.getConversation(convId))!
+    expect(c.lastRequest).not.toBeNull()
+    expect(c.lastRequest!.model).toBe(A.id)
+    expect(c.lastRequest!.provider).toBeNull() // the preference (none yet), not the served provider
+    expect(c.lastRequest!.at).toBeGreaterThanOrEqual(before)
+    const fp = fingerprint(bodyOf(f, 0).messages as never)
+    expect(c.lastRequest!.prefixHash).toBe(fp.prefixHash)
+    expect(c.lastRequest!.prefixCount).toBe(fp.prefixCount)
+    expect(c.tokenRatio).toBeCloseTo(1.5)
+    expect((await lastMsg()).versions[0].provider).toBe('Anthropic')
+
+    await sendUserMessage(convId, 'y', { reply: true, model: A }) // promptTokens 0: ignored
+    c = (await storage.getConversation(convId))!
+    expect(c.tokenRatio).toBeCloseTo(1.5)
+    expect(c.lastRequest!.prefixCount).toBe(3)
+
+    await sendUserMessage(convId, 'z', { reply: true, model: A }) // absurd count: clamped to 2
+    expect((await storage.getConversation(convId))!.tokenRatio).toBe(2)
+  })
+
+  it('a failed request does not store lastRequest', async () => {
+    stubFetch(() => new Response(JSON.stringify({ error: { message: 'raw' } }), { status: 500 }))
+    await sendUserMessage(convId, 'hi', { reply: true, model: A })
+    expect((await storage.getConversation(convId))!.lastRequest).toBeNull()
+  })
+
+  it('a 200 whose stream errors before any token does not store lastRequest', async () => {
+    // The provider header makes the stream yield a meta event first (HTTP 200), then the error chunk.
+    stubFetch(() => {
+      const r = sse([ev({ error: { message: 'Provider overloaded', code: 502 } })])
+      return new Response(r.body, { status: 200, headers: { 'X-Provider-Name': 'Anthropic' } })
+    })
+    await sendUserMessage(convId, 'hi', { reply: true, model: A })
+    expect((await lastMsg()).versions[0].status).toBe('error')
+    expect((await storage.getConversation(convId))!.lastRequest).toBeNull()
+  })
+})
+
+describe('setPrompt', () => {
+  it('setPrompt appends a divider only when the chat has messages and the ref changed', async () => {
+    const p = await storage.savePrompt({ name: 'Chef', parentId: null, text: 'Cook.' })
+    await setPrompt(convId, p.id)
+    expect((await storage.getConversation(convId))!.systemPromptRef).toBe(p.id)
+    expect(await storage.listMessages(convId)).toHaveLength(0) // empty chat: no divider
+
+    await sendUserMessage(convId, 'hi', { reply: false })
+    await setPrompt(convId, p.id) // same ref: no divider
+    expect(await storage.listMessages(convId)).toHaveLength(1)
+
+    await setPrompt(convId, null)
+    const msgs = await storage.listMessages(convId)
+    expect(msgs).toHaveLength(2)
+    const d = msgs[1]
+    expect(d.role).toBe('divider')
+    expect(d.dividerLabel).toBe('→ No prompt')
+    expect(d.versions).toHaveLength(1)
+    expect(d.versions[0].content).toEqual([])
+    expect(d.versions[0].status).toBe('done')
+    expect((await storage.getConversation(convId))!.systemPromptRef).toBeNull()
+
+    await setPrompt(convId, p.id)
+    expect((await storage.listMessages(convId)).at(-1)!.dividerLabel).toBe('→ Chef')
+
+    // A ref to a deleted prompt reads as "No prompt".
+    await setPrompt(convId, 'gone')
+    expect((await storage.listMessages(convId)).at(-1)!.dividerLabel).toBe('→ No prompt')
+  })
+})
+
+describe('replacePromptRef', () => {
+  it('swaps the ref only while it still holds the expected value, without a divider', async () => {
+    await sendUserMessage(convId, 'hi', { reply: false })
+    await storage.updateConversation(convId, { systemPromptRef: 'p1' })
+
+    expect(await replacePromptRef(convId, 'p1', null)).toBe(true)
+    expect((await storage.getConversation(convId))!.systemPromptRef).toBeNull()
+    expect(await storage.listMessages(convId)).toHaveLength(1) // no divider
+
+    // The chat moved on to another prompt meanwhile: an undo must not pull it back.
+    await storage.updateConversation(convId, { systemPromptRef: 'p2' })
+    expect(await replacePromptRef(convId, null, 'p1')).toBe(false)
+    expect((await storage.getConversation(convId))!.systemPromptRef).toBe('p2')
   })
 })

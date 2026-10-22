@@ -40,6 +40,30 @@
   mask-composite: exclude;
 }
 
+/*
+ * Lens edge (Chromium, mockup child 3): the rim bends the text behind it like thick glass,
+ * the middle stays clear. Less blur and less tint than the plain glass, so the bend shows.
+ * The class is only set once the lens map is drawn (see lens.ts).
+ */
+.lens {
+  background: color-mix(in oklab, var(--bg) 38%, transparent);
+  backdrop-filter: url(#orfe-lens) blur(5px) saturate(1.5) brightness(1.04);
+}
+@media (prefers-reduced-transparency: reduce) {
+  .lens {
+    background: color-mix(in oklab, var(--bg) 62%, transparent);
+    backdrop-filter: blur(22px) saturate(1.4);
+  }
+}
+/* Holds the filter only; display: none would switch the filter off. */
+.lensDefs {
+  position: absolute;
+  width: 0;
+  height: 0;
+  overflow: hidden;
+  pointer-events: none;
+}
+
 .field {
   display: block;
   width: 100%;
@@ -84,9 +108,23 @@
   cursor: pointer;
   transition: box-shadow 150ms ease-out;
 }
-/* The model chip gives way first when ids are long. */
+/* When the row is short of room, the prompt chip gives way first, then the model chip. */
 .chip:first-child {
   flex: 0 1 auto;
+}
+/*
+ * Its floor (--floor, set inline) plus the caret, gap and padding: never an empty pill.
+ * The huge shrink weight makes the model chip's share of the shrinking round to zero
+ * (layout works in 1/64 px), so the model id is not cut by a hair while the prompt chip still has room to give.
+ */
+.promptChip {
+  flex: 0 1000000 auto;
+  min-width: calc(var(--floor, 0ch) + 1ch + var(--s1) + 20px);
+}
+/* While a reply is being written the prompt cannot change: the text steps down to mute. */
+.chip[aria-disabled='true'] {
+  color: var(--mute);
+  cursor: default;
 }
 /* A 44 px tall touch target around a 28 px chip. */
 .chip::after {

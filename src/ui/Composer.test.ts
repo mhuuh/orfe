@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest'
 import { fallbackModelInfo, type ModelInfo } from '../lib/catalog'
-import { canStop, clean, nextEffort, sendAction, shownEffort, STOP_GRACE_MS } from './Composer'
+import { canStop, clean, nextEffort, promptChipLabel, sendAction, shownEffort, STOP_GRACE_MS } from './Composer'
 import { modelMeta } from './ModelSheet'
 
 const reasoning: ModelInfo = {
@@ -68,5 +68,24 @@ describe('modelMeta', () => {
   it('says free for free models and "price varies" for routers', () => {
     expect(modelMeta(m({ free: true, contextLength: 131_072 }))).toBe('free · 131k')
     expect(modelMeta(m({ free: false, contextLength: 2_000_000 }))).toBe('price varies · 2M')
+  })
+})
+
+describe('promptChipLabel', () => {
+  it('shows "No prompt" without a prompt', () => {
+    expect(promptChipLabel(null)).toBe('No prompt')
+    expect(promptChipLabel(undefined)).toBe('No prompt')
+  })
+
+  it('keeps names up to 16 characters and cuts longer ones to 16 with "…"', () => {
+    expect(promptChipLabel('Co-writer')).toBe('Co-writer')
+    expect(promptChipLabel('Sixteen chars ok')).toBe('Sixteen chars ok')
+    expect(promptChipLabel('Co-writer, tighter prose')).toBe('Co-writer, tigh…')
+    expect(Array.from(promptChipLabel('Co-writer, tighter prose'))).toHaveLength(16)
+  })
+
+  it('does not leave a space before the ellipsis', () => {
+    expect(promptChipLabel('Editor (strict), long')).toBe('Editor (strict)…')
+    expect(promptChipLabel('Fourteen chars a b')).toBe('Fourteen chars…')
   })
 })

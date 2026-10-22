@@ -29,3 +29,13 @@ describe('dividerLabel', () => {
     expect(dividerLabel(v('a/m'), v('a/m', 'p2'))).toBe('m')
   })
 })
+
+describe('dividerLabel after a stored prompt swap', () => {
+  it('draws no second hairline when only the prompt changed', () => {
+    expect(dividerLabel(v('a/m', 'p1'), v('a/m', 'p2'), 'Editor', true)).toBeNull()
+  })
+
+  it('still marks a model change, with the prompt name', () => {
+    expect(dividerLabel(v('a/m', 'p1'), v('b/n', 'p2'), 'Editor', true)).toBe('n · Editor')
+  })
+})

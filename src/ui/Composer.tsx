@@ -1,4 +1,4 @@
-import { useLayoutEffect, useRef, useState, type KeyboardEvent } from 'react'
+import { useLayoutEffect, useRef, useState, type CSSProperties, type KeyboardEvent } from 'react'
 import { useLiveQuery } from 'dexie-react-hooks'
 import type { ModelInfo } from '../lib/catalog'
 import { noteDraft } from '../lib/appUpdate'
@@ -7,13 +7,20 @@ import { storage } from '../lib/storage'
 import type { Conversation, Role } from '../lib/types'
 import { shortModel } from './Divider'
 import { ModelSheet } from './ModelSheet'
+import { PromptSheet } from './PromptSheet'
 import { useToast } from './Toast'
 import { findModel, useCatalog } from './useCatalog'
+import { lensMapUrl, supportsBackdropUrl } from './lens'
 import css from './Composer.module.css'
 
 const LONG_PRESS_MS = 500
 const LINE_PX = 22
 const MAX_LINES = 8
+/** The lens rim: matches the composer's 22 px radius; bends the outer 16 px. */
+const LENS_RADIUS = 22
+const LENS_RIM = 16
+/** A new lens map waits for the size to settle (multi-line growth, rotation). */
+const LENS_DEBOUNCE_MS = 100
 /** A second tap this soon after sending is a double tap, not a request to stop. */
 export const STOP_GRACE_MS = 400
 
@@ -35,6 +42,17 @@ export const clean = (text: string): string => text.replace(/^(?:[ \t]*\n)+/, ''
 /** Whether a tap on Stop counts, given when we last started a send or reply. */
 export const canStop = (now: number, startedAt: number): boolean => now - startedAt >= STOP_GRACE_MS
 
+const PROMPT_CHIP_CHARS = 16
+/** Characters the prompt chip keeps when the row is short of room. */
+const PROMPT_CHIP_FLOOR = 6
+
+/** The prompt chip text: the name cut to 16 characters ending in "…", or "No prompt". */
+export function promptChipLabel(name: string | null | undefined): string {
+  if (!name) return 'No prompt'
+  const chars = Array.from(name)
+  return chars.length > PROMPT_CHIP_CHARS ? `${chars.slice(0, PROMPT_CHIP_CHARS - 1).join('').trimEnd()}…` : name
+}
+
 /** The effort the chip shows: the chosen one when this model has it, else the model's default. */
 export function shownEffort(model: ModelInfo, chosen: string | null): string | null {
   if (!model.efforts) return null
@@ -51,8 +69,11 @@ export function Composer({ conversationId: id }: { conversationId: string }) {
   const data = useLiveQuery(async () => {
     const [conversation, messages] = await Promise.all([storage.getConversation(id), storage.listMessages(id)])
     const turns = messages.filter((m) => m.role !== 'divider')
+    const ref = conversation?.systemPromptRef ?? null
     return {
       conversation,
+      // A ref to a deleted prompt reads as no prompt.
+      prompt: ref ? ((await storage.getPrompt(ref)) ?? null) : null,
       lastRole: turns[turns.length - 1]?.role,
       streaming: messages.some((m) => m.versions.some((v) => v.status === 'streaming')),
     }
@@ -63,6 +84,7 @@ export function Composer({ conversationId: id }: { conversationId: string }) {
   const [text, setText] = useState(() => drafts.get(id) ?? '')
   const [pending, setPending] = useState(false)
   const [sheet, setSheet] = useState(false)
+  const [promptSheet, setPromptSheet] = useState(false)
   // A model picked in the sheet may come from a fresher catalog than ours.
   const [picked, setPicked] = useState<ModelInfo | null>(null)
 
@@ -71,6 +93,10 @@ export function Composer({ conversationId: id }: { conversationId: string }) {
   const pressTimer = useRef<ReturnType<typeof setTimeout> | undefined>(undefined)
   const longPressed = useRef(false)
   const startedAt = useRef(-Infinity)
+  const lensImage = useRef<SVGFEImageElement>(null)
+  // Chromium only; checked once. Until the first map is in, the plain glass shows.
+  const [lens] = useState(supportsBackdropUrl)
+  const [lensReady, setLensReady] = useState(false)
 
   const conv: Conversation | undefined = data?.conversation
   const modelId = conv?.nextModel ?? ''
@@ -92,15 +118,56 @@ export function Composer({ conversationId: id }: { conversationId: string }) {
     const el = root.current
     const host = el?.parentElement
     if (!el || !host) return
+    // The lens map is redrawn only when the composer's size changes (never while typing on one line).
+    let size = ''
+    let timer: ReturnType<typeof setTimeout> | undefined
+    /** Bumped per draw (and on unmount): a decode that finishes after a newer one started is dropped. */
+    let drawSeq = 0
+    const drawLens = async (w: number, h: number) => {
+      const seq = ++drawSeq
+      const url = lensMapUrl(w, h, LENS_RADIUS, LENS_RIM)
+      if (!url) return
+      // Decode first, so feImage never shows a frame without its map (a backdrop jump).
+      try {
+        const img = new Image()
+        img.src = url
+        await img.decode()
+      } catch {
+        // No decode support or a failed decode: set the map anyway, as before.
+      }
+      if (seq !== drawSeq || !lensImage.current) return
+      lensImage.current.setAttribute('href', url)
+      setLensReady(true)
+    }
+    const fitLens = () => {
+      const fe = lensImage.current
+      if (!fe) return
+      // feImage covers the exact box (fractional px too); the map is drawn at whole px and stretched.
+      const box = el.getBoundingClientRect()
+      const w = Math.round(box.width)
+      const h = Math.round(box.height)
+      if (`${box.width}x${box.height}` === size) return
+      const first = size === ''
+      size = `${box.width}x${box.height}`
+      // The old map stretches to the new size at once, so the rim never shows unmapped glass.
+      fe.setAttribute('width', String(box.width))
+      fe.setAttribute('height', String(box.height))
+      clearTimeout(timer)
+      if (first) void drawLens(w, h)
+      else timer = setTimeout(() => void drawLens(w, h), LENS_DEBOUNCE_MS)
+    }
     const set = () => {
       const h = Math.ceil(host.getBoundingClientRect().bottom - el.getBoundingClientRect().top)
       document.documentElement.style.setProperty('--composer-h', `${h}px`)
+      fitLens()
     }
     set()
     const ro = new ResizeObserver(set)
     ro.observe(el)
     return () => {
       ro.disconnect()
+      clearTimeout(timer)
+      drawSeq++
       document.documentElement.style.removeProperty('--composer-h')
     }
   }, [])
@@ -206,13 +273,29 @@ export function Composer({ conversationId: id }: { conversationId: string }) {
     void storage.updateConversation(id, { nextEffort: nextEffort(model.efforts, effort) })
   }
 
+  // Switching while a reply is being written would put the divider before a reply made with the old prompt.
+  const openPrompts = () => {
+    if (busy || isGenerating(id)) toast.show('Wait for the reply to finish.')
+    else setPromptSheet(true)
+  }
+  const promptLabel = promptChipLabel(data?.prompt?.name)
+
   const label =
     action === 'stop' ? 'Stop' : action === 'reply' ? 'Ask for a reply' : 'Send (hold to add without reply)'
 
   // The sheet sits outside the glass: backdrop-filter would trap its fixed position.
   return (
     <>
-      <section ref={root} className={css.composer} aria-label="Composer">
+      {lens && (
+        // The lens filter, used by .lens as backdrop-filter: url(#orfe-lens). Sized to the composer in CSS px.
+        <svg className={css.lensDefs} width="0" height="0" aria-hidden="true" focusable="false">
+          <filter id="orfe-lens" x="0" y="0" width="100%" height="100%" colorInterpolationFilters="sRGB">
+            <feImage ref={lensImage} x="0" y="0" preserveAspectRatio="none" result="map" />
+            <feDisplacementMap in="SourceGraphic" in2="map" scale="36" xChannelSelector="R" yChannelSelector="G" />
+          </filter>
+        </svg>
+      )}
+      <section ref={root} className={lensReady ? `${css.composer} ${css.lens}` : css.composer} aria-label="Composer">
         <textarea
           ref={field}
           className={css.field}
@@ -231,9 +314,22 @@ export function Composer({ conversationId: id }: { conversationId: string }) {
               ▾
             </span>
           </button>
+          <button
+            className={`${css.chip} ${css.promptChip}`}
+            onClick={openPrompts}
+            aria-disabled={busy || undefined}
+            aria-label={`Prompt: ${data?.prompt?.name ?? 'No prompt'}. Change`}
+            // It gives way first, but keeps up to 6 characters ("Co-wr…"). Mono, so 1ch is one character.
+            style={{ '--floor': `${Math.min(Array.from(promptLabel).length, PROMPT_CHIP_FLOOR)}ch` } as CSSProperties}
+          >
+            <span className={css.chipText}>{promptLabel}</span>
+            <span className={css.caret} aria-hidden="true">
+              ▾
+            </span>
+          </button>
           {model.efforts && (
             <button className={css.chip} onClick={cycleEffort} aria-label={`Reasoning effort: ${effort ?? 'default'}. Change`}>
-              <span className={css.chipText}>effort: {effort ?? 'default'}</span>
+              <span className={css.chipText}>{effort ?? 'default'}</span>
             </button>
           )}
           <button
@@ -263,6 +359,12 @@ export function Composer({ conversationId: id }: { conversationId: string }) {
         </div>
       </section>
       <ModelSheet open={sheet} onClose={() => setSheet(false)} onPick={pick} current={modelId} />
+      <PromptSheet
+        open={promptSheet}
+        onClose={() => setPromptSheet(false)}
+        conversationId={id}
+        current={conv?.systemPromptRef ?? null}
+      />
     </>
   )
 }
