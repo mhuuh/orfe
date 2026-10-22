@@ -18,6 +18,24 @@
   gap: var(--s3);
   margin-bottom: var(--s1);
 }
+.lead {
+  display: flex;
+  align-items: flex-start;
+  gap: var(--s2);
+  min-width: 0;
+}
+.pinned {
+  flex: none;
+  font: 400 11px/16px var(--font-mono);
+  color: var(--mute);
+}
+
+/* Before the context window: the whole reply steps down to mute (a colour step, not opacity).
+   !important so a model's inline colours step down too. */
+.outside .prose,
+.outside .prose :global(*) {
+  color: var(--mute) !important;
+}
 
 /* ---------- Note: stopped, interrupted, error ---------- */
 .note {

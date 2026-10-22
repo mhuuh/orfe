@@ -6,6 +6,7 @@ import type { Settings as SettingsT } from '../lib/types'
 import { Sheet } from './Sheet'
 import { KeySetup } from './KeySetup'
 import { ModelSheet } from './ModelSheet'
+import { ContextFields, SwitchRow } from './ChatSettings'
 import css from './Settings.module.css'
 
 type KeyInfo = Awaited<ReturnType<typeof fetchKeyInfo>>
@@ -127,6 +128,28 @@ export function Settings({ open, onClose }: { open: boolean; onClose: () => void
               </button>
             </div>
             <div className={css.meta}>New chats start with this model.</div>
+          </section>
+
+          <section className={css.group}>
+            <h3 className={css.label}>Context</h3>
+            <ContextFields
+              value={settings.context}
+              onChange={(patch) =>
+                // setSettings replaces nested objects: always write the whole context, from a fresh read.
+                void storage.getSettings().then((s) => storage.setSettings({ context: { ...s.context, ...patch } }))
+              }
+            />
+          </section>
+
+          <section className={css.group}>
+            <h3 className={css.label}>Cache</h3>
+            <SwitchRow
+              id="cache-hour"
+              label="Keep Anthropic cache for 1 hour"
+              checked={settings.anthropicCacheHour}
+              onToggle={() => void storage.setSettings({ anthropicCacheHour: !settings.anthropicCacheHour })}
+            />
+            <div className={css.meta}>Costs 2× to write. The default keeps it for 5 minutes.</div>
           </section>
         </div>
       </Sheet>

@@ -134,6 +134,24 @@ describe('storage', () => {
     expect(stored?.versions[0].status).toBe('done')
     expect(await storage.mutateMessage('missing', (x) => x)).toBeUndefined()
   })
+
+  it('mutateConversation patches from the stored copy, with v1 defaults filled', async () => {
+    const c = await storage.createConversation()
+    // A v1 row: no context, no tokenRatio.
+    const { context: _c, tokenRatio: _t, ...v1 } = c
+    await db.conversations.put(v1 as typeof c)
+    await storage.updateConversation(c.id, { title: 'Renamed elsewhere' })
+    const seen: unknown[] = []
+    await storage.mutateConversation(c.id, (x) => {
+      seen.push(x.context, x.tokenRatio, x.title)
+      return { context: { mode: 'messages', limit: 40, trimTo: 0.7 } }
+    })
+    expect(seen).toEqual([null, 1, 'Renamed elsewhere'])
+    const stored = await storage.getConversation(c.id)
+    expect(stored?.context).toEqual({ mode: 'messages', limit: 40, trimTo: 0.7 })
+    expect(stored?.title).toBe('Renamed elsewhere')
+    expect(await storage.mutateConversation('missing', () => ({ title: 'x' }))).toBe(false)
+  })
 })
 
 describe('schema v2 and prompts', () => {

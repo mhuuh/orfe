@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { estimateTokens, fingerprint, isCold, planWindow, ttlFor } from './context'
+import { estimateTokens, fingerprint, isCold, planWindow, ttlFor, viewWindow } from './context'
 import { buildOutgoing } from './normalise'
 import type { OutMessage } from './openrouter'
 import type { ContentPart, ContextSetting, LastRequest, Message, Role } from './types'
@@ -298,5 +298,31 @@ describe('planWindow', () => {
       size: 1,
       limit: 100,
     })
+  })
+})
+
+describe('viewWindow', () => {
+  const view = { windowStartId: null, windowStartOrder: null, setting: tokens100, system: null, ratio: 1 }
+
+  it('shows the stored start and never trims, even over the limit', () => {
+    // 10 × 40 chars = 100 tokens from m3 on (8 messages = 80) plus pinned m1 (10) = 90; limit 50.
+    const messages = transcript(10)
+    messages[0].pinned = true
+    const v = viewWindow({ ...view, messages, windowStartId: 'm3', windowStartOrder: 3, setting: { ...tokens100, limit: 50 } })
+    expect(v.startId).toBe('m3')
+    expect(v.trimmed).toBe(false)
+    expect(v.size).toBe(90)
+    expect(v.limit).toBe(50)
+  })
+
+  it('no stored start: no start to show', () => {
+    const v = viewWindow({ ...view, messages: transcript(10), setting: { ...tokens100, limit: 10 } })
+    expect(v.startId).toBeNull()
+    expect(v.size).toBe(100)
+  })
+
+  it('a deleted start snaps to the next message by order, as when sending', () => {
+    const messages = transcript(6).filter((m) => m.id !== 'm3')
+    expect(viewWindow({ ...view, messages, windowStartId: 'm3', windowStartOrder: 3 }).startId).toBe('m4')
   })
 })

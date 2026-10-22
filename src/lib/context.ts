@@ -176,3 +176,19 @@ export function planWindow(input: PlanInput): Plan {
   }
   return { startId: sorted[idx].id, startOrder: sorted[idx].order, trimmed, size, limit }
 }
+
+/**
+ * The window as it is stored, for display (header size, transcript marker). Resolves the stored
+ * start exactly as `planWindow` does (deleted start → next by order, dividers skipped, never past
+ * the last user message) but never trims: only a send moves the start.
+ */
+export function viewWindow(input: Omit<PlanInput, 'cold' | 'soft'>): Plan {
+  const limit = Math.max(1, fin(input.setting.limit, 32000))
+  const plan = planWindow({
+    ...input,
+    setting: { ...input.setting, limit: Number.MAX_SAFE_INTEGER },
+    cold: false,
+    soft: 1,
+  })
+  return { ...plan, limit }
+}

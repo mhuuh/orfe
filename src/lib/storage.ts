@@ -40,6 +40,8 @@ export interface Storage {
   getConversation(id: string): Promise<Conversation | undefined>
   createConversation(init?: Partial<Conversation>): Promise<Conversation>
   updateConversation(id: string, patch: Partial<Conversation>): Promise<void>
+  /** Re-reads the conversation (defaults filled) inside a write transaction and applies the patch `fn` returns. False if it is gone. */
+  mutateConversation(id: string, fn: (c: Conversation) => Partial<Conversation>): Promise<boolean>
   deleteConversation(id: string): Promise<void>
   listMessages(conversationId: string): Promise<Message[]>
   putMessage(m: Message): Promise<void>
@@ -102,6 +104,14 @@ export const storage: Storage = {
   },
   async updateConversation(id, patch) {
     await db.conversations.update(id, patch)
+  },
+  async mutateConversation(id, fn) {
+    return db.transaction('rw', db.conversations, async () => {
+      const c = await db.conversations.get(id)
+      if (!c) return false
+      await db.conversations.update(id, fn(withConversationDefaults(c)))
+      return true
+    })
   },
   async deleteConversation(id) {
     await db.transaction('rw', db.conversations, db.messages, async () => {

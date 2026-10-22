@@ -1,0 +1,114 @@
+/* Chat settings reuse the Settings sheet's rows; these are the extra controls. */
+.fields {
+  display: flex;
+  flex-direction: column;
+  gap: var(--s2);
+  margin-top: var(--s3);
+}
+.field {
+  display: block;
+  width: 100%;
+  min-height: 44px;
+  margin: 0;
+  padding: 0 var(--s4);
+  border: 0;
+  border-radius: 999px;
+  background: var(--bg);
+  box-shadow: inset 0 0 0 1px var(--line);
+  color: var(--ink);
+  caret-color: var(--ink);
+  font: 400 15px/22px var(--font-ui);
+  -webkit-appearance: none;
+  appearance: none;
+}
+.field:focus {
+  outline: none;
+  box-shadow: inset 0 0 0 1px var(--mute);
+}
+.limit {
+  display: flex;
+  align-items: center;
+  gap: var(--s2);
+  min-height: 40px;
+  padding: 0 var(--s4);
+  border-radius: 999px;
+  background: var(--bg);
+  box-shadow: inset 0 0 0 1px var(--line);
+  cursor: text;
+}
+.limit:focus-within {
+  box-shadow: inset 0 0 0 1px var(--mute);
+}
+.limitInput {
+  width: 8ch;
+  min-width: 0;
+  margin: 0;
+  padding: 0;
+  border: 0;
+  background: none;
+  color: var(--ink);
+  caret-color: var(--ink);
+  font: 400 15px/22px var(--font-ui);
+  font-variant-numeric: tabular-nums;
+  text-align: right;
+  -webkit-appearance: none;
+  appearance: none;
+}
+.limitInput:focus {
+  outline: none;
+}
+.unit {
+  font: 400 13px/20px var(--font-ui);
+  color: var(--mute);
+}
+
+/* − 70% +: two round buttons around the value. */
+.stepper {
+  display: flex;
+  align-items: center;
+  gap: var(--s1);
+}
+.step {
+  flex: none;
+  width: 40px;
+  height: 40px;
+  display: grid;
+  place-items: center;
+  padding: 0;
+  border: 0;
+  border-radius: 999px;
+  background: var(--bg);
+  color: var(--ink);
+  cursor: pointer;
+  -webkit-tap-highlight-color: transparent;
+}
+.step:disabled {
+  color: var(--faint);
+  cursor: default;
+}
+.step:focus-visible {
+  outline: 2px solid var(--ink);
+  outline-offset: 2px;
+}
+.pct {
+  min-width: 48px;
+  text-align: center;
+  font: 400 15px/22px var(--font-ui);
+  font-variant-numeric: tabular-nums;
+}
+
+.totals {
+  display: grid;
+  grid-template-columns: 1fr auto;
+  gap: var(--s1) var(--s3);
+  margin: 0;
+}
+.totals dt {
+  font: 400 15px/22px var(--font-ui);
+}
+.totals dd {
+  margin: 0;
+  font: 400 13px/22px var(--font-mono);
+  font-variant-numeric: tabular-nums;
+  text-align: right;
+}

@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useLayoutEffect, useRef, useState, type ReactNode } from 'react'
 import { useLiveQuery } from 'dexie-react-hooks'
-import { storage } from '../lib/storage'
+import { viewWindow } from '../lib/context'
+import { DEFAULT_SETTINGS, storage } from '../lib/storage'
 import type { Version } from '../lib/types'
 import { AssistantMessage } from './AssistantMessage'
 import { Divider, dividerLabel } from './Divider'
@@ -25,6 +26,8 @@ export function followAfterScroll(dist: number, delta: number, following: boolea
   if (delta > 0) return dist <= STICK_PX
   return following && dist <= STICK_PX
 }
+
+const START_LABEL = 'context starts here'
 
 const UP_KEYS = new Set(['PageUp', 'ArrowUp', 'Home'])
 const TOUCH_SLOP_PX = 8
@@ -117,11 +120,30 @@ export function Transcript({ conversationId }: { conversationId: string | null }
   const busy = messages.some((m) => m.versions.some((v) => v.status === 'streaming'))
   const lastId = messages[messages.length - 1]?.id
 
+  // Where the stored window starts, resolved exactly as a send resolves it, never trimmed here.
+  // The start does not depend on the limit or the system text, so defaults stand in for them.
+  const conv = data?.conversation
+  const startId = conv
+    ? viewWindow({
+        messages,
+        windowStartId: conv.windowStartMessageId,
+        windowStartOrder: conv.windowStartOrder,
+        setting: conv.context ?? DEFAULT_SETTINGS.context,
+        system: null,
+        ratio: 1,
+      }).startId
+    : null
+  const startIdx = startId === null ? -1 : messages.findIndex((m) => m.id === startId)
+  // Nothing to mark when no real message comes before the start.
+  const marked = startIdx > 0 && messages.slice(0, startIdx).some((m) => m.role !== 'divider')
+
   const items: ReactNode[] = []
   let prev: Version | undefined
   /** A stored prompt-swap divider came after the previous reply. */
   let swapped = false
-  for (const m of messages) {
+  messages.forEach((m, i) => {
+    const isStart = marked && i === startIdx
+    if (isStart) items.push(<Divider key="ctx-start" label={START_LABEL} />)
     const toggle = () => setSelected((s) => (s === m.id ? null : m.id))
     const common = {
       message: m,
@@ -131,6 +153,7 @@ export function Transcript({ conversationId }: { conversationId: string | null }
       editing: editing === m.id,
       ops,
       onToggle: toggle,
+      outside: marked && i < startIdx && !m.pinned,
     }
     if (m.role === 'divider') {
       if (m.dividerLabel) items.push(<Divider key={m.id} label={m.dividerLabel} />)
@@ -141,12 +164,14 @@ export function Transcript({ conversationId }: { conversationId: string | null }
       const v = m.versions[m.activeVersion] ?? m.versions[0]
       const promptName = v?.promptRef ? prompts?.get(v.promptRef)?.name : null
       const label = v ? dividerLabel(prev, v, promptName, swapped) : null
-      if (label) items.push(<Divider key={`d-${m.id}`} label={label} />)
-      items.push(<AssistantMessage key={m.id} {...common} afterDivider={label !== null} prompts={prompts} />)
+      // At the window start the marker already draws the hairline: one line carries both labels.
+      if (label && isStart) items[items.length - 1] = <Divider key="ctx-start" label={`${START_LABEL} · ${label}`} />
+      else if (label) items.push(<Divider key={`d-${m.id}`} label={label} />)
+      items.push(<AssistantMessage key={m.id} {...common} afterDivider={label !== null || isStart} prompts={prompts} />)
       prev = v
       swapped = false
     }
-  }
+  })
 
   return (
     <main

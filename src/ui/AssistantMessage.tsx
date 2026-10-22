@@ -98,9 +98,11 @@ interface Props {
   prompts?: PromptIndex
   ops: MessageOps
   onToggle(): void
+  /** Before the context window start and not pinned: not sent, shown in mute. */
+  outside?: boolean
 }
 
-export function AssistantMessage({ message, isLast, busy, selected, editing, afterDivider, prompts, ops, onToggle }: Props) {
+export function AssistantMessage({ message, isLast, busy, selected, editing, afterDivider, prompts, ops, onToggle, outside }: Props) {
   const version = message.versions[message.activeVersion] ?? message.versions[0]
   const text = versionText(version)
   const streaming = version.status === 'streaming'
@@ -113,14 +115,17 @@ export function AssistantMessage({ message, isLast, busy, selected, editing, aft
 
   return (
     <article
-      className={`${css.assistant} ${afterDivider ? css.afterDivider : ''}`}
+      className={`${css.assistant} ${afterDivider ? css.afterDivider : ''} ${outside ? css.outside : ''}`}
       aria-label={`Reply from ${version.model ?? 'assistant'}`}
       aria-busy={streaming}
       tabIndex={0}
       {...tapHandlers(onToggle)}
     >
       <div className={css.head}>
-        <MetaLine version={version} prompts={prompts} />
+        <span className={css.lead}>
+          <MetaLine version={version} prompts={prompts} />
+          {message.pinned && <span className={css.pinned}>pinned</span>}
+        </span>
         <Versions count={message.versions.length} active={message.activeVersion} onPick={(i) => ops.setActive(message.id, i)} />
       </div>
       {version.reasoning && <Thinking key={version.id} reasoning={version.reasoning} thinking={streaming && text === ''} />}

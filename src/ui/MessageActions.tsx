@@ -18,6 +18,8 @@ export interface MessageOps {
   remove(m: Message): void
   removeVersion(id: string): void
   setActive(id: string, index: number): void
+  /** Pinned messages are always sent, even before the window start. */
+  pin(id: string, pinned: boolean): void
 }
 
 /**
@@ -98,6 +100,10 @@ export function useMessageOps(
       setActive(id, index) {
         void storage.mutateMessage(id, (m) => withActive(m, index))
       },
+      pin(id, pinned) {
+        deselect()
+        void storage.mutateMessage(id, (m) => ({ ...m, pinned }))
+      },
     }),
     [run, setEditing, deselect, toast],
   )
@@ -119,6 +125,7 @@ export function MessageActions({ message, isLast, busy, ops }: ActionsProps) {
   if (assistant) items.push({ label: 'Reroll', run: () => ops.reroll(message.id), disabled: busy })
   if (assistant && isLast) items.push({ label: 'Continue', run: () => ops.cont(message.id), disabled: busy })
   items.push({ label: 'Copy', run: () => ops.copy(message) })
+  items.push({ label: message.pinned ? 'Unpin' : 'Pin', run: () => ops.pin(message.id, !message.pinned) })
   if (!streamingHere) {
     items.push({ label: 'Delete', run: () => ops.remove(message) })
     if (message.versions.length > 1) items.push({ label: 'Delete this version', run: () => ops.removeVersion(message.id) })
