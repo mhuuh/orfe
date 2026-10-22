@@ -59,15 +59,29 @@ describe('lensMap', () => {
 describe('supportsBackdropUrl', () => {
   afterEach(() => vi.unstubAllGlobals())
 
-  it('asks CSS.supports for backdrop-filter url()', () => {
+  it('asks CSS.supports for backdrop-filter url() in Chromium', () => {
     const supports = vi.fn(() => true)
     vi.stubGlobal('CSS', { supports })
+    vi.stubGlobal('navigator', { userAgentData: { brands: [] } })
     expect(supportsBackdropUrl()).toBe(true)
     expect(supports).toHaveBeenCalledWith('backdrop-filter', 'url(#x)')
   })
 
   it('is false where CSS.supports is missing', () => {
     vi.stubGlobal('CSS', undefined)
+    vi.stubGlobal('navigator', { userAgentData: { brands: [] } })
+    expect(supportsBackdropUrl()).toBe(false)
+  })
+
+  it('is false outside Chromium even when CSS.supports parses the url() (Firefox, Safari)', () => {
+    vi.stubGlobal('CSS', { supports: vi.fn(() => true) })
+    vi.stubGlobal('navigator', { userAgent: 'Mozilla/5.0 Firefox/140.0' })
+    expect(supportsBackdropUrl()).toBe(false)
+  })
+
+  it('is false where CSS.supports says no, even in Chromium', () => {
+    vi.stubGlobal('CSS', { supports: vi.fn(() => false) })
+    vi.stubGlobal('navigator', { userAgentData: { brands: [] } })
     expect(supportsBackdropUrl()).toBe(false)
   })
 })

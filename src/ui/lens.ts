@@ -64,7 +64,17 @@ export function lensMapUrl(w: number, h: number, radius: number, rim: number): s
   return canvas.toDataURL()
 }
 
-/** Whether `backdrop-filter` takes an SVG filter reference. True only in Chromium. */
+/**
+ * Whether `backdrop-filter` takes an SVG filter reference. True only in Chromium.
+ *
+ * CSS.supports alone is not enough: it checks only that the value parses, and Firefox and Safari
+ * parse `url(#x)` but then render no backdrop at all (no blur, only the tint). So it also needs a
+ * Chromium-only signal: `navigator.userAgentData` (Chrome, Edge, Samsung Internet; secure contexts,
+ * which GitHub Pages and localhost are).
+ */
 export function supportsBackdropUrl(): boolean {
-  return typeof CSS !== 'undefined' && typeof CSS?.supports === 'function' && CSS.supports('backdrop-filter', 'url(#x)')
+  const chromium = typeof navigator !== 'undefined' && 'userAgentData' in navigator
+  return (
+    chromium && typeof CSS !== 'undefined' && typeof CSS?.supports === 'function' && CSS.supports('backdrop-filter', 'url(#x)')
+  )
 }

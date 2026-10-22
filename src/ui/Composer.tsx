@@ -121,9 +121,21 @@ export function Composer({ conversationId: id }: { conversationId: string }) {
     // The lens map is redrawn only when the composer's size changes (never while typing on one line).
     let size = ''
     let timer: ReturnType<typeof setTimeout> | undefined
-    const drawLens = (w: number, h: number) => {
+    /** Bumped per draw (and on unmount): a decode that finishes after a newer one started is dropped. */
+    let drawSeq = 0
+    const drawLens = async (w: number, h: number) => {
+      const seq = ++drawSeq
       const url = lensMapUrl(w, h, LENS_RADIUS, LENS_RIM)
-      if (!url || !lensImage.current) return
+      if (!url) return
+      // Decode first, so feImage never shows a frame without its map (a backdrop jump).
+      try {
+        const img = new Image()
+        img.src = url
+        await img.decode()
+      } catch {
+        // No decode support or a failed decode: set the map anyway, as before.
+      }
+      if (seq !== drawSeq || !lensImage.current) return
       lensImage.current.setAttribute('href', url)
       setLensReady(true)
     }
@@ -141,8 +153,8 @@ export function Composer({ conversationId: id }: { conversationId: string }) {
       fe.setAttribute('width', String(box.width))
       fe.setAttribute('height', String(box.height))
       clearTimeout(timer)
-      if (first) drawLens(w, h)
-      else timer = setTimeout(() => drawLens(w, h), LENS_DEBOUNCE_MS)
+      if (first) void drawLens(w, h)
+      else timer = setTimeout(() => void drawLens(w, h), LENS_DEBOUNCE_MS)
     }
     const set = () => {
       const h = Math.ceil(host.getBoundingClientRect().bottom - el.getBoundingClientRect().top)
@@ -155,6 +167,7 @@ export function Composer({ conversationId: id }: { conversationId: string }) {
     return () => {
       ro.disconnect()
       clearTimeout(timer)
+      drawSeq++
       document.documentElement.style.removeProperty('--composer-h')
     }
   }, [])
