@@ -24,7 +24,10 @@ class OrfeDb extends Dexie {
     })
     // New fields on old rows get their defaults on read (storage.ts), so no upgrade function.
     this.version(2).stores({ prompts: 'id, parentId' })
-    // Another tab opened a newer schema: let it upgrade, and tell the UI to offer a reload.
+    // Another tab opened a newer schema. Dexie's own handler runs first: it closes this connection
+    // (so the upgrade is not blocked) and keeps auto-open on, so the next query would reopen the db.
+    // Our close() turns auto-open off: this tab runs code for the old schema, so it stops reading and
+    // writing (queries fail with DatabaseClosedError) until the reload the toast offers.
     this.on('versionchange', () => {
       this.close()
       if (typeof window !== 'undefined') window.dispatchEvent(new Event('orfe:db-outdated'))

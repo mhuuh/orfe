@@ -25,6 +25,8 @@ test('Back with edits shows the unsaved row and keeps the sheet open', async ({ 
   // The refused Back put its step back: the next Back asks again instead of leaving.
   await editor.getByRole('button', { name: 'Keep editing' }).click()
   await expect(editor.getByText('Unsaved changes')).toHaveCount(0)
+  // Keep editing puts the caret back in the text, so the phone keyboard comes back.
+  await expect(page.getByLabel('Prompt text')).toBeFocused()
   await page.goBack()
   await expect(editor.getByText('Unsaved changes')).toBeVisible()
   expect(page.url()).toBe(chat)

@@ -366,7 +366,14 @@ function Editor({ draft, prompts, conversationId, current, onDone, onOpen, toast
             <button className={css.quiet} onClick={guard.discard}>
               Discard
             </button>
-            <button className={css.save} onClick={guard.keep}>
+            <button
+              className={css.save}
+              onClick={() => {
+                guard.keep()
+                // Back to the text, so the Android keyboard comes back up.
+                textField.current?.focus({ preventScroll: true })
+              }}
+            >
               Keep editing
             </button>
           </>

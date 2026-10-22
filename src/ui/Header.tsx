@@ -66,7 +66,9 @@ export function Header({ conversationId, onMenu }: { conversationId: string | nu
     return { id: conversationId, title: conv.title, meta }
   }, [conversationId])
 
-  const current = info && info.id === conversationId ? info : null
+  // On a chat switch useLiveQuery keeps the previous result until the new query returns. Show it
+  // meanwhile (one frame of the old title) rather than flash the brand title with no meta.
+  const current = conversationId && info ? info : null
 
   return (
     <>
