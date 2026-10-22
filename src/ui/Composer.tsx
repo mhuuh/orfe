@@ -10,11 +10,17 @@ import { ModelSheet } from './ModelSheet'
 import { PromptSheet } from './PromptSheet'
 import { useToast } from './Toast'
 import { findModel, useCatalog } from './useCatalog'
+import { lensMapUrl, supportsBackdropUrl } from './lens'
 import css from './Composer.module.css'
 
 const LONG_PRESS_MS = 500
 const LINE_PX = 22
 const MAX_LINES = 8
+/** The lens rim: matches the composer's 22 px radius; bends the outer 16 px. */
+const LENS_RADIUS = 22
+const LENS_RIM = 16
+/** A new lens map waits for the size to settle (multi-line growth, rotation). */
+const LENS_DEBOUNCE_MS = 100
 /** A second tap this soon after sending is a double tap, not a request to stop. */
 export const STOP_GRACE_MS = 400
 
@@ -87,6 +93,10 @@ export function Composer({ conversationId: id }: { conversationId: string }) {
   const pressTimer = useRef<ReturnType<typeof setTimeout> | undefined>(undefined)
   const longPressed = useRef(false)
   const startedAt = useRef(-Infinity)
+  const lensImage = useRef<SVGFEImageElement>(null)
+  // Chromium only; checked once. Until the first map is in, the plain glass shows.
+  const [lens] = useState(supportsBackdropUrl)
+  const [lensReady, setLensReady] = useState(false)
 
   const conv: Conversation | undefined = data?.conversation
   const modelId = conv?.nextModel ?? ''
@@ -108,15 +118,43 @@ export function Composer({ conversationId: id }: { conversationId: string }) {
     const el = root.current
     const host = el?.parentElement
     if (!el || !host) return
+    // The lens map is redrawn only when the composer's size changes (never while typing on one line).
+    let size = ''
+    let timer: ReturnType<typeof setTimeout> | undefined
+    const drawLens = (w: number, h: number) => {
+      const url = lensMapUrl(w, h, LENS_RADIUS, LENS_RIM)
+      if (!url || !lensImage.current) return
+      lensImage.current.setAttribute('href', url)
+      setLensReady(true)
+    }
+    const fitLens = () => {
+      const fe = lensImage.current
+      if (!fe) return
+      // feImage covers the exact box (fractional px too); the map is drawn at whole px and stretched.
+      const box = el.getBoundingClientRect()
+      const w = Math.round(box.width)
+      const h = Math.round(box.height)
+      if (`${box.width}x${box.height}` === size) return
+      const first = size === ''
+      size = `${box.width}x${box.height}`
+      // The old map stretches to the new size at once, so the rim never shows unmapped glass.
+      fe.setAttribute('width', String(box.width))
+      fe.setAttribute('height', String(box.height))
+      clearTimeout(timer)
+      if (first) drawLens(w, h)
+      else timer = setTimeout(() => drawLens(w, h), LENS_DEBOUNCE_MS)
+    }
     const set = () => {
       const h = Math.ceil(host.getBoundingClientRect().bottom - el.getBoundingClientRect().top)
       document.documentElement.style.setProperty('--composer-h', `${h}px`)
+      fitLens()
     }
     set()
     const ro = new ResizeObserver(set)
     ro.observe(el)
     return () => {
       ro.disconnect()
+      clearTimeout(timer)
       document.documentElement.style.removeProperty('--composer-h')
     }
   }, [])
@@ -235,7 +273,16 @@ export function Composer({ conversationId: id }: { conversationId: string }) {
   // The sheet sits outside the glass: backdrop-filter would trap its fixed position.
   return (
     <>
-      <section ref={root} className={css.composer} aria-label="Composer">
+      {lens && (
+        // The lens filter, used by .lens as backdrop-filter: url(#orfe-lens). Sized to the composer in CSS px.
+        <svg className={css.lensDefs} width="0" height="0" aria-hidden="true" focusable="false">
+          <filter id="orfe-lens" x="0" y="0" width="100%" height="100%" colorInterpolationFilters="sRGB">
+            <feImage ref={lensImage} x="0" y="0" preserveAspectRatio="none" result="map" />
+            <feDisplacementMap in="SourceGraphic" in2="map" scale="36" xChannelSelector="R" yChannelSelector="G" />
+          </filter>
+        </svg>
+      )}
+      <section ref={root} className={lensReady ? `${css.composer} ${css.lens}` : css.composer} aria-label="Composer">
         <textarea
           ref={field}
           className={css.field}

@@ -40,6 +40,30 @@
   mask-composite: exclude;
 }
 
+/*
+ * Lens edge (Chromium, mockup child 3): the rim bends the text behind it like thick glass,
+ * the middle stays clear. Less blur and less tint than the plain glass, so the bend shows.
+ * The class is only set once the lens map is drawn (see lens.ts).
+ */
+.lens {
+  background: color-mix(in oklab, var(--bg) 38%, transparent);
+  backdrop-filter: url(#orfe-lens) blur(5px) saturate(1.5) brightness(1.04);
+}
+@media (prefers-reduced-transparency: reduce) {
+  .lens {
+    background: color-mix(in oklab, var(--bg) 62%, transparent);
+    backdrop-filter: blur(22px) saturate(1.4);
+  }
+}
+/* Holds the filter only; display: none would switch the filter off. */
+.lensDefs {
+  position: absolute;
+  width: 0;
+  height: 0;
+  overflow: hidden;
+  pointer-events: none;
+}
+
 .field {
   display: block;
   width: 100%;
