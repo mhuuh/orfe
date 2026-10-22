@@ -365,6 +365,20 @@ export async function setPrompt(conversationId: string, promptRef: string | null
   })
 }
 
+/**
+ * Sets the chat's prompt ref to `to` only while it is still `from`, with no divider.
+ * For deleting the prompt a chat uses (and undoing that): the chat's prompt did not
+ * change by choice, and an undo should leave the transcript as it was.
+ */
+export async function replacePromptRef(conversationId: string, from: string | null, to: string | null): Promise<boolean> {
+  return db.transaction('rw', db.conversations, async () => {
+    const c = await db.conversations.get(conversationId)
+    if (!c || (c.systemPromptRef ?? null) !== from) return false
+    await db.conversations.update(conversationId, { systemPromptRef: to })
+    return true
+  })
+}
+
 interface RunArgs {
   conversation: Conversation
   stream: boolean

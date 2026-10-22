@@ -3,7 +3,7 @@ import { renderMarkdown } from '../lib/markdown'
 import type { Message, Version } from '../lib/types'
 import { versionText } from '../lib/versions'
 import { EditBox, MessageActions, type MessageOps } from './MessageActions'
-import { MetaLine } from './MetaLine'
+import { MetaLine, type PromptIndex } from './MetaLine'
 import { Thinking } from './Thinking'
 import { Versions } from './Versions'
 import css from './AssistantMessage.module.css'
@@ -94,11 +94,13 @@ interface Props {
   selected: boolean
   editing: boolean
   afterDivider: boolean
+  /** For the meta line's "prompt: …" detail. */
+  prompts?: PromptIndex
   ops: MessageOps
   onToggle(): void
 }
 
-export function AssistantMessage({ message, isLast, busy, selected, editing, afterDivider, ops, onToggle }: Props) {
+export function AssistantMessage({ message, isLast, busy, selected, editing, afterDivider, prompts, ops, onToggle }: Props) {
   const version = message.versions[message.activeVersion] ?? message.versions[0]
   const text = versionText(version)
   const streaming = version.status === 'streaming'
@@ -118,7 +120,7 @@ export function AssistantMessage({ message, isLast, busy, selected, editing, aft
       {...tapHandlers(onToggle)}
     >
       <div className={css.head}>
-        <MetaLine version={version} />
+        <MetaLine version={version} prompts={prompts} />
         <Versions count={message.versions.length} active={message.activeVersion} onPick={(i) => ops.setActive(message.id, i)} />
       </div>
       {version.reasoning && <Thinking key={version.id} reasoning={version.reasoning} thinking={streaming && text === ''} />}

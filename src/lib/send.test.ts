@@ -1,7 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { fallbackModelInfo, type ModelInfo } from './catalog'
 import { db, newId, storage } from './storage'
-import { computeCold, deleteChat, errorText, generate, patchVersion, isGenerating, recoverInterrupted, restoreChat, sendUserMessage, setPrompt, stop } from './send'
+import { computeCold, deleteChat, errorText, generate, patchVersion, isGenerating, recoverInterrupted, replacePromptRef, restoreChat, sendUserMessage, setPrompt, stop } from './send'
 import { CAPABILITY_NOTE, systemFor } from './system'
 import { fingerprint } from './context'
 import type { Version } from './types'
@@ -661,5 +661,21 @@ describe('setPrompt', () => {
     // A ref to a deleted prompt reads as "No prompt".
     await setPrompt(convId, 'gone')
     expect((await storage.listMessages(convId)).at(-1)!.dividerLabel).toBe('→ No prompt')
+  })
+})
+
+describe('replacePromptRef', () => {
+  it('swaps the ref only while it still holds the expected value, without a divider', async () => {
+    await sendUserMessage(convId, 'hi', { reply: false })
+    await storage.updateConversation(convId, { systemPromptRef: 'p1' })
+
+    expect(await replacePromptRef(convId, 'p1', null)).toBe(true)
+    expect((await storage.getConversation(convId))!.systemPromptRef).toBeNull()
+    expect(await storage.listMessages(convId)).toHaveLength(1) // no divider
+
+    // The chat moved on to another prompt meanwhile: an undo must not pull it back.
+    await storage.updateConversation(convId, { systemPromptRef: 'p2' })
+    expect(await replacePromptRef(convId, null, 'p1')).toBe(false)
+    expect((await storage.getConversation(convId))!.systemPromptRef).toBe('p2')
   })
 })

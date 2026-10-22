@@ -84,9 +84,19 @@
   cursor: pointer;
   transition: box-shadow 150ms ease-out;
 }
-/* The model chip gives way first when ids are long. */
-.chip:first-child {
-  flex: 0 1 auto;
+/*
+ * The model and prompt chips share the room the effort chip and Send leave, half each.
+ * A chip that needs less than half keeps its full text and hands the rest to the other.
+ */
+.chip:first-child,
+.promptChip {
+  flex: 1 1 0;
+  max-width: max-content;
+}
+/* While a reply is being written the prompt cannot change: the text steps down to mute. */
+.chip[aria-disabled='true'] {
+  color: var(--mute);
+  cursor: default;
 }
 /* A 44 px tall touch target around a 28 px chip. */
 .chip::after {

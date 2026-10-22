@@ -1,0 +1,195 @@
+/* Rows follow the model sheet: 20 px margins, Geist 15/22, a check on the right. */
+.rows {
+  margin: 0;
+  padding: var(--s1) 0 var(--s2);
+  list-style: none;
+}
+.item {
+  display: flex;
+  align-items: center;
+}
+.pick {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  align-items: center;
+  gap: var(--s3);
+  min-height: 48px;
+  padding: var(--s2) var(--s3) var(--s2) 20px;
+  border: 0;
+  background: none;
+  color: var(--ink);
+  text-align: left;
+  font: inherit;
+  cursor: pointer;
+  -webkit-tap-highlight-color: transparent;
+}
+/* Variants sit under their parent, 16 px in. */
+.variant .pick {
+  padding-left: calc(20px + var(--s4));
+}
+.item:has(.pick:active) {
+  background: color-mix(in oklab, var(--line) 50%, transparent);
+}
+@media (hover: hover) {
+  .item:has(.pick:hover) {
+    background: color-mix(in oklab, var(--line) 50%, transparent);
+  }
+}
+.name {
+  flex: 1;
+  min-width: 0;
+  font: 400 15px/22px var(--font-ui);
+  overflow-wrap: anywhere;
+}
+.check {
+  flex: none;
+  color: var(--ink);
+}
+.add {
+  color: var(--mute);
+}
+.add svg {
+  flex: none;
+}
+
+/* The quiet Edit pill: a hairline ring, mute text, 44 px touch target. */
+.edit {
+  position: relative;
+  flex: none;
+  margin-right: var(--s4);
+  min-width: 52px;
+  min-height: 28px;
+  padding: 0 var(--s3);
+  border: 0;
+  border-radius: 999px;
+  background: none;
+  box-shadow: inset 0 0 0 1px var(--line);
+  color: var(--mute);
+  font: 400 13px/20px var(--font-ui);
+  cursor: pointer;
+  -webkit-tap-highlight-color: transparent;
+  transition:
+    color 150ms ease-out,
+    box-shadow 150ms ease-out;
+}
+.edit::after {
+  content: '';
+  position: absolute;
+  inset: -8px -4px;
+}
+@media (hover: hover) {
+  .edit:hover {
+    color: var(--ink);
+    box-shadow: inset 0 0 0 1px var(--mute);
+  }
+}
+
+.editSpace {
+  flex: none;
+  width: 52px;
+  margin-right: var(--s4);
+}
+
+/* Editor */
+.editor {
+  display: flex;
+  flex-direction: column;
+  gap: var(--s3);
+  padding: var(--s4) 20px var(--s4);
+}
+.nameField,
+.textField {
+  display: block;
+  width: 100%;
+  margin: 0;
+  border: 0;
+  background: var(--bg);
+  box-shadow: inset 0 0 0 1px var(--line);
+  color: var(--ink);
+  caret-color: var(--ink);
+  font: 400 15px/22px var(--font-ui);
+  -webkit-appearance: none;
+  appearance: none;
+}
+.nameField {
+  min-height: 44px;
+  padding: 0 var(--s4);
+  border-radius: 999px;
+}
+.textField {
+  min-height: calc(5 * 22px + 2 * var(--s3));
+  max-height: 60dvh;
+  padding: var(--s3) var(--s4);
+  border-radius: var(--radius);
+  resize: none;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  scrollbar-width: thin;
+  scrollbar-color: var(--line) transparent;
+}
+.nameField::placeholder,
+.textField::placeholder {
+  color: var(--faint);
+  opacity: 1;
+}
+.nameField:focus,
+.textField:focus {
+  outline: none;
+  box-shadow: inset 0 0 0 1px var(--mute);
+}
+
+.bar {
+  display: flex;
+  align-items: center;
+  gap: var(--s1);
+  margin: var(--s1) 0 0 calc(-1 * var(--s3));
+}
+.save {
+  min-height: 36px;
+  padding: 0 var(--s4);
+  margin-left: auto;
+  border: 0;
+  border-radius: 999px;
+  background: var(--ink);
+  color: var(--bg);
+  font: 500 15px/22px var(--font-ui);
+  cursor: pointer;
+}
+.save:disabled {
+  background: var(--bg);
+  color: var(--faint);
+  cursor: default;
+}
+.quiet {
+  min-height: 36px;
+  padding: 0 var(--s3);
+  border: 0;
+  border-radius: 999px;
+  background: none;
+  color: var(--mute);
+  font: 400 13px/20px var(--font-ui);
+  cursor: pointer;
+  -webkit-tap-highlight-color: transparent;
+}
+.quiet:disabled {
+  color: var(--faint);
+  cursor: default;
+}
+@media (hover: hover) {
+  .quiet:hover:not(:disabled) {
+    color: var(--ink);
+    background: var(--bg);
+  }
+}
+
+.pick:focus-visible {
+  outline: 2px solid var(--ink);
+  outline-offset: -2px;
+}
+.edit:focus-visible,
+.save:focus-visible,
+.quiet:focus-visible {
+  outline: 2px solid var(--ink);
+  outline-offset: 2px;
+}

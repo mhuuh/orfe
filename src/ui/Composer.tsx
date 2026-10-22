@@ -7,6 +7,7 @@ import { storage } from '../lib/storage'
 import type { Conversation, Role } from '../lib/types'
 import { shortModel } from './Divider'
 import { ModelSheet } from './ModelSheet'
+import { PromptSheet } from './PromptSheet'
 import { useToast } from './Toast'
 import { findModel, useCatalog } from './useCatalog'
 import css from './Composer.module.css'
@@ -35,6 +36,15 @@ export const clean = (text: string): string => text.replace(/^(?:[ \t]*\n)+/, ''
 /** Whether a tap on Stop counts, given when we last started a send or reply. */
 export const canStop = (now: number, startedAt: number): boolean => now - startedAt >= STOP_GRACE_MS
 
+const PROMPT_CHIP_CHARS = 16
+
+/** The prompt chip text: the name cut to 16 characters ending in "…", or "No prompt". */
+export function promptChipLabel(name: string | null | undefined): string {
+  if (!name) return 'No prompt'
+  const chars = Array.from(name)
+  return chars.length > PROMPT_CHIP_CHARS ? `${chars.slice(0, PROMPT_CHIP_CHARS - 1).join('').trimEnd()}…` : name
+}
+
 /** The effort the chip shows: the chosen one when this model has it, else the model's default. */
 export function shownEffort(model: ModelInfo, chosen: string | null): string | null {
   if (!model.efforts) return null
@@ -51,8 +61,11 @@ export function Composer({ conversationId: id }: { conversationId: string }) {
   const data = useLiveQuery(async () => {
     const [conversation, messages] = await Promise.all([storage.getConversation(id), storage.listMessages(id)])
     const turns = messages.filter((m) => m.role !== 'divider')
+    const ref = conversation?.systemPromptRef ?? null
     return {
       conversation,
+      // A ref to a deleted prompt reads as no prompt.
+      prompt: ref ? ((await storage.getPrompt(ref)) ?? null) : null,
       lastRole: turns[turns.length - 1]?.role,
       streaming: messages.some((m) => m.versions.some((v) => v.status === 'streaming')),
     }
@@ -63,6 +76,7 @@ export function Composer({ conversationId: id }: { conversationId: string }) {
   const [text, setText] = useState(() => drafts.get(id) ?? '')
   const [pending, setPending] = useState(false)
   const [sheet, setSheet] = useState(false)
+  const [promptSheet, setPromptSheet] = useState(false)
   // A model picked in the sheet may come from a fresher catalog than ours.
   const [picked, setPicked] = useState<ModelInfo | null>(null)
 
@@ -206,6 +220,13 @@ export function Composer({ conversationId: id }: { conversationId: string }) {
     void storage.updateConversation(id, { nextEffort: nextEffort(model.efforts, effort) })
   }
 
+  // Switching while a reply is being written would put the divider before a reply made with the old prompt.
+  const openPrompts = () => {
+    if (busy || isGenerating(id)) toast.show('Wait for the reply to finish.')
+    else setPromptSheet(true)
+  }
+  const promptLabel = promptChipLabel(data?.prompt?.name)
+
   const label =
     action === 'stop' ? 'Stop' : action === 'reply' ? 'Ask for a reply' : 'Send (hold to add without reply)'
 
@@ -227,6 +248,17 @@ export function Composer({ conversationId: id }: { conversationId: string }) {
         <div className={css.tools}>
           <button className={css.chip} onClick={() => setSheet(true)} aria-label={`Model: ${model.name}. Change`}>
             <span className={css.chipText}>{modelId ? shortModel(modelId) : 'model'}</span>
+            <span className={css.caret} aria-hidden="true">
+              ▾
+            </span>
+          </button>
+          <button
+            className={`${css.chip} ${css.promptChip}`}
+            onClick={openPrompts}
+            aria-disabled={busy || undefined}
+            aria-label={`Prompt: ${data?.prompt?.name ?? 'No prompt'}. Change`}
+          >
+            <span className={css.chipText}>{promptLabel}</span>
             <span className={css.caret} aria-hidden="true">
               ▾
             </span>
@@ -263,6 +295,12 @@ export function Composer({ conversationId: id }: { conversationId: string }) {
         </div>
       </section>
       <ModelSheet open={sheet} onClose={() => setSheet(false)} onPick={pick} current={modelId} />
+      <PromptSheet
+        open={promptSheet}
+        onClose={() => setPromptSheet(false)}
+        conversationId={id}
+        current={conv?.systemPromptRef ?? null}
+      />
     </>
   )
 }

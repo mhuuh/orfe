@@ -38,6 +38,7 @@ export function Transcript({ conversationId }: { conversationId: string | null }
     ])
     return { id: conversationId, conversation, messages }
   }, [conversationId])
+  const prompts = useLiveQuery(async () => new Map((await storage.listPrompts()).map((p) => [p.id, p])), [])
   const { models } = useCatalog()
   const [selected, setSelected] = useState<string | null>(null)
   const [editing, setEditing] = useState<string | null>(null)
@@ -118,6 +119,8 @@ export function Transcript({ conversationId }: { conversationId: string | null }
 
   const items: ReactNode[] = []
   let prev: Version | undefined
+  /** A stored prompt-swap divider came after the previous reply. */
+  let swapped = false
   for (const m of messages) {
     const toggle = () => setSelected((s) => (s === m.id ? null : m.id))
     const common = {
@@ -131,14 +134,17 @@ export function Transcript({ conversationId }: { conversationId: string | null }
     }
     if (m.role === 'divider') {
       if (m.dividerLabel) items.push(<Divider key={m.id} label={m.dividerLabel} />)
+      swapped = true
     } else if (m.role === 'user') {
       items.push(<UserMessage key={m.id} {...common} />)
     } else {
       const v = m.versions[m.activeVersion] ?? m.versions[0]
-      const label = v ? dividerLabel(prev, v) : null
+      const promptName = v?.promptRef ? prompts?.get(v.promptRef)?.name : null
+      const label = v ? dividerLabel(prev, v, promptName, swapped) : null
       if (label) items.push(<Divider key={`d-${m.id}`} label={label} />)
-      items.push(<AssistantMessage key={m.id} {...common} afterDivider={label !== null} />)
+      items.push(<AssistantMessage key={m.id} {...common} afterDivider={label !== null} prompts={prompts} />)
       prev = v
+      swapped = false
     }
   }
 
