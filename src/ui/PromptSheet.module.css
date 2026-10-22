@@ -117,14 +117,19 @@
   padding: 0 var(--s4);
   border-radius: 999px;
 }
+/*
+ * Grows with its text (no JS measuring, so typing never collapses it and jumps the
+ * sheet's scroll), from 5 lines up to 60% of the screen, then scrolls inside. No
+ * overscroll containment: at its end, a swipe carries on and scrolls the sheet.
+ */
 .textField {
+  field-sizing: content;
   min-height: calc(5 * 22px + 2 * var(--s3));
   max-height: 60dvh;
   padding: var(--s3) var(--s4);
   border-radius: var(--radius);
   resize: none;
   overflow-y: auto;
-  overscroll-behavior: contain;
   scrollbar-width: thin;
   scrollbar-color: var(--line) transparent;
 }
@@ -139,11 +144,26 @@
   box-shadow: inset 0 0 0 1px var(--mute);
 }
 
+/* Pinned to the bottom of the sheet while the editor scrolls under it (keyboard up). */
 .bar {
+  position: sticky;
+  bottom: 0;
+  z-index: 1;
   display: flex;
   align-items: center;
   gap: var(--s1);
-  margin: var(--s1) 0 0 calc(-1 * var(--s3));
+  margin: 0 -20px calc(-1 * var(--s4));
+  padding: var(--s2) 20px var(--s4) var(--s2);
+  background: var(--surface);
+}
+.ask {
+  margin-right: auto;
+  padding-left: var(--s3);
+  color: var(--ink);
+  font: 400 15px/22px var(--font-ui);
+}
+.ask + .quiet + .save {
+  margin-left: 0;
 }
 .save {
   min-height: 36px;

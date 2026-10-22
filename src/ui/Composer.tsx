@@ -1,4 +1,4 @@
-import { useLayoutEffect, useRef, useState, type KeyboardEvent } from 'react'
+import { useLayoutEffect, useRef, useState, type CSSProperties, type KeyboardEvent } from 'react'
 import { useLiveQuery } from 'dexie-react-hooks'
 import type { ModelInfo } from '../lib/catalog'
 import { noteDraft } from '../lib/appUpdate'
@@ -37,6 +37,8 @@ export const clean = (text: string): string => text.replace(/^(?:[ \t]*\n)+/, ''
 export const canStop = (now: number, startedAt: number): boolean => now - startedAt >= STOP_GRACE_MS
 
 const PROMPT_CHIP_CHARS = 16
+/** Characters the prompt chip keeps when the row is short of room. */
+const PROMPT_CHIP_FLOOR = 6
 
 /** The prompt chip text: the name cut to 16 characters ending in "…", or "No prompt". */
 export function promptChipLabel(name: string | null | undefined): string {
@@ -257,6 +259,8 @@ export function Composer({ conversationId: id }: { conversationId: string }) {
             onClick={openPrompts}
             aria-disabled={busy || undefined}
             aria-label={`Prompt: ${data?.prompt?.name ?? 'No prompt'}. Change`}
+            // It gives way first, but keeps up to 6 characters ("Co-wr…"). Mono, so 1ch is one character.
+            style={{ '--floor': `${Math.min(Array.from(promptLabel).length, PROMPT_CHIP_FLOOR)}ch` } as CSSProperties}
           >
             <span className={css.chipText}>{promptLabel}</span>
             <span className={css.caret} aria-hidden="true">
@@ -265,7 +269,7 @@ export function Composer({ conversationId: id }: { conversationId: string }) {
           </button>
           {model.efforts && (
             <button className={css.chip} onClick={cycleEffort} aria-label={`Reasoning effort: ${effort ?? 'default'}. Change`}>
-              <span className={css.chipText}>effort: {effort ?? 'default'}</span>
+              <span className={css.chipText}>{effort ?? 'default'}</span>
             </button>
           )}
           <button

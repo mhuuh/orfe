@@ -84,14 +84,18 @@
   cursor: pointer;
   transition: box-shadow 150ms ease-out;
 }
+/* When the row is short of room, the prompt chip gives way first, then the model chip. */
+.chip:first-child {
+  flex: 0 1 auto;
+}
 /*
- * The model and prompt chips share the room the effort chip and Send leave, half each.
- * A chip that needs less than half keeps its full text and hands the rest to the other.
+ * Its floor (--floor, set inline) plus the caret, gap and padding: never an empty pill.
+ * The huge shrink weight makes the model chip's share of the shrinking round to zero
+ * (layout works in 1/64 px), so the model id is not cut by a hair while the prompt chip still has room to give.
  */
-.chip:first-child,
 .promptChip {
-  flex: 1 1 0;
-  max-width: max-content;
+  flex: 0 1000000 auto;
+  min-width: calc(var(--floor, 0ch) + 1ch + var(--s1) + 20px);
 }
 /* While a reply is being written the prompt cannot change: the text steps down to mute. */
 .chip[aria-disabled='true'] {

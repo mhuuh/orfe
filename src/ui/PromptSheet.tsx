@@ -68,16 +68,61 @@ const VARIANT_SUFFIX = 'variant'
 type Draft = { prompt: Prompt | null; focusName: boolean }
 
 export function PromptSheet({ open, onClose, conversationId, current }: Props) {
-  const [draft, setDraft] = useState<Draft | null>(null)
+  const [draft, setDraftState] = useState<Draft | null>(null)
+  /** The editor holds edits that are not saved. */
+  const dirty = useRef(false)
+  /** The inline "Unsaved changes · Discard · Keep editing" row is showing. */
+  const [asking, setAsking] = useState(false)
+  /** Bumped to register the editor's Back step again after a refused Back. */
+  const [backGen, setBackGen] = useState(0)
+  const editing = draft !== null
+
+  const setDraft = (d: Draft | null) => {
+    dirty.current = false
+    setAsking(false)
+    setDraftState(d)
+  }
 
   // Each open starts on the list.
   useEffect(() => {
-    if (open) setDraft(null)
+    if (open) {
+      dirty.current = false
+      setAsking(false)
+      setDraftState(null)
+    }
   }, [open])
 
+  /** Back to the list, unless that would drop edits: then ask first. */
+  const leave = useRef(() => {})
+  leave.current = () => {
+    if (dirty.current) setAsking(true)
+    else setDraft(null)
+  }
+
+  // The editor gets its own Back step: Back (and Escape) return to the list, not out of the sheet.
+  useEffect(() => {
+    if (!open || !editing) return
+    const me = openSheet(() => {
+      // Back has already popped this step. If we refuse, put it back, so the next Back asks again.
+      if (dirty.current) {
+        setAsking(true)
+        setBackGen((g) => g + 1)
+      } else leave.current()
+    })
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === 'Escape' && me.isTop()) leave.current()
+    }
+    window.addEventListener('keydown', onKey)
+    return () => {
+      window.removeEventListener('keydown', onKey)
+      me.release()
+    }
+  }, [open, editing, backGen])
+
   const title = draft === null ? 'Prompt' : draft.prompt ? 'Edit prompt' : 'New prompt'
+  // While editing, Done and the scrim mean "back to the list" (guarded), like Back.
   return (
-    <Sheet open={open} onClose={onClose} title={title}>
+    <Sheet open={open} onClose={editing ? () => leave.current() : onClose} title={title}>
       <PromptBody
         open={open}
         onClose={onClose}
@@ -85,36 +130,36 @@ export function PromptSheet({ open, onClose, conversationId, current }: Props) {
         current={current}
         draft={draft}
         setDraft={setDraft}
+        guard={{
+          asking,
+          onDirty: (d) => {
+            dirty.current = d
+          },
+          discard: () => setDraft(null),
+          keep: () => setAsking(false),
+        }}
       />
     </Sheet>
   )
 }
 
+/** What the editor needs for the unsaved-changes guard. */
+interface Guard {
+  asking: boolean
+  onDirty: (dirty: boolean) => void
+  discard: () => void
+  keep: () => void
+}
+
 interface BodyProps extends Props {
   draft: Draft | null
   setDraft: (d: Draft | null) => void
+  guard: Guard
 }
 
-function PromptBody({ open, onClose, conversationId, current, draft, setDraft }: BodyProps) {
+function PromptBody({ onClose, conversationId, current, draft, setDraft, guard }: BodyProps) {
   const prompts = useLiveQuery(() => storage.listPrompts(), [])
   const toast = useToast()
-  const editing = draft !== null
-
-  // The editor gets its own Back step: Back (and Escape) return to the list, not out of the sheet.
-  const toList = useRef(() => setDraft(null))
-  toList.current = () => setDraft(null)
-  useEffect(() => {
-    if (!open || !editing) return
-    const me = openSheet(() => toList.current())
-    const onKey = (e: KeyboardEvent) => {
-      if (e.key === 'Escape' && me.isTop()) toList.current()
-    }
-    window.addEventListener('keydown', onKey)
-    return () => {
-      window.removeEventListener('keydown', onKey)
-      me.release()
-    }
-  }, [open, editing])
 
   if (!prompts) return null
 
@@ -129,6 +174,7 @@ function PromptBody({ open, onClose, conversationId, current, draft, setDraft }:
         onDone={() => setDraft(null)}
         onOpen={(p) => setDraft({ prompt: p, focusName: true })}
         toast={toast}
+        guard={guard}
       />
     )
   }
@@ -198,23 +244,16 @@ interface EditorProps {
   onDone: () => void
   onOpen: (p: Prompt) => void
   toast: ReturnType<typeof useToast>
+  guard: Guard
 }
 
-function Editor({ draft, prompts, conversationId, current, onDone, onOpen, toast }: EditorProps) {
+function Editor({ draft, prompts, conversationId, current, onDone, onOpen, toast, guard }: EditorProps) {
   const saved = draft.prompt
   const [name, setName] = useState(saved?.name ?? '')
   const [text, setText] = useState(saved?.text ?? '')
   const [working, setWorking] = useState(false)
   const nameField = useRef<HTMLInputElement>(null)
   const textField = useRef<HTMLTextAreaElement>(null)
-
-  // Grow with the text; CSS caps it at 60% of the screen, then it scrolls inside.
-  useLayoutEffect(() => {
-    const el = textField.current
-    if (!el) return
-    el.style.height = 'auto'
-    el.style.height = `${el.scrollHeight}px`
-  }, [text])
 
   // A new prompt or a fresh variant starts in the name. A variant's suffix is selected, ready to retype.
   useLayoutEffect(() => {
@@ -227,6 +266,12 @@ function Editor({ draft, prompts, conversationId, current, onDone, onOpen, toast
 
   const cleanName = name.trim()
   const changed = saved === null || cleanName !== saved.name || text !== saved.text
+  // A new prompt counts as edited once anything is typed; a saved one once it differs.
+  const dirty = saved === null ? cleanName !== '' || text.trim() !== '' : changed
+  const { onDirty } = guard
+  useEffect(() => {
+    onDirty(dirty)
+  }, [dirty, onDirty])
   const canSave = cleanName !== '' && text.trim() !== '' && !working
 
   const act = async (work: () => Promise<void>, fail: string) => {
@@ -313,20 +358,35 @@ function Editor({ draft, prompts, conversationId, current, onDone, onOpen, toast
           if (e.key === 'Enter' && (e.ctrlKey || e.metaKey) && canSave) void save()
         }}
       />
+      {/* Sticky, so Save stays in reach when the keyboard shrinks the sheet. */}
       <div className={css.bar}>
-        {saved && (
+        {guard.asking ? (
           <>
-            <button className={css.quiet} onClick={() => void duplicate()} disabled={working}>
-              Duplicate as variant
+            <span className={css.ask}>Unsaved changes</span>
+            <button className={css.quiet} onClick={guard.discard}>
+              Discard
             </button>
-            <button className={css.quiet} onClick={() => void remove()} disabled={working}>
-              Delete
+            <button className={css.save} onClick={guard.keep}>
+              Keep editing
+            </button>
+          </>
+        ) : (
+          <>
+            {saved && (
+              <>
+                <button className={css.quiet} onClick={() => void duplicate()} disabled={working}>
+                  Duplicate as variant
+                </button>
+                <button className={css.quiet} onClick={() => void remove()} disabled={working}>
+                  Delete
+                </button>
+              </>
+            )}
+            <button className={css.save} onClick={() => void save()} disabled={!canSave}>
+              Save
             </button>
           </>
         )}
-        <button className={css.save} onClick={() => void save()} disabled={!canSave}>
-          Save
-        </button>
       </div>
     </div>
   )
