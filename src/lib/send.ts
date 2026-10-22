@@ -442,9 +442,10 @@ async function run(a: RunArgs): Promise<void> {
 
   /** Returns false when the stream should stop. */
   const handle = async (e: StreamEvent): Promise<boolean> => {
-    if (!accepted && e.type !== 'error') {
-      // The first non-error event means the provider took the request, so its prompt is now
-      // what the cache holds. A request that failed outright is not recorded.
+    if (!accepted && (e.type === 'content' || e.type === 'reasoning' || e.type === 'usage' || e.type === 'finish')) {
+      // The first output (text, thinking, usage or a finish) means the provider took the request,
+      // so its prompt is now what the cache holds. `meta` is not enough: it comes with the HTTP 200,
+      // and an in-stream error can still follow before any token. A failed request is not recorded.
       accepted = true
       const lastRequest: LastRequest = {
         model: a.model.id,

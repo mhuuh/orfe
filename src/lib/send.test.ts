@@ -631,6 +631,17 @@ describe('generate: prompts, window and cache', () => {
     await sendUserMessage(convId, 'hi', { reply: true, model: A })
     expect((await storage.getConversation(convId))!.lastRequest).toBeNull()
   })
+
+  it('a 200 whose stream errors before any token does not store lastRequest', async () => {
+    // The provider header makes the stream yield a meta event first (HTTP 200), then the error chunk.
+    stubFetch(() => {
+      const r = sse([ev({ error: { message: 'Provider overloaded', code: 502 } })])
+      return new Response(r.body, { status: 200, headers: { 'X-Provider-Name': 'Anthropic' } })
+    })
+    await sendUserMessage(convId, 'hi', { reply: true, model: A })
+    expect((await lastMsg()).versions[0].status).toBe('error')
+    expect((await storage.getConversation(convId))!.lastRequest).toBeNull()
+  })
 })
 
 describe('setPrompt', () => {
