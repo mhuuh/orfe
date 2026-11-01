@@ -278,6 +278,21 @@ describe('generate', () => {
     expect(r.durationMs).toBeGreaterThanOrEqual(0)
   })
 
+  it('joins streamed reasoning details by index, so a signature stays whole', async () => {
+    stubFetch(() =>
+      sse([
+        ev({ choices: [{ delta: { reasoning_details: [{ type: 'reasoning.text', index: 0, text: 'ab' }] } }] }),
+        ev({ choices: [{ delta: { reasoning_details: [{ type: 'reasoning.text', index: 0, text: 'cd', signature: 'sig' }] } }] }),
+        ev({ choices: [{ delta: { content: 'answer' } }] }),
+        ev({ choices: [{ delta: {}, finish_reason: 'stop' }] }),
+      ]),
+    )
+    await sendUserMessage(convId, 'hi', { reply: true, model: A })
+    const r = (await lastMsg()).versions[0].reasoning!
+    expect(r.details).toEqual([{ type: 'reasoning.text', index: 0, text: 'abcd', signature: 'sig' }])
+    expect(r.text).toBe('abcd')
+  })
+
   it('marks a stream that ends without finish as interrupted, keeping partial text', async () => {
     stubFetch(() => sse([ev({ choices: [{ delta: { content: 'cut of' } }] })]))
     await sendUserMessage(convId, 'hi', { reply: true, model: A })

@@ -1,6 +1,6 @@
 // @vitest-environment node
 import { afterEach, describe, expect, it, vi } from 'vitest'
-import { fetchKeyInfo, fetchModels, streamChat, type ChatRequest, type StreamEvent } from './openrouter'
+import { fetchKeyInfo, fetchModels, mergeReasoning, streamChat, type ChatRequest, type StreamEvent } from './openrouter'
 
 const enc = new TextEncoder()
 
@@ -226,6 +226,141 @@ describe('streamChat', () => {
         type: 'usage',
         usage: { promptTokens: 10, completionTokens: 5, cachedTokens: 4, cacheWriteTokens: 0, reasoningTokens: 2, cost: 0.001 },
       },
+    ])
+  })
+})
+
+describe('streamChat tool calls', () => {
+  const tc = (index: number, f: Record<string, unknown>, id?: string) => ({ index, ...(id ? { id, type: 'function' } : {}), function: f })
+
+  it('joins tool call arguments split across chunks', async () => {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async () =>
+        sseResponse([
+          ev({ choices: [{ delta: { tool_calls: [tc(0, { name: 'note_read', arguments: '' }, 'call_1')] } }] }),
+          ev({ choices: [{ delta: { tool_calls: [tc(0, { arguments: '{"ti' })] } }] }),
+          ev({ choices: [{ delta: { tool_calls: [tc(0, { arguments: 'tle":"A"}' })] } }] }),
+          ev({ choices: [{ delta: {}, finish_reason: 'tool_calls' }] }),
+          'data: [DONE]\n\n',
+        ]),
+      ),
+    )
+    const events = await run()
+    expect(events).toEqual([
+      { type: 'tool_calls', calls: [{ id: 'call_1', name: 'note_read', arguments: '{"title":"A"}' }] },
+      { type: 'finish', reason: 'tool_calls' },
+    ])
+  })
+
+  it('keeps two parallel calls apart by index', async () => {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async () =>
+        sseResponse([
+          ev({ choices: [{ delta: { tool_calls: [tc(0, { name: 'a', arguments: '{"x"' }, 'c0'), tc(1, { name: 'b', arguments: '{"y"' }, 'c1')] } }] }),
+          ev({ choices: [{ delta: { tool_calls: [tc(1, { arguments: ':2}' })] } }] }),
+          ev({ choices: [{ delta: { tool_calls: [tc(0, { arguments: ':1}' })] } }] }),
+          ev({ choices: [{ delta: {}, finish_reason: 'tool_calls' }] }),
+        ]),
+      ),
+    )
+    const events = await run()
+    expect(events[0]).toEqual({
+      type: 'tool_calls',
+      calls: [
+        { id: 'c0', name: 'a', arguments: '{"x":1}' },
+        { id: 'c1', name: 'b', arguments: '{"y":2}' },
+      ],
+    })
+  })
+
+  it('a non-streamed reply yields tool_calls too', async () => {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(
+        async () =>
+          new Response(
+            JSON.stringify({
+              choices: [
+                {
+                  message: { role: 'assistant', content: null, tool_calls: [{ id: 'c9', type: 'function', function: { name: 'a', arguments: '{}' } }] },
+                  finish_reason: 'tool_calls',
+                },
+              ],
+            }),
+            { status: 200 },
+          ),
+      ),
+    )
+    const events = await run({ ...req, stream: false })
+    expect(events).toEqual([
+      { type: 'tool_calls', calls: [{ id: 'c9', name: 'a', arguments: '{}' }] },
+      { type: 'finish', reason: 'tool_calls' },
+    ])
+  })
+
+  it('passes a call with no id or broken arguments through as strings', async () => {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async () =>
+        sseResponse([
+          ev({ choices: [{ delta: { tool_calls: [tc(0, { name: 'a', arguments: '{"x"' })] } }] }),
+          ev({ choices: [{ delta: {}, finish_reason: 'tool_calls' }] }),
+        ]),
+      ),
+    )
+    const events = await run()
+    expect(events[0]).toEqual({ type: 'tool_calls', calls: [{ id: '', name: 'a', arguments: '{"x"' }] })
+  })
+
+  it('sends tools and tool_choice, and neither when absent', async () => {
+    const fetchMock = vi.fn(async (_url: string, _init: RequestInit) => sseResponse(['data: [DONE]\n\n']))
+    vi.stubGlobal('fetch', fetchMock)
+    await run()
+    const plain = JSON.parse(fetchMock.mock.calls[0][1].body as string)
+    expect(plain).not.toHaveProperty('tools')
+    expect(plain).not.toHaveProperty('tool_choice')
+    const def = { name: 'note_read', description: 'Read a note.', parameters: { type: 'object', properties: {} } }
+    await run({ ...req, tools: [def], toolChoice: 'auto' })
+    const raw = fetchMock.mock.calls[1][1].body as string
+    const withTools = JSON.parse(raw)
+    expect(withTools.tools).toEqual([{ type: 'function', function: def }])
+    expect(withTools.tool_choice).toBe('auto')
+    expect(raw).toContain('"function":{"name":"note_read","description":"Read a note.","parameters"')
+  })
+
+  it('sends no tool_choice for an empty tools list', async () => {
+    const fetchMock = vi.fn(async (_url: string, _init: RequestInit) => sseResponse(['data: [DONE]\n\n']))
+    vi.stubGlobal('fetch', fetchMock)
+    await run({ ...req, tools: [], toolChoice: 'auto' })
+    const body = JSON.parse(fetchMock.mock.calls[0][1].body as string)
+    expect(body).not.toHaveProperty('tools')
+    expect(body).not.toHaveProperty('tool_choice')
+  })
+})
+
+describe('mergeReasoning', () => {
+  it('joins by index and never across', () => {
+    const a = [{ type: 'reasoning.text', index: 0, text: 'ab' }]
+    const out = mergeReasoning(a, [
+      { type: 'reasoning.text', index: 0, text: 'cd', signature: 'sg' },
+      { type: 'reasoning.text', index: 1, text: 'x' },
+      { type: 'reasoning.summary', index: 1, summary: 'y' },
+      { type: 'reasoning.text', index: 0, signature: 'n' },
+    ])
+    expect(out).toEqual([
+      { type: 'reasoning.text', index: 0, text: 'abcd', signature: 'sgn' },
+      { type: 'reasoning.text', index: 1, text: 'x', summary: 'y' },
+    ])
+    expect(a).toEqual([{ type: 'reasoning.text', index: 0, text: 'ab' }])
+  })
+
+  it('keeps a delta with no index as its own entry', () => {
+    const out = mergeReasoning([{ type: 'reasoning.text', text: 'a' }], [{ type: 'reasoning.text', text: 'b' }])
+    expect(out).toEqual([
+      { type: 'reasoning.text', text: 'a' },
+      { type: 'reasoning.text', text: 'b' },
     ])
   })
 })

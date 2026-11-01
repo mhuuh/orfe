@@ -1,7 +1,7 @@
 import { fallbackModelInfo, type ModelInfo } from './catalog'
 import { estimateTokens, fingerprint, isCold, planWindow, ttlFor } from './context'
 import { buildOutgoing } from './normalise'
-import { streamChat, type ChatRequest, type OutMessage, type StreamEvent } from './openrouter'
+import { mergeReasoning, streamChat, type ChatRequest, type OutMessage, type StreamEvent } from './openrouter'
 import { db, newId, storage } from './storage'
 import { systemFor } from './system'
 import type { ContentPart, Conversation, LastRequest, Message, Reasoning, Usage, Version } from './types'
@@ -414,7 +414,7 @@ async function run(a: RunArgs): Promise<void> {
 
   let content: ContentPart[] = a.initial
   let reasoningText = ''
-  const reasoningDetails: unknown[] = []
+  let reasoningDetails: unknown[] = []
   let reasoningStart: number | null = null
   let durationMs: number | null = null
   let finished = false
@@ -469,7 +469,7 @@ async function run(a: RunArgs): Promise<void> {
       case 'reasoning':
         if (reasoningStart === null) reasoningStart = Date.now()
         reasoningText += e.text === '' && e.details ? textFromDetails(e.details) : e.text
-        if (e.details) reasoningDetails.push(...e.details)
+        if (e.details) reasoningDetails = mergeReasoning(reasoningDetails, e.details)
         break
       case 'content':
         if (reasoningStart !== null && durationMs === null) durationMs = Date.now() - reasoningStart
