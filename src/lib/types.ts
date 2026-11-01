@@ -100,4 +100,6 @@ export interface Settings {
   defaultModel: string
   context: ContextSetting
   anthropicCacheHour: boolean
+  /** When the user last saved a backup file. Null: never. Stays on this phone; a backup file never sets it. */
+  lastBackupAt: number | null
 }

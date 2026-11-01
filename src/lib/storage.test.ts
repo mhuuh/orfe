@@ -92,6 +92,7 @@ describe('storage', () => {
       themeMode: 'system',
       context: { mode: 'tokens', limit: 32000, trimTo: 0.7 },
       anthropicCacheHour: false,
+      lastBackupAt: null,
       defaultModel: 'anthropic/claude-sonnet-5.5',
     })
     await storage.setSettings({ streaming: false, key: 'k' })

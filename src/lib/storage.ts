@@ -17,6 +17,7 @@ export const DEFAULT_SETTINGS: Settings = {
   defaultModel: 'anthropic/claude-sonnet-5.5',
   context: { mode: 'tokens', limit: 32000, trimTo: 0.7 },
   anthropicCacheHour: false,
+  lastBackupAt: null,
 }
 
 /** Fills fields that rows written before schema v2 do not have. Not written back. */

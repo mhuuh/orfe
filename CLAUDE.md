@@ -20,4 +20,5 @@ An OpenRouter chat PWA that runs on Mikael's Android phone. Live at https://mhuu
 ## Gotchas
 - E: is exFAT. TypeScript language servers and dev servers can ghost-lock folders (a git checkout or merge then fails with "cannot stat … Permission denied"). Stop the tsserver/node process holding it and retry.
 - Playwright's headless shell doesn't render `backdrop-filter`. Use full Chromium for glass screenshots.
+- `oddsandends.key` in the repo root is Mikael's OpenRouter key for small cheap tests, with a $5 limit. It is git-ignored and the repo is public: read it only from a script, and never print it, paste it or copy it anywhere. Print selected fields of a response, not the whole response, because `/key` returns a partial key in `label`.
 - The Content Security Policy lives in `vite.config.ts` and is applied to builds only, so `npm run dev` and `npm run e2e` never exercise it. Any new origin (the relay, say) must be added to `connect-src`, and any change to it needs a check against `npm run build` plus `vite preview`.

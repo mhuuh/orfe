@@ -1,7 +1,8 @@
-import { useEffect, useState } from 'react'
+import { useEffect, useRef, useState } from 'react'
 import { useLiveQuery } from 'dexie-react-hooks'
 import { storage } from '../lib/storage'
 import { fetchKeyInfo } from '../lib/openrouter'
+import { exportBackup, importBackup, requestPersist, shareBackup } from '../lib/backup'
 import type { Settings as SettingsT } from '../lib/types'
 import { Sheet } from './Sheet'
 import { KeySetup } from './KeySetup'
@@ -23,7 +24,37 @@ export function Settings({ open, onClose }: { open: boolean; onClose: () => void
   const [changing, setChanging] = useState(false)
   const [confirmRemove, setConfirmRemove] = useState(false)
   const [picking, setPicking] = useState(false)
+  const [persisted, setPersisted] = useState<boolean | null>(null)
+  const [backupMsg, setBackupMsg] = useState('')
+  const [confirmReplace, setConfirmReplace] = useState(false)
+  const restoreMode = useRef<'merge' | 'replace'>('merge')
+  const fileInput = useRef<HTMLInputElement>(null)
   const key = settings?.key ?? null
+
+  useEffect(() => {
+    if (!open) return
+    void requestPersist().then(setPersisted)
+  }, [open])
+
+  const backUp = async () => {
+    setBackupMsg('')
+    try {
+      if (await shareBackup(await exportBackup())) await storage.setSettings({ lastBackupAt: Date.now() })
+    } catch {
+      setBackupMsg('Could not save the backup.')
+    }
+  }
+
+  const restore = async (file: File | undefined) => {
+    if (!file) return
+    setConfirmReplace(false)
+    try {
+      const { added } = await importBackup(file, restoreMode.current)
+      setBackupMsg(restoreMode.current === 'replace' ? 'Restored. Your data now matches the file.' : `Restored. ${added} new.`)
+    } catch (e) {
+      setBackupMsg((e as Error).message)
+    }
+  }
 
   useEffect(() => {
     if (!open || !key) return
@@ -43,6 +74,8 @@ export function Settings({ open, onClose }: { open: boolean; onClose: () => void
       setChanging(false)
       setConfirmRemove(false)
       setPicking(false)
+      setConfirmReplace(false)
+      setBackupMsg('')
     }
   }, [open])
 
@@ -149,6 +182,64 @@ export function Settings({ open, onClose }: { open: boolean; onClose: () => void
               onToggle={() => void storage.setSettings({ anthropicCacheHour: !settings.anthropicCacheHour })}
             />
             <div className={css.meta}>Costs 2× to write. The default keeps it for 5 minutes.</div>
+          </section>
+
+          <section className={css.group}>
+            <h3 className={css.label}>Backup</h3>
+            <div className={css.row}>
+              <span>Save a copy of your data</span>
+              <button className={css.pill} onClick={() => void backUp()}>
+                Back up
+              </button>
+            </div>
+            <div className={css.row}>
+              <span>Restore from a file</span>
+              <span className={css.btns}>
+                <button
+                  className={css.pill}
+                  onClick={() => {
+                    restoreMode.current = 'merge'
+                    fileInput.current?.click()
+                  }}
+                >
+                  Merge
+                </button>
+                <button
+                  className={css.pill}
+                  onClick={() => {
+                    if (!confirmReplace) return setConfirmReplace(true)
+                    restoreMode.current = 'replace'
+                    fileInput.current?.click()
+                  }}
+                >
+                  {confirmReplace ? 'Tap to confirm' : 'Replace'}
+                </button>
+              </span>
+            </div>
+            <input
+              ref={fileInput}
+              type="file"
+              accept="application/json,.json"
+              hidden
+              aria-label="Backup file"
+              onChange={(e) => {
+                void restore(e.target.files?.[0])
+                e.target.value = ''
+              }}
+            />
+            <div className={css.meta}>
+              {backupMsg ||
+                (settings.lastBackupAt
+                  ? `Last backup ${new Date(settings.lastBackupAt).toLocaleDateString()}. `
+                  : 'Never backed up. ') + 'Merge adds to your data. Replace swaps it. The file has no key.'}
+            </div>
+            <div className={css.meta}>
+              {persisted === null
+                ? ''
+                : persisted
+                  ? 'Storage is protected from clean-up.'
+                  : 'Storage may be cleared by the browser. Back up often.'}
+            </div>
           </section>
         </div>
       </Sheet>

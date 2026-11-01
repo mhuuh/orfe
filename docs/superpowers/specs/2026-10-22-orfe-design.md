@@ -40,7 +40,7 @@ What success looks like: he opens ORFE instead of the playground for creative an
 **Non-goals (v1)**
 - Accounts, sync, servers, a database on the PC.
 - Multi-user anything.
-- Tool calling or agent loops. Exception: OpenRouter's web search plugin as a per-chat toggle, which needs no tool loop on our side.
+- ~~Tool calling or agent loops.~~ Replaced on 2026-11-01 by `2026-11-01-orfe-vault-design.md`. OpenRouter's web search plugin as a per-chat toggle stays as written in §8.7.
 - Branching conversation trees beyond per-message alternatives.
 - A native Android app. It stays possible later: the storage layer is isolated so a Capacitor wrapper can be added (see §11).
 - Embeddings, rerank and "decisions" models. These are not chat models, so they're hidden from the picker (my call).

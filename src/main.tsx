@@ -9,6 +9,7 @@ import './styles/tokens.css'
 import './styles/base.css'
 import { App } from './App'
 import { DEFAULT_SETTINGS, storage } from './lib/storage'
+import { requestPersist } from './lib/backup'
 import { recoverInterrupted } from './lib/send'
 import { applyUpdateIfIdle, setUpdatePending } from './lib/appUpdate'
 import { applyTheme } from './ui/theme'
@@ -54,17 +55,6 @@ function registerServiceWorker() {
   })
 }
 
-/** Ask the browser not to evict our IndexedDB under storage pressure. Never blocks start-up. */
-function requestPersistentStorage() {
-  try {
-    void navigator.storage
-      ?.persist?.()
-      .catch(() => {})
-  } catch {
-    // Not supported: nothing to do.
-  }
-}
-
 void start()
 registerServiceWorker()
-requestPersistentStorage()
+void requestPersist()

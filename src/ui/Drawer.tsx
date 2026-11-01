@@ -1,7 +1,8 @@
 import { useRef, useState } from 'react'
 import { useLiveQuery } from 'dexie-react-hooks'
 import { deleteChat, restoreChat } from '../lib/send'
-import { storage } from '../lib/storage'
+import { backupDue } from '../lib/backup'
+import { db, storage } from '../lib/storage'
 import { Sheet } from './Sheet'
 import { useToast } from './Toast'
 import css from './Drawer.module.css'
@@ -20,6 +21,16 @@ const LONG_PRESS_MS = 450
 export function Drawer({ open, onClose, currentId, onSelect, onNew, onSettings }: Props) {
   const convs = useLiveQuery(() => storage.listConversations(), [], [])
   const toast = useToast()
+  const due = useLiveQuery(async () => {
+    // Prompts have no updatedAt index; there are few of them.
+    const [settings, newestChat, prompts] = await Promise.all([
+      storage.getSettings(),
+      db.conversations.orderBy('updatedAt').last(),
+      db.prompts.toArray(),
+    ])
+    const lastChange = Math.max(newestChat?.updatedAt ?? 0, ...prompts.map((p) => p.updatedAt))
+    return backupDue(settings, lastChange, Date.now())
+  }, [open])
   const [menuId, setMenuId] = useState<string | null>(null)
   const [renameId, setRenameId] = useState<string | null>(null)
   const [draft, setDraft] = useState('')
@@ -119,6 +130,11 @@ export function Drawer({ open, onClose, currentId, onSelect, onNew, onSettings }
             </li>
           ))}
         </ul>
+        {due && (
+          <button className={css.nudge} onClick={onSettings}>
+            Back up your data. It has been over 14 days.
+          </button>
+        )}
         <button className={css.settings} onClick={onSettings}>
           Settings
         </button>
