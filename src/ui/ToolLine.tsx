@@ -44,12 +44,12 @@ export function lineView(part: ToolPart, locked = false): LineView {
 }
 
 /** Undoes one write. Returns a line for Mikael when it did not apply, or null when it did. */
-export async function undoStep(part: ToolPart, messageId: string, versionId: string): Promise<string | null> {
+export async function undoStep(part: ToolPart, messageId: string): Promise<string | null> {
   try {
     const rev = await notes.byCall(part.callId, messageId)
     if (!rev) return 'Nothing to undo.'
     if ((await notes.revert(rev.id, YOU)) === 'changed-later') return STAYS
-    await setToolUndone(messageId, versionId, part.callId, true)
+    await setToolUndone(messageId, part.callId, true)
     return null
   } catch {
     return 'Could not undo.'
@@ -57,11 +57,11 @@ export async function undoStep(part: ToolPart, messageId: string, versionId: str
 }
 
 /** Puts one write back. The line stays undone when the note changed since. */
-export async function redoStep(part: ToolPart, messageId: string, versionId: string): Promise<string | null> {
+export async function redoStep(part: ToolPart, messageId: string): Promise<string | null> {
   try {
     const { redone } = await notes.redoCalls([part.callId], messageId)
     if (!redone.includes(part.callId)) return 'The note changed since. It stays undone.'
-    await setToolUndone(messageId, versionId, part.callId, false)
+    await setToolUndone(messageId, part.callId, false)
     return null
   } catch {
     return 'Could not redo.'
@@ -71,13 +71,12 @@ export async function redoStep(part: ToolPart, messageId: string, versionId: str
 interface Props {
   part: ToolPart
   messageId: string
-  versionId: string
   /** The reply is still streaming. Undo and Redo are off. */
   locked?: boolean
 }
 
 /** One step of the reply, in mono. Tap to see what it read or changed. */
-export function ToolLine({ part, messageId, versionId, locked = false }: Props) {
+export function ToolLine({ part, messageId, locked = false }: Props) {
   const [open, setOpen] = useState(false)
   const [note, setNote] = useState<string | null>(null)
   const [working, setWorking] = useState(false)
@@ -88,7 +87,7 @@ export function ToolLine({ part, messageId, versionId, locked = false }: Props) 
     setWorking(true)
     setNote(null)
     try {
-      setNote(await step(part, messageId, versionId))
+      setNote(await step(part, messageId))
     } finally {
       setWorking(false)
     }

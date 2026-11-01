@@ -61,6 +61,7 @@ interface ToolPart {
   result: string          // always stored whole
   status: 'running' | 'done' | 'error' | 'stopped'
   undone?: boolean        // a write that was undone
+  kept?: boolean          // a write that stayed because the note changed later
 }
 
 interface Version { /* existing */ roundReasoning?: unknown[][] }  // reasoning_details per round, stored unchanged

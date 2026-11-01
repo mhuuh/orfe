@@ -71,6 +71,8 @@ export interface NoteStore {
   redoCalls(callIds: string[], messageId: string): Promise<RedoReport>
   /** The write a call made, never an undo or a redo of it. */
   byCall(callId: string, messageId?: string): Promise<NoteRevision | undefined>
+  /** Whether a write still counts: no undo has taken it back. */
+  stands(rev: NoteRevision): Promise<boolean>
   /** Sends a chat's live notes to Trash, all stamped `deletedAt`. */
   trashShelf(shelf: string, deletedAt: number): Promise<void>
   /** Brings back only the notes with that stamp. Notes already in Trash stay there (Ruling P8). */
@@ -464,6 +466,10 @@ export const notes: NoteStore = {
       .filter((r) => r.undoes === undefined && (messageId === undefined || r.messageId === messageId))
       .sort((a, b) => a.at - b.at || a.version - b.version)
       .at(-1)
+  },
+
+  async stands(rev) {
+    return standing(await history(rev.noteId)).some((r) => r.id === rev.id)
   },
 
   async trashShelf(shelf, deletedAt) {

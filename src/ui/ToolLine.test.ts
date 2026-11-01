@@ -3,7 +3,7 @@ import { renderMarkdown } from '../lib/markdown'
 import { notes, YOU } from '../lib/notes/store'
 import { db, storage } from '../lib/storage'
 import type { ContentPart, ToolPart, Version } from '../lib/types'
-import { segments } from '../lib/versions'
+import { editedVersion, segments, withNewVersion } from '../lib/versions'
 import { lineView, redoStep, undoStep } from './ToolLine'
 
 const tool = (over: Partial<ToolPart> = {}): ToolPart => ({
@@ -114,14 +114,12 @@ describe('undoStep and redoStep', () => {
   const body = (text: string) => ({ body: text, description: 'A line' })
   let part: ToolPart
   let messageId: string
-  let versionId: string
 
   beforeEach(async () => {
     await Promise.all(db.tables.map((t) => t.clear()))
     const conv = await storage.createConversation()
-    versionId = 'v1'
     part = tool({ callId: 'c1', args: { path: 'shared/harbour' } })
-    const first: Version = { id: versionId, content: [part], status: 'done', model: 'a/m', createdAt: 0 }
+    const first: Version = { id: 'v1', content: [part], status: 'done', model: 'a/m', createdAt: 0 }
     messageId = (await storage.appendMessage(conv.id, 'assistant', first)).id
     const by = { writer: 'a/m', messageId, callId: 'c1' }
     const r = await notes.write({ path: 'shared/harbour', conversationId: conv.id }, body('Boats'), by)
@@ -134,7 +132,7 @@ describe('undoStep and redoStep', () => {
   }
 
   it('undo takes the note back and sets the flag', async () => {
-    expect(await undoStep(part, messageId, versionId)).toBeNull()
+    expect(await undoStep(part, messageId)).toBeNull()
     expect(await flag()).toBe(true)
     expect(await notes.read({ path: 'shared/harbour', conversationId: 'x' })).toBeUndefined()
   })
@@ -142,7 +140,7 @@ describe('undoStep and redoStep', () => {
   it('undo says so when the note changed, and leaves the flag', async () => {
     const conv = (await db.conversations.toArray())[0]
     await notes.write({ path: 'shared/harbour', conversationId: conv.id }, { ...body('Mikael'), expectedVersion: 1 }, YOU)
-    expect(await undoStep(part, messageId, versionId)).toBe('The note changed since. This write stays.')
+    expect(await undoStep(part, messageId)).toBe('The note changed since. This write stays.')
     expect(await flag()).toBeUndefined()
   })
 
@@ -151,21 +149,31 @@ describe('undoStep and redoStep', () => {
       ...m,
       versions: m.versions.map((v) => ({ ...v, content: v.content.map((p) => ({ ...p, kept: true })) })),
     }))
-    expect(await undoStep(part, messageId, versionId)).toBeNull()
+    expect(await undoStep(part, messageId)).toBeNull()
     expect((await db.messages.get(messageId))?.versions[0].content[0]).toMatchObject({ undone: true, kept: false })
+  })
+
+  it('a tap on an Edit copy marks the source too, so neither line lies', async () => {
+    await storage.mutateMessage(messageId, (m) => withNewVersion(m, editedVersion(m.versions[0], 'Edited')))
+    const flags = async () =>
+      (await db.messages.get(messageId))?.versions.map((v) => (v.content.find((p) => p.type === 'tool') as ToolPart).undone)
+    expect(await undoStep(part, messageId)).toBeNull()
+    expect(await flags()).toEqual([true, true])
+    expect(await redoStep({ ...part, undone: true }, messageId)).toBeNull()
+    expect(await flags()).toEqual([false, false])
   })
 
   it('redo that did not apply leaves the flag set', async () => {
     const conv = (await db.conversations.toArray())[0]
-    await undoStep(part, messageId, versionId)
+    await undoStep(part, messageId)
     await notes.write({ path: 'shared/harbour', conversationId: conv.id }, body('Mikael wrote this'), YOU)
-    expect(await redoStep({ ...part, undone: true }, messageId, versionId)).toBe('The note changed since. It stays undone.')
+    expect(await redoStep({ ...part, undone: true }, messageId)).toBe('The note changed since. It stays undone.')
     expect(await flag()).toBe(true)
   })
 
   it('redo that applied clears the flag', async () => {
-    await undoStep(part, messageId, versionId)
-    expect(await redoStep({ ...part, undone: true }, messageId, versionId)).toBeNull()
+    await undoStep(part, messageId)
+    expect(await redoStep({ ...part, undone: true }, messageId)).toBeNull()
     expect(await flag()).toBe(false)
     expect((await notes.read({ path: 'shared/harbour', conversationId: 'x' }))?.body).toBe('Boats')
   })

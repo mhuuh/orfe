@@ -30,12 +30,13 @@ const NO_CONNECTION = "Couldn't reach OpenRouter."
 /**
  * The stored result of a call that already ran, or null. A Continue asks this for parts left open,
  * so it never runs a write twice, and Stop asks it, so a write that landed does not read as stopped.
+ * A write that an undo took back counts as not done.
  * A fresh call is never looked up: it can't have run yet, and a reused id could only give a wrong skip.
  */
 export type AlreadyDone = (callId: string, messageId: string) => Promise<string | null>
 const fromRevisions: AlreadyDone = async (callId, messageId) => {
   const rev = await notes.byCall(callId, messageId)
-  return rev ? writeResult(rev) : null
+  return rev && (await notes.stands(rev)) ? writeResult(rev) : null
 }
 let alreadyDone = fromRevisions
 
@@ -218,16 +219,9 @@ export async function patchVersion(messageId: string, versionId: string, patch: 
   })
 }
 
-/** Marks one tool step as undone or not. Re-reads the message first. A missing step changes nothing. */
-export async function setToolUndone(messageId: string, versionId: string, callId: string, undone: boolean): Promise<void> {
-  await storage.mutateMessage(messageId, (m) => ({
-    ...m,
-    versions: m.versions.map((v) =>
-      v.id === versionId
-        ? { ...v, content: v.content.map((p) => (p.type === 'tool' && p.callId === callId ? { ...p, undone, kept: false } : p)) }
-        : v,
-    ),
-  }))
+/** Marks one call as undone or not, on each version that holds it. Re-reads the message first. */
+export async function setToolUndone(messageId: string, callId: string, undone: boolean): Promise<void> {
+  await mapSteps(messageId, (p) => (p.callId === callId ? { ...p, undone, kept: false } : p))
 }
 
 /** One transaction over a reply and its notes. */
@@ -281,17 +275,23 @@ async function redoReplyWrites(messageId: string, report: UndoReport): Promise<v
 const replacedBy = (m: Message): Version | undefined =>
   m.versions.slice(0, m.activeVersion + 1).reverse().find((v) => hasOutput(v.content))
 
-/** The start of a reroll. Null when there is nothing to take back. */
-async function undoReplaced(messageId: string): Promise<UndoReport | null> {
-  const m = await db.messages.get(messageId)
-  const v = m && replacedBy(m)
-  return v ? undoReplyWrites(messageId, [v]) : null
+/**
+ * The start of a reroll, or of a Continue from a try with no output: that one writes a new reply
+ * too. Null when there is nothing to take back.
+ */
+async function undoReplaced(target: GenerateTarget): Promise<UndoReport | null> {
+  if (target.kind === 'new') return null
+  const m = await db.messages.get(target.messageId)
+  if (!m) return null
+  if (target.kind === 'continue' && hasOutput(m.versions[m.activeVersion]?.content ?? [])) return null
+  const v = replacedBy(m)
+  return v ? undoReplyWrites(target.messageId, [v]) : null
 }
 
-/** A reroll with no output replaced nothing, so the writes it undid come back. */
+/** A try with no output replaced nothing, so the writes it undid come back. No version: it never got that far. */
 async function putBackIfEmpty(messageId: string, versionId: string, report: UndoReport): Promise<void> {
   const v = (await db.messages.get(messageId))?.versions.find((x) => x.id === versionId)
-  if (v && !hasOutput(v.content)) await redoReplyWrites(messageId, report)
+  if (!v || !hasOutput(v.content)) await redoReplyWrites(messageId, report)
 }
 
 /** Stops the chat's stream and waits for its end, so that no write can land after this. */
@@ -363,7 +363,15 @@ export async function deleteVersion(id: string): Promise<VersionSnapshot | null>
 
 export async function restoreVersion(s: VersionSnapshot): Promise<void> {
   await withNotes(async () => {
-    await storage.mutateMessage(s.messageId, (m) => withVersionAt(m, s.removed, s.index))
+    await storage.mutateMessage(s.messageId, (m) => {
+      // A call that another version holds may have changed since. That version has the news.
+      const held = new Map(m.versions.flatMap((v) => v.content.filter(isTool)).map((p) => [p.callId, p]))
+      const content = s.removed.content.map((p) => {
+        const sibling = isTool(p) ? held.get(p.callId) : undefined
+        return sibling ? { ...p, undone: sibling.undone, kept: sibling.kept } : p
+      })
+      return withVersionAt(m, { ...s.removed, content }, s.index)
+    })
     await redoReplyWrites(s.messageId, s.report)
   })
 }
@@ -463,7 +471,25 @@ async function generateInner(
   const conversation = await storage.getConversation(conversationId)
   if (!conversation) return
   // First of all, so the new reply can't read the old writes and the index can't list them.
-  const undid = target.kind === 'reroll' ? await undoReplaced(target.messageId) : null
+  const undid = await undoReplaced(target)
+  const versionId = newId()
+  try {
+    await startReply(conversation, target, model, controller, versionId, (undid?.undone.length ?? 0) > 0)
+  } finally {
+    if (undid && target.kind !== 'new') await putBackIfEmpty(target.messageId, versionId, undid)
+  }
+}
+
+/** Plans the request, adds the version and runs it. `staleIndex`: an undo just changed the notes. */
+async function startReply(
+  conversation: Conversation,
+  target: GenerateTarget,
+  model: ModelInfo,
+  controller: AbortController,
+  versionId: string,
+  staleIndex: boolean,
+): Promise<void> {
+  const conversationId = conversation.id
   const settings = await storage.getSettings()
   // A reroll plans and sends only what comes before its target, so the window can never
   // point past the cut (buildOutgoing would then fall back to the whole transcript).
@@ -478,7 +504,7 @@ async function generateInner(
   // With no abilities, a call that a model makes up finds nothing to run.
   const enabled = activeAbilities(conversation, prompt, model)
 
-  /** The index moves only here: at a cold moment or a trim, where the prefix is broken anyway. */
+  /** The index moves only here: at a cold moment, a trim or an undo, where the prefix is broken anyway. */
   let indexFresh = false
   const refreshIndex = async (): Promise<void> => {
     const notesIndex = buildIndex(await notes.list('shared'), await notes.list(conversationId))
@@ -511,7 +537,7 @@ async function generateInner(
     anthropicCacheHour: settings.anthropicCacheHour,
     now: Date.now(),
   })
-  if (wantsIndex(enabled) && (cold || conversation.notesIndex === null)) await refreshIndex()
+  if (wantsIndex(enabled) && (cold || staleIndex || conversation.notesIndex === null)) await refreshIndex()
   const plan = planWindow({
     messages,
     windowStartId: storedId,
@@ -564,7 +590,7 @@ async function generateInner(
   const base = target.kind === 'continue' ? outgoingFor(sendable(messages, target.messageId), system, plan.startId, model, tools !== null) : outgoing
   const prefill = target.kind === 'continue' && !initial.some(isTool) ? outgoing : null
   const version: Version = {
-    id: newId(),
+    id: versionId,
     content: initial,
     status: 'streaming',
     model: model.id,
@@ -607,7 +633,6 @@ async function generateInner(
     roundReasoning,
     controller,
   })
-  if (undid) await putBackIfEmpty(messageId, version.id, undid)
 }
 
 /**
@@ -918,8 +943,16 @@ async function run(a: RunArgs): Promise<void> {
         await closePart(part.callId, resultOf(UNCHECKED))
         continue
       }
-      if (stored !== null) await closePart(part.callId, resultOf(stored))
-      else if (!controller.signal.aborted) await runPart(part)
+      if (stored !== null) {
+        await closePart(part.callId, resultOf(stored))
+      } else if (!controller.signal.aborted) {
+        // An undone write runs again, so it stands once more on each copy of the step.
+        if (part.undone) {
+          await setToolUndone(messageId, part.callId, false)
+          await closePart(part.callId, { undone: false })
+        }
+        await runPart(part)
+      }
     }
   }
 

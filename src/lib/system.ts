@@ -9,7 +9,7 @@ export const CAPABILITY_NOTE =
 /**
  * Prompt text, capability note, then the extras, with a blank line between. Any may be absent.
  * The extras, in order: ability instructions, note index, summary block.
- * The index and the summary block change only at a cold moment or a trim.
+ * The index and the summary block change only at a cold moment or a trim. An undo moves the index too.
  */
 export function assembleSystem(
   promptText: string | null,

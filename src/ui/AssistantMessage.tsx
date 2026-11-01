@@ -142,7 +142,6 @@ export function AssistantMessage({ message, isLast, busy, selected, editing, aft
             key={`${x.part.round}:${x.part.callId}`}
             part={x.part}
             messageId={message.id}
-            versionId={version.id}
             locked={writing}
           />
         if (editing) {
