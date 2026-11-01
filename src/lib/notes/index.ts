@@ -1,17 +1,23 @@
 import type { Note } from '../types'
-import { shownPath } from './rules'
+import { safeCut, shownPath } from './rules'
 
 /** About 2,000 tokens (spec §8). */
 export const INDEX_MAX_CHARS = 8000
-/** One note must not eat the map. Descriptions have no length rule of their own. */
-const MAX_DESCRIPTION = 160
+/** One note must not eat the map. Mikael's own descriptions have no cap. */
+const SHOWN_DESCRIPTION = 160
 const HEADER = 'Notes index. It can miss the newest notes, so use notes_search too. A line with a count is a folder: give it to notes_read to list it.'
 
-/** A folder: the notes under one first path part. A note in no folder is a group with `folder` null. */
+interface Entry {
+  line: string
+  at: number
+  shown: boolean
+}
+
+/** A folder: the notes under one first path part. `loose`: the shelf's notes in no folder. */
 interface Group {
-  folder: string | null
-  lines: string[]
-  closed: boolean
+  folder: string
+  loose: boolean
+  entries: Entry[]
 }
 
 interface Shelf {
@@ -22,42 +28,39 @@ interface Shelf {
 
 const notesWord = (n: number): string => `${n} ${n === 1 ? 'note' : 'notes'}`
 
-const charsOf = (lines: string[]): number => lines.reduce((sum, l) => sum + l.length + 1, 0)
+const newestFirst = (entries: Entry[]): Entry[] => [...entries].sort((a, b) => b.at - a.at)
 
-const closedLine = (folder: string, count: number): string => `${folder} (${notesWord(count)})`
+const charsOf = (g: Group): number => g.entries.reduce((sum, e) => sum + e.line.length + 1, 0)
 
 function lineFor(n: Note): string {
   const d = n.description
-  return `${shownPath(n)} — ${d.length > MAX_DESCRIPTION ? `${d.slice(0, MAX_DESCRIPTION)}…` : d}`
+  return `${shownPath(n)} — ${d.length > SHOWN_DESCRIPTION ? `${safeCut(d, SHOWN_DESCRIPTION)}…` : d}`
 }
 
 function toShelf(name: string, notes: Note[]): Shelf {
-  const groups: Group[] = []
-  const folders = new Map<string, Group>()
+  const groups = new Map<string, Group>()
   for (const n of notes) {
     const cut = n.path.indexOf('/')
-    if (cut === -1) {
-      groups.push({ folder: null, lines: [lineFor(n)], closed: false })
-      continue
-    }
     const folder = `${name}/${n.path.slice(0, cut + 1)}`
-    let group = folders.get(folder)
-    if (!group) {
-      group = { folder, lines: [], closed: false }
-      folders.set(folder, group)
-      groups.push(group)
-    }
-    group.lines.push(lineFor(n))
+    const group = groups.get(folder) ?? { folder, loose: cut === -1, entries: [] }
+    groups.set(folder, group)
+    group.entries.push({ line: lineFor(n), at: n.updatedAt, shown: true })
   }
-  return { name, groups, closed: false }
+  return { name, groups: [...groups.values()], closed: false }
 }
 
-const linesOf = (s: Shelf): string[] => s.groups.flatMap((g) => g.lines)
+function groupLines(g: Group): string[] {
+  const shown = g.entries.filter((e) => e.shown)
+  const hidden = g.entries.length - shown.length
+  if (hidden === 0) return shown.map((e) => e.line)
+  const tail = shown.length === 0 && !g.loose ? `${g.folder} (${notesWord(hidden)})` : `${g.folder} (and ${hidden} more: use notes_search)`
+  return [...newestFirst(shown).map((e) => e.line), tail]
+}
 
 function render(shelves: Shelf[]): string {
   const lines = shelves.flatMap((s) => {
-    if (s.closed) return [closedLine(`${s.name}/`, linesOf(s).length)]
-    return s.groups.flatMap((g) => (g.closed && g.folder !== null ? [closedLine(g.folder, g.lines.length)] : g.lines))
+    if (!s.closed) return s.groups.flatMap(groupLines)
+    return [`${s.name}/ (${notesWord(s.groups.reduce((sum, g) => sum + g.entries.length, 0))})`]
   })
   return [HEADER, ...lines].join('\n')
 }
@@ -65,22 +68,39 @@ function render(shelves: Shelf[]): string {
 /**
  * The map of the notes: one `path — description` line each, grouped by folder, with full paths so
  * a model can copy one straight into notes_read. Takes the order of `notes.list`.
- * Over the cap, the folders holding the most text close first, and each closes to a name and a
- * count. Notes in no folder go last, when a whole shelf closes. Empty when there are no notes.
+ * Over the cap, the folders holding the most text close first, each to a name and a count. Notes
+ * in no folder come next, then, if the count lines alone are too long, whole shelves. Room left
+ * after that goes to the newest notes of the last folder closed and of the notes in no folder,
+ * so a flat shelf or one huge folder keeps part of its map. Empty when there are no notes.
  */
 export function buildIndex(shared: Note[], chat: Note[]): string {
   const shelves = [toShelf('shared', shared), toShelf('chat', chat)].filter((s) => s.groups.length > 0)
   if (shelves.length === 0) return ''
 
-  const folders = shelves.flatMap((s) => s.groups).filter((g) => g.folder !== null)
-  const byText = (a: { chars: number }, b: { chars: number }): number => b.chars - a.chars
-  const steps = [
-    ...folders.map((item) => ({ item, chars: charsOf(item.lines) })).sort(byText),
-    ...shelves.map((item) => ({ item, chars: charsOf(linesOf(item)) })).sort(byText),
-  ]
-  for (const { item } of steps) {
-    if (render(shelves).length <= INDEX_MAX_CHARS) break
-    item.closed = true
+  const over = (): boolean => render(shelves).length > INDEX_MAX_CHARS
+  const groups = shelves.flatMap((s) => s.groups)
+  const largestFirst = (list: Group[]): Group[] => [...list].sort((a, b) => charsOf(b) - charsOf(a))
+  const closing = [...largestFirst(groups.filter((g) => !g.loose)), ...largestFirst(groups.filter((g) => g.loose))]
+
+  let last: Group | null = null
+  for (const g of closing) {
+    if (!over()) break
+    for (const e of g.entries) e.shown = false
+    last = g
+  }
+  for (const s of shelves) {
+    if (over()) s.closed = true
+  }
+
+  const hidden = (g: Group): boolean => g.entries.every((e) => !e.shown)
+  const open = shelves.filter((s) => !s.closed).flatMap((s) => s.groups)
+  const room = open.filter((g) => hidden(g) && (g.loose || g === last)).flatMap((g) => g.entries)
+  for (const e of newestFirst(room)) {
+    e.shown = true
+    if (over()) {
+      e.shown = false
+      break
+    }
   }
   return render(shelves)
 }

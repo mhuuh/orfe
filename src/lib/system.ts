@@ -1,4 +1,4 @@
-import { abilityInstructions, enabledAbilities, toolsFor, wantsIndex } from './abilities/registry'
+import { abilityInstructions, activeAbilities, wantsIndex } from './abilities/registry'
 import type { ModelInfo } from './catalog'
 import { storage } from './storage'
 import type { Conversation, Prompt } from './types'
@@ -28,7 +28,7 @@ export function assembleSystem(
  * for this model, or with notes off, gets no instructions or no index.
  */
 export function systemText(c: Conversation, prompt: Prompt | null, model: ModelInfo, index: string | null): string | null {
-  const enabled = toolsFor(c, prompt, model) ? enabledAbilities(c, prompt) : []
+  const enabled = activeAbilities(c, prompt, model)
   const extras = [abilityInstructions(enabled, model), wantsIndex(enabled) ? index : null]
   return assembleSystem(prompt?.text ?? null, c.capabilityNote, extras)
 }

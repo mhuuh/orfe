@@ -81,6 +81,10 @@ export function toolsFor(
   return { json, hash: hashText(json), tools }
 }
 
+/** What this model can really use. A model without tools has no abilities. */
+export const activeAbilities = (c: Conversation, p: Prompt | null, model: ModelInfo): Ability[] =>
+  toolsFor(c, p, model) ? enabledAbilities(c, p) : []
+
 /** Whether the system message carries the note index. */
 export const wantsIndex = (enabled: Ability[]): boolean => enabled.some((a) => a.id === notesAbility.id)
 

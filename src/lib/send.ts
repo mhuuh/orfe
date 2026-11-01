@@ -1,5 +1,5 @@
 import { UNCHECKED } from './abilities/outcome'
-import { enabledAbilities, runTool, toolsFor, wantsIndex, type Ability } from './abilities/registry'
+import { activeAbilities, runTool, toolsFor, wantsIndex, type Ability } from './abilities/registry'
 import { fallbackModelInfo, type ModelInfo } from './catalog'
 import { estimateTokens, fingerprint, isCold, planWindow, ttlFor } from './context'
 import { buildOutgoing, renderRounds } from './normalise'
@@ -324,8 +324,8 @@ async function generateInner(
   const setting = conversation.context ?? settings.context
   const tools = toolsFor(conversation, prompt, model)
   const overheadChars = tools?.json.length ?? 0
-  // A model without tools has no abilities, so a call it makes up finds nothing to run.
-  const enabled = tools ? enabledAbilities(conversation, prompt) : []
+  // With no abilities, a call that a model makes up finds nothing to run.
+  const enabled = activeAbilities(conversation, prompt, model)
 
   /** The index moves only here: at a cold moment or a trim, where the prefix is broken anyway. */
   let indexFresh = false

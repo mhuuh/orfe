@@ -1,7 +1,7 @@
 import { hashText } from '../hash'
 import { db, newId } from '../storage'
 import type { Note, NoteRevision } from '../types'
-import { PROTECTED, checkWrite, nearMatch, shelfOf, shownPath } from './rules'
+import { PROTECTED, badPathText, checkDescription, checkWrite, echo, nearMatch, shelfOf, shownPath } from './rules'
 
 /** The note store. With `storage.ts`, this file is the Dexie seam for notes (Ruling P3). */
 
@@ -82,10 +82,11 @@ const rw = <T>(fn: () => Promise<T>): Promise<T> => db.transaction('rw', db.note
 
 const refuse = (refused: string): Result => ({ refused })
 
-const badPath = (path: string): Result =>
-  refuse(`Error: "${path}" is not a usable path. Start it with shared/ or chat/. Leave out square brackets, and keep it under 200 characters.`)
+const badPath = (path: string): Result => refuse(badPathText(path))
 
-const missing = (path: string): Result => refuse(`Error: There is no note at ${path}. Use notes_search to find it.`)
+const missingText = (path: string): string => `Error: There is no note at ${echo(path)}. Use notes_search to find it.`
+
+const missing = (path: string): Result => refuse(missingText(path))
 
 /** Where a note is, in the form `aliases` keeps. */
 const place = (n: Pick<Note, 'shelf' | 'path'>): string => `${n.shelf}/${n.path}`
@@ -243,7 +244,8 @@ function snippet(note: Note, terms: string[]): string {
   const at = terms.map((t) => body.indexOf(t)).find((i) => i !== -1)
   if (at === undefined) return note.description
   const from = Math.max(0, at - SNIPPET_SIDE)
-  const part = note.body.slice(from, at + SNIPPET_SIDE).replace(/\s+/g, ' ').trim()
+  // A cut can land inside an emoji, so a lone half at either end goes.
+  const part = note.body.slice(from, at + SNIPPET_SIDE).replace(/^[\udc00-\udfff]|[\ud800-\udbff]$/g, '').replace(/\s+/g, ' ').trim()
   return `${from > 0 ? '…' : ''}${part}${at + SNIPPET_SIDE < note.body.length ? '…' : ''}`
 }
 
@@ -284,7 +286,7 @@ export const notes: NoteStore = {
     if (!at) return badPath(ref.path)
     return rw(async () => {
       const prev = (await locate(at.shelf, at.path, ref.conversationId)) ?? null
-      if (!prev && input.expectedVersion !== undefined) return missing(ref.path)
+      if (!prev && input.expectedVersion !== undefined) return refuse(`${missingText(ref.path)} To create it, write again with no expected_version.`)
       if (!prev && !input.isNew) {
         const prefix = `${at.shelf}/`
         const old = (await live(at.shelf)).flatMap((n) => [
@@ -297,7 +299,7 @@ export const notes: NoteStore = {
           return refuse(`Error: A note with a close path exists: ${name}. Update that note, or write again with new: true if this one is different.`)
         }
       }
-      const refusal = checkWrite(prev, input, by.writer)
+      const refusal = checkWrite(prev, input, by.writer) ?? checkDescription(input.description, by.writer)
       if (refusal) return refuse(refusal)
       if (prev && by.writer !== 'you' && input.expectedVersion === undefined) {
         return refuse(`Error: ${shownPath(prev)} already exists, at version ${prev.version}. Use notes_read to see it, then write again with expected_version ${prev.version}.`)
@@ -343,7 +345,7 @@ export const notes: NoteStore = {
       // On a protected note a model or tidy can change the tags and the path, and nothing else.
       if (prev.protected && by.writer !== 'you' && (changesText || description.trim() !== prev.description)) return refuse(PROTECTED)
       // The writer 'you' has only the version and description checks: those two apply to every edit.
-      const first = checkWrite(prev, { body: prev.body, description, expectedVersion }, 'you')
+      const first = checkWrite(prev, { body: prev.body, description, expectedVersion }, 'you') ?? checkDescription(change.description ?? '', by.writer)
       if (first) return refuse(first)
 
       let body = prev.body

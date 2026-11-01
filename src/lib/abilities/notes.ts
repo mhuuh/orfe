@@ -1,4 +1,4 @@
-import { normalisePath, shelfOf, shownPath } from '../notes/rules'
+import { badPathText, echo, normalisePath, safeCut, shelfOf, shownPath } from '../notes/rules'
 import { notes, type Result } from '../notes/store'
 import type { Note, ToolPart } from '../types'
 import { outcome } from './outcome'
@@ -8,7 +8,9 @@ import type { Ability, AbilityCtx, StepWords } from './registry'
 const PAGE_CHARS = 8000
 const SEARCH_LIMIT = 10
 /** Starts the result of a read that found nothing. A miss is a normal result, not an error. */
-const NO_NOTE = 'No note at'
+const NO_NOTE = 'No note'
+/** What a model may copy along with a path from an index line: ` — description` or ` (12 notes)`. */
+const LINE_TAIL = /\s+([—–-]\s.*|\(\d+ notes?\)|\(and \d+ more[^)]*\))$/s
 
 type Args = Record<string, unknown>
 
@@ -56,7 +58,7 @@ const TOOLS: Ability['tools'] = [
       type: 'object',
       properties: {
         path: { ...PATH_PARAM, description: `${PATH_PARAM.description} Use chat/ unless you have a reason.` },
-        description: { type: 'string', description: 'One line: what the note holds.' },
+        description: { type: 'string', description: 'One short line: what the note holds.' },
         body: { type: 'string', description: 'The whole note, in Markdown. Say what is true now. It is not a diary.' },
         tags: { type: 'array', items: { type: 'string' }, description: 'Short labels.' },
         expected_version: { ...VERSION_PARAM, description: `Needed to replace. ${VERSION_PARAM.description}` },
@@ -81,9 +83,9 @@ const TOOLS: Ability['tools'] = [
         path: PATH_PARAM,
         expected_version: VERSION_PARAM,
         old_text: { type: 'string', description: 'The exact text to replace, with no line numbers.' },
-        new_text: { type: 'string', description: 'The text to put in.' },
-        tags: { type: 'array', items: { type: 'string' }, description: 'The new tags. They replace the old ones.' },
-        description: { type: 'string', description: 'A new one-line description.' },
+        new_text: { type: 'string', description: 'The text to put in. An empty string removes old_text.' },
+        tags: { type: 'array', items: { type: 'string' }, description: 'The new tags, at least one. They replace the old ones.' },
+        description: { type: 'string', description: 'A new description, in one short line.' },
       },
       required: ['path', 'expected_version'],
     },
@@ -102,6 +104,8 @@ const TOOLS: Ability['tools'] = [
   },
 ]
 
+/** There, but not text. Such a field must not pass as left out: that can pick another action. */
+const notText = (v: unknown): boolean => v !== undefined && typeof v !== 'string'
 const asArgs = (a: unknown): Args => (typeof a === 'object' && a !== null && !Array.isArray(a) ? (a as Args) : {})
 
 /** A non-blank string. Text that may be empty, like a body, is read with `raw`. */
@@ -114,9 +118,11 @@ const num = (v: unknown): number | undefined => {
   return typeof v === 'string' && /^\d+$/.test(v.trim()) ? Number(v) : undefined
 }
 const flag = (v: unknown): true | undefined => (v === true || v === 'true' ? true : undefined)
+/** Nothing usable counts as left out, so a model can't wipe a note's tags. Clearing them is Mikael's. */
 const list = (v: unknown): string[] | undefined => {
-  const items = typeof v === 'string' && v.trim() !== '' ? v.split(',') : Array.isArray(v) ? v : undefined
-  return items?.flatMap((t) => (typeof t === 'string' && t.trim() !== '' ? [t.trim()] : []))
+  const items: unknown[] = typeof v === 'string' ? v.split(',') : Array.isArray(v) ? v : []
+  const tags = items.flatMap((t) => (typeof t === 'string' && t.trim() !== '' ? [t.trim()] : []))
+  return tags.length > 0 ? tags : undefined
 }
 
 const report = (r: Result, ok: (n: Note) => string): string => ('ok' in r ? ok(r.ok) : r.refused)
@@ -128,26 +134,29 @@ function paginate(lines: string[]): string[] {
   const pages: string[] = []
   let page = ''
   for (const line of lines) {
-    for (let i = 0; i === 0 || i < line.length; i += PAGE_CHARS) {
-      const piece = line.slice(i, i + PAGE_CHARS)
+    let rest = line
+    do {
+      const piece = safeCut(rest, PAGE_CHARS)
+      rest = rest.slice(piece.length)
       if (page !== '' && page.length + 1 + piece.length > PAGE_CHARS) {
         pages.push(page)
         page = ''
       }
       page = page === '' ? piece : `${page}\n${piece}`
-    }
+    } while (rest !== '')
   }
   return [...pages, page]
 }
 
-/** One page with the header lines above it, or a refusal for a page past the end. */
-function paged(header: string[], lines: string[], page: number): string {
+/** One page with the header lines above it, or a refusal for a page past the end. `path`: what was read. */
+function paged(header: string[], lines: string[], page: number, path: string): string {
   const pages = paginate(lines)
+  const call = (n: number): string => `call notes_read with ${path === '' ? '' : `path ${path} and `}page ${n}`
   if (page > pages.length) {
-    const count = pages.length === 1 ? '1 page' : `${pages.length} pages`
-    return `Error: There are ${count}. Ask for page ${pages.length} or lower.`
+    const count = pages.length === 1 ? 'is 1 page' : `are ${pages.length} pages`
+    return `Error: There ${count}. For the last page, ${call(pages.length)}.`
   }
-  const more = page < pages.length ? ` For more, call notes_read with page ${page + 1}.` : ''
+  const more = page < pages.length ? ` For more, ${call(page + 1)}.` : ''
   const line = pages.length > 1 ? [`Page ${page} of ${pages.length}.${more}`] : []
   return [...header, ...line, '', pages[page - 1]].join('\n')
 }
@@ -161,7 +170,7 @@ function readNote(n: Note, asked: string, page: number): string {
     ...(n.protected ? ['Protected: its text is locked. You can move it or change its tags.'] : []),
     ...(n.supersedes ? [`Replaces ${n.supersedes}.`] : []),
   ]
-  return paged(header, n.body.split('\n').map((line, i) => `${i + 1}| ${line}`), page)
+  return paged(header, n.body.split('\n').map((line, i) => `${i + 1}| ${line}`), page, shownPath(n))
 }
 
 /** The live notes this chat can see, under a folder if one is given. Null when there are none. */
@@ -169,19 +178,34 @@ async function listing(ctx: AbilityCtx, folder: string, page: number): Promise<s
   const all = [...(await notes.list('shared')), ...(await notes.list(ctx.conversationId))]
   const under = folder === '' ? '' : `${folder.toLowerCase()}/`
   const lines = all.filter((n) => shownPath(n).toLowerCase().startsWith(under)).map((n) => `${shownPath(n)} — ${n.description}`)
-  return lines.length > 0 ? paged([folder === '' ? 'All notes:' : `Notes in ${folder}/:`], lines, page) : null
+  if (lines.length === 0) return null
+  return folder === '' ? paged(['All notes:'], lines, page, '') : paged([`Notes in ${folder}/:`], lines, page, `${folder}/`)
+}
+
+/** A note or a folder at this path. A slash at the end asks for the folder first. */
+async function lookup(given: string, page: number, ctx: AbilityCtx): Promise<string | null> {
+  const path = normalisePath(given)
+  const asFolder = (): Promise<string | null> => listing(ctx, path, page)
+  const asNote = async (): Promise<string | null> => {
+    const note = await notes.read({ path, conversationId: ctx.conversationId })
+    return note ? readNote(note, path, page) : null
+  }
+  return given.endsWith('/') ? ((await asFolder()) ?? (await asNote())) : ((await asNote()) ?? (await asFolder()))
 }
 
 async function read(a: Args, ctx: AbilityCtx): Promise<string> {
-  const path = normalisePath(word(a.path) ?? '')
+  // A [[link]] from a note body works as a path.
+  const given = (word(a.path) ?? '').trim().replace(/^\[\[(.*)\]\]$/s, '$1')
   const page = Math.max(1, Math.floor(num(a.page) ?? 1))
-  if (path === '') return (await listing(ctx, '', page)) ?? 'There are no notes yet. Use notes_write to save one.'
-  const note = await notes.read({ path, conversationId: ctx.conversationId })
-  if (note) return readNote(note, path, page)
-  const folder = await listing(ctx, path, page)
-  if (folder !== null) return folder
-  if (!shelfOf(path, ctx.conversationId)) return `Error: "${path}" is not a usable path. Start it with shared/ or chat/.`
-  return `${NO_NOTE} ${path}. It is gone, or it was never there. Use notes_search to look for it.`
+  if (normalisePath(given) === '') return (await listing(ctx, '', page)) ?? 'There are no notes yet. Use notes_write to save one.'
+  // The whole text first: a path may hold what looks like a tail.
+  const bare = given.replace(LINE_TAIL, '')
+  const found = (await lookup(given, page, ctx)) ?? (bare === given ? null : await lookup(bare, page, ctx))
+  if (found !== null) return found
+  const path = normalisePath(bare)
+  if (/^(shared|chat)$/i.test(path)) return `${NO_NOTE}s on this shelf yet.`
+  if (!shelfOf(path, ctx.conversationId)) return badPathText(path)
+  return `${NO_NOTE} at ${echo(path)}. It is gone, or it was never there. Use notes_search to look for it.`
 }
 
 async function search(a: Args, ctx: AbilityCtx): Promise<string> {
@@ -190,9 +214,9 @@ async function search(a: Args, ctx: AbilityCtx): Promise<string> {
   const hits = await notes.search(['shared', ctx.conversationId], query, SEARCH_LIMIT + 1)
   const shown = hits.slice(0, SEARCH_LIMIT)
   if (shown.length === 0) {
-    return `Found 0 notes for "${query}". Try fewer or other words, or use notes_read with no path to list all notes.`
+    return `Found 0 notes for "${echo(query)}". Try fewer or other words, or use notes_read with no path to list all notes.`
   }
-  const head = `Found ${shown.length} ${shown.length === 1 ? 'note' : 'notes'} for "${query}".`
+  const head = `Found ${shown.length} ${shown.length === 1 ? 'note' : 'notes'} for "${echo(query)}".`
   const more = hits.length > SEARCH_LIMIT ? ' There are more: add more words to narrow it.' : ''
   const lines = shown.flatMap(({ note, snippet }) => [
     `${shownPath(note)} (version ${note.version}) — ${note.description}`,
@@ -225,7 +249,7 @@ function run(name: string, a: Args, ctx: AbilityCtx): Promise<string> | string {
         body,
         description,
         tags: list(a.tags),
-        expectedVersion: num(a.expected_version),
+        expectedVersion: num(a.expected_version) || undefined,
         isNew: flag(a.new),
         shrink: flag(a.shrink),
         protected: flag(a.protected),
@@ -234,15 +258,20 @@ function run(name: string, a: Args, ctx: AbilityCtx): Promise<string> | string {
       return notes.write(ref, input, by).then((r) => report(r, (n) => `Wrote ${shownPath(n)}. ${atVersion(n)}`))
     }
     case 'notes_edit': {
-      const expectedVersion = num(a.expected_version)
+      const expectedVersion = num(a.expected_version) || undefined
       if (expectedVersion === undefined) return 'Error: notes_edit needs expected_version. Use notes_read to get it, then edit again.'
+      if (notText(a.old_text)) return 'Error: old_text must be text. Send the exact text to replace, or leave old_text out.'
       // A weak model fills every field, so a blank field means left out. Only a replace can put in nothing.
       const oldText = raw(a.old_text) || undefined
+      if (notText(a.new_text) || (oldText && a.new_text === undefined)) {
+        return 'Error: new_text must be text. To replace old_text, send the new words. To remove it, send new_text as an empty string.'
+      }
       const newText = oldText ? raw(a.new_text) : raw(a.new_text) || undefined
       const change = { oldText, newText, tags: list(a.tags), description: word(a.description), expectedVersion }
       return notes.edit(ref, change, by).then((r) => report(r, (n) => `Edited ${shownPath(n)}. ${atVersion(n)}`))
     }
     case 'notes_delete': {
+      if (notText(a.new_path)) return 'Error: new_path must be text that starts with shared/ or chat/. Send it again, or leave it out to delete the note.'
       const to = word(a.new_path)
       if (to) return notes.move(ref, to, by).then((r) => report(r, (n) => `Moved ${normalisePath(path)} to ${shownPath(n)}. ${atVersion(n)}`))
       return notes.remove(ref, by).then((r) => report(r, (n) => `Deleted ${shownPath(n)}. It is in Trash, and Mikael can bring it back.`))
@@ -255,7 +284,7 @@ function run(name: string, a: Args, ctx: AbilityCtx): Promise<string> | string {
 /** 'chat/mira/voice' reads 'Mira, voice'. */
 function title(path: string): string {
   const name = normalisePath(path).replace(/^(shared|chat)\//i, '').split('/').join(', ').replace(/[-_]/g, ' ')
-  return name.charAt(0).toUpperCase() + name.slice(1)
+  return echo(name.charAt(0).toUpperCase() + name.slice(1))
 }
 
 const FORMS = {
@@ -268,12 +297,12 @@ const FORMS = {
 
 function searchWords(part: ToolPart, a: Args): StepWords {
   const running = 'searching notes…'
-  const query = word(a.query)
+  const query = echo(word(a.query) ?? '')
   switch (outcome(part)) {
     case 'done': {
       const count = Number(/^Found (\d+)/.exec(part.result)?.[1] ?? 0)
       const found = count === 0 ? 'found no notes' : `found ${count} ${count === 1 ? 'note' : 'notes'}`
-      return { running, done: found, past: `(Looked in notes for '${query ?? ''}': ${found}.)` }
+      return { running, done: found, past: `(Looked in notes for '${query}': ${found}.)` }
     }
     case 'stopped':
       return { running, done: 'search stopped', past: '(Stopped a search of the notes before it finished.)' }
@@ -304,7 +333,7 @@ function describe(part: ToolPart): StepWords {
   switch (outcome(part)) {
     case 'done':
       if (part.result.startsWith(NO_NOTE)) return { running, done: `no note ${name}`, past: `(Looked for ${noun}. It was not there.)` }
-      return { running, done: `${f.did} ${name}`, past: `(${f.past} ${noun}${moved ? ` to ${normalisePath(moved)}` : ''}.)` }
+      return { running, done: `${f.did} ${name}`, past: `(${f.past} ${noun}${moved ? ` to ${echo(normalisePath(moved))}` : ''}.)` }
     case 'stopped':
       return { running, done: `stopped ${f.ing} ${name}`, past: `(Stopped before ${f.ing} ${noun}.)` }
     case 'failed':

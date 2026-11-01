@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest'
 import type { Note } from '../types'
-import { MAX_BODY, MAX_PATH, checkWrite, nearMatch, normalisePath, shelfOf } from './rules'
+import { MAX_BODY, MAX_DESCRIPTION, MAX_PATH, checkDescription, checkWrite, echo, nearMatch, normalisePath, safeCut, shelfOf } from './rules'
 
 function note(over: Partial<Note> = {}): Note {
   return {
@@ -75,6 +75,29 @@ describe('nearMatch', () => {
     expect(nearMatch('x/mushroom', ['x/mushrooo'])).toBe('x/mushrooo')
     expect(nearMatch('x/mushroom', ['x/mushraam'])).toBeNull()
     expect(nearMatch('x/pancake', ['x/pancakw'])).toBeNull()
+  })
+})
+
+describe('cuts', () => {
+  it('safeCut backs off one unit rather than split an emoji', () => {
+    expect(safeCut('ab😀', 3)).toBe('ab')
+    expect(safeCut('ab😀', 4)).toBe('ab😀')
+    expect(safeCut('abc', 9)).toBe('abc')
+  })
+
+  it('echo leaves short text alone and cuts long text', () => {
+    expect(echo('short')).toBe('short')
+    expect(echo('x'.repeat(5000))).toBe(`${'x'.repeat(100)}…`)
+  })
+})
+
+describe('checkDescription', () => {
+  it('caps a model and tidy, not Mikael', () => {
+    const long = 'x'.repeat(MAX_DESCRIPTION + 1)
+    expect(checkDescription('x'.repeat(MAX_DESCRIPTION), 'm/x')).toBeNull()
+    expect(checkDescription(long, 'm/x')).toMatch(/^Error: .*Shorten/)
+    expect(checkDescription(long, 'tidy')).toMatch(/^Error:/)
+    expect(checkDescription(long, 'you')).toBeNull()
   })
 })
 

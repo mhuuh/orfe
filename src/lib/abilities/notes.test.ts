@@ -11,6 +11,9 @@ import { notesAbility } from './notes'
 import { UNCHECKED } from './outcome'
 import { describeStep, setAbilitiesForTest, toolsFor, type AbilityCtx } from './registry'
 
+/** No lone half of an emoji. */
+const whole = (s: string): boolean => !/[\ud800-\udbff](?![\udc00-\udfff])|(?<![\ud800-\udbff])[\udc00-\udfff]/.test(s)
+
 const T: ModelInfo = { ...fallbackModelInfo('t/tools'), tools: true }
 const PLAIN_MODEL: ModelInfo = { ...fallbackModelInfo('p/plain'), tools: false }
 
@@ -107,6 +110,99 @@ describe('notes tools', () => {
     expect(await call('notes_delete', ['nope'])).toMatch(/^Error: notes_delete needs a path/)
   })
 
+  describe('a field of the wrong type never picks another action', () => {
+    const BODY = 'Age: 30. Town: Oulu.'
+    const edit = (args: object) => call('notes_edit', { path: 'chat/a', expected_version: 1, ...args })
+    const body = async () => (await notes.read(ref('chat/a')))?.body
+    beforeEach(() => put('chat/a', 'd', BODY))
+
+    it.each([[31], [null], [{ text: 'x' }], [undefined]])('old_text with new_text %j is refused, and the text stays', async (new_text) => {
+      const out = await edit({ old_text: 'Age: 30', new_text })
+      expect(out).toMatch(/^Error: new_text must be text/)
+      expect(out).toContain('empty string')
+      expect(await body()).toBe(BODY)
+    })
+
+    it.each([[30], [null], [{ text: 'Age' }], [['Age']]])('old_text %j is refused, and nothing is added', async (old_text) => {
+      expect(await edit({ old_text, new_text: '31' })).toMatch(/^Error: old_text must be text/)
+      expect(await body()).toBe(BODY)
+    })
+
+    it('new_text as an empty string still removes text', async () => {
+      expect(await edit({ old_text: ' Town: Oulu.', new_text: '' })).toBe('Edited chat/a. It is at version 2.')
+      expect(await body()).toBe('Age: 30.')
+    })
+
+    it('new_text of the wrong type alone is refused', async () => {
+      expect(await edit({ new_text: 31, tags: ['a'] })).toMatch(/^Error: new_text must be text/)
+    })
+
+    it.each([[{ path: 'chat/b' }], [7], [['chat/b']], [null]])('new_path %j is refused, and the note stays', async (new_path) => {
+      const out = await call('notes_delete', { path: 'chat/a', new_path })
+      expect(out).toMatch(/^Error: new_path must be text/)
+      expect(await body()).toBe(BODY)
+    })
+  })
+
+  it('a create that carries expected_version gets a way out', async () => {
+    const out = await call('notes_write', { path: 'chat/new', description: 'd', body: 'b', expected_version: 1 })
+    expect(out).toContain('There is no note at chat/new.')
+    expect(out).toContain('To create it, write again with no expected_version.')
+    expect(await call('notes_write', { path: 'chat/new', description: 'd', body: 'b', expected_version: 0 })).toBe('Wrote chat/new. It is at version 1.')
+  })
+
+  it('expected_version 0 counts as left out on an edit', async () => {
+    await put('chat/a')
+    expect(await call('notes_edit', { path: 'chat/a', expected_version: 0, tags: ['a'] })).toMatch(/^Error: notes_edit needs expected_version/)
+  })
+
+  it.each([[[]], [[1, 2]], [','], ['  '], [null], [{}]])('tags %j count as left out, so they wipe nothing', async (tags) => {
+    await call('notes_write', { path: 'chat/a', description: 'd', body: 'b', tags: ['keep'] })
+    await call('notes_edit', { path: 'chat/a', expected_version: 1, tags, description: 'New' })
+    await call('notes_write', { path: 'chat/a', description: 'New', body: 'b', expected_version: 2, tags })
+    expect((await notes.read(ref('chat/a')))?.tags).toEqual(['keep'])
+  })
+
+  it('non-strings in a tag list are dropped', async () => {
+    await call('notes_write', { path: 'chat/a', description: 'd', body: 'b', tags: [1, 'real', null, ' '] })
+    expect((await notes.read(ref('chat/a')))?.tags).toEqual(['real'])
+  })
+
+  it('a long description is refused for a model, by write and by edit', async () => {
+    const long = 'x'.repeat(201)
+    const out = await put('chat/a', long)
+    expect(out).toMatch(/^Error: The description is 201 characters\. The limit is 200\. Shorten it/)
+    expect(await put('chat/a', 'x'.repeat(200))).toBe('Wrote chat/a. It is at version 1.')
+    expect(await call('notes_edit', { path: 'chat/a', expected_version: 1, description: long })).toMatch(/^Error: The description is 201/)
+
+    // Mikael has no cap, and an edit that leaves his long line alone still goes through.
+    await notes.write(ref('chat/his'), { body: 'b', description: long, isNew: true }, YOU)
+    expect(await call('notes_edit', { path: 'chat/his', expected_version: 1, new_text: 'more' })).toBe('Edited chat/his. It is at version 2.')
+  })
+
+  it('a huge path or query does not come back whole', async () => {
+    const huge = 'x'.repeat(100000)
+    const results = [
+      await call('notes_read', { path: huge }),
+      await call('notes_read', { path: `chat/${huge}` }),
+      await call('notes_write', { path: huge, description: 'd', body: 'b' }),
+      await call('notes_write', { path: `chat/${huge}`, description: 'd', body: 'b' }),
+      await call('notes_edit', { path: huge, expected_version: 1, tags: ['a'] }),
+      await call('notes_delete', { path: `chat/${huge}` }),
+      await call('notes_search', { query: huge }),
+    ]
+    for (const out of results) expect(out.length).toBeLessThan(400)
+    const part: ToolPart = { type: 'tool', callId: 'c', round: 0, model: 'm', name: 'notes_read', args: { path: `chat/${huge}` }, result: '', status: 'done' }
+    expect(describeStep(part).past.length).toBeLessThan(200)
+    expect(describeStep({ ...part, name: 'notes_search', args: { query: huge } }).past.length).toBeLessThan(200)
+  })
+
+  it('a search snippet never ends on half an emoji', async () => {
+    await notes.write(ref('shared/e'), { body: `river${'😀'.repeat(60)}`, description: 'd', isNew: true }, YOU)
+    await notes.write(ref('shared/f'), { body: `${'😀'.repeat(60)}x river`, description: 'd', isNew: true }, YOU)
+    expect(whole(await call('notes_search', { query: 'river' }))).toBe(true)
+  })
+
   it('takes loosely typed arguments from a weak model', async () => {
     await put('chat/quay')
     const out = await call('notes_edit', { path: 'chat/quay', expected_version: '1', tags: 'dock, boats' })
@@ -139,8 +235,7 @@ describe('notes tools', () => {
 
     const one = await call('notes_read', { path: 'shared/long' })
     expect(one).toContain('Page 1 of 2')
-    expect(one).toContain('notes_read')
-    expect(one).toContain('page 2')
+    expect(one).toContain('For more, call notes_read with path shared/long and page 2.')
     expect(one).toContain('1| Line 1 of')
     expect(one.length).toBeLessThan(8300)
 
@@ -150,7 +245,19 @@ describe('notes tools', () => {
     expect(two).not.toContain('\n1| Line 1 of')
 
     const past = await call('notes_read', { path: 'shared/long', page: 9 })
-    expect(past).toMatch(/^Error: .*2 pages/)
+    expect(past).toMatch(/^Error: There are 2 pages/)
+    expect(past).toContain('path shared/long and page 2')
+
+    await put('shared/short')
+    expect(await call('notes_read', { path: 'shared/short', page: 2 })).toMatch(/^Error: There is 1 page\./)
+  })
+
+  it('a page cut never splits an emoji', async () => {
+    await notes.write(ref('shared/e'), { body: `${'a'.repeat(7996)}${'😀'.repeat(10)}`, description: 'd', isNew: true }, YOU)
+    const one = await call('notes_read', { path: 'shared/e' })
+    const two = await call('notes_read', { path: 'shared/e', page: 2 })
+    for (const page of [one, two]) expect(whole(page)).toBe(true)
+    expect((one + two).match(/😀/g)).toHaveLength(10)
   })
 
   it('notes_read always gets through one line longer than a page', async () => {
@@ -174,6 +281,40 @@ describe('notes tools', () => {
     await db.notes.bulkPut(Array.from({ length: 300 }, (_, i) => note('shared', `many/note-${i}`, 'x'.repeat(40))))
     const tree = await call('notes_read', {})
     expect(tree).toContain('Page 1 of ')
+  })
+
+  it('a slash at the end lists the folder, even with a note of that name', async () => {
+    await put('shared/recipes', 'The hub', 'Hub text.')
+    await put('shared/recipes/soup')
+    expect(await call('notes_read', { path: 'shared/recipes' })).toContain('1| Hub text.')
+    const folder = await call('notes_read', { path: 'shared/recipes/' })
+    expect(folder).toContain('shared/recipes/soup — ')
+    expect(folder).not.toContain('Hub text.')
+  })
+
+  it('a whole index line works as a path', async () => {
+    await put('shared/recipes/soup', 'Soup')
+    await put('shared/recipes/bread', 'Bread')
+    const note = '1| Body text.'
+    expect(await call('notes_read', { path: 'shared/recipes/soup — Soup' })).toContain(note)
+    expect(await call('notes_read', { path: 'shared/recipes/soup - Soup' })).toContain(note)
+    for (const line of ['shared/recipes/ (2 notes)', 'shared/recipes/ (and 1 more: use notes_search)', 'shared/ (and 2 more: use notes_search)']) {
+      expect(await call('notes_read', { path: line })).toContain('shared/recipes/bread — Bread')
+    }
+    await put('chat/odd — name', 'Odd', 'Real path.')
+    expect(await call('notes_read', { path: 'chat/odd — name' })).toContain('1| Real path.')
+  })
+
+  it('a [[link]] works as a path', async () => {
+    await put('shared/harbour')
+    expect(await call('notes_read', { path: '[[shared/harbour]]' })).toContain('1| Body text.')
+  })
+
+  it('an empty shelf is a normal result, and a bad read path keeps every hint', async () => {
+    for (const path of ['chat/', 'chat', 'shared', 'SHARED/']) expect(await call('notes_read', { path })).toBe('No notes on this shelf yet.')
+    const bad = await call('notes_read', { path: 'harbour' })
+    expect(bad).toContain('square brackets')
+    expect(bad).toContain('under 200 characters')
   })
 
   it('notes_search says what to try when nothing matches, and that is not an error', async () => {
@@ -313,6 +454,11 @@ describe('buildIndex', () => {
     expect(lines[0]).toContain('notes_search')
   })
 
+  it('a cut description never splits an emoji', () => {
+    const out = buildIndex([note('shared', 'a', `${'x'.repeat(159)}😀😀`)], [])
+    expect(whole(out)).toBe(true)
+  })
+
   it('an empty vault gives no text', () => {
     expect(buildIndex([], [])).toBe('')
   })
@@ -325,8 +471,7 @@ describe('buildIndex', () => {
     ]
     const out = buildIndex(shared, [note('c', 'small/one', 'One note')])
     expect(out.length).toBeLessThanOrEqual(INDEX_MAX_CHARS)
-    expect(out).toContain('shared/big/ (200 notes)')
-    expect(out).not.toContain('shared/big/note-1 ')
+    expect(out).toMatch(/shared\/big\/ \(and \d+ more: use notes_search\)/)
     // The cap is met, so the smaller folders stay open.
     expect(out).toContain('shared/mid/note-1 — ')
     expect(out).toContain('shared/loose — A note in no folder')
@@ -337,22 +482,50 @@ describe('buildIndex', () => {
     const fill = (folder: string, n: number) => Array.from({ length: n }, (_, i) => note('shared', `${folder}/note-${i}`, 'x'.repeat(100)))
     const out = buildIndex([...fill('a', 60), ...fill('b', 50), ...fill('c', 20)], [])
     expect(out).toContain('shared/a/ (60 notes)')
-    expect(out).toContain('shared/b/ (50 notes)')
+    expect(out).not.toContain('shared/a/note-1 ')
+    expect(out).toMatch(/shared\/b\/ \(and \d+ more: use notes_search\)/)
     expect(out).toContain('shared/c/note-1 — ')
   })
 
-  it('holds the cap with notes in no folder at all', () => {
-    const shared = Array.from({ length: 400 }, (_, i) => note('shared', `loose-${i}`, 'x'.repeat(60)))
+  it('a flat shelf keeps its newest notes, and says how many it left out', () => {
+    const shared = Array.from({ length: 200 }, (_, i) => ({ ...note('shared', `loose-${i}`, 'x'.repeat(60)), updatedAt: i }))
     const out = buildIndex(shared, [note('c', 'kept', 'One')])
     expect(out.length).toBeLessThanOrEqual(INDEX_MAX_CHARS)
-    expect(out).toContain('shared/ (400 notes)')
+    expect(out.split('\n')[1]).toContain('shared/loose-199 — ')
+    expect(out).not.toContain('shared/loose-0 ')
+    const left = Number(/shared\/ \(and (\d+) more: use notes_search\)/.exec(out)?.[1])
+    expect(out.match(/^shared\/loose-/gm)).toHaveLength(200 - left)
     expect(out).toContain('chat/kept — One')
+  })
+
+  it('one huge folder keeps its newest notes too', () => {
+    const shared = Array.from({ length: 300 }, (_, i) => ({ ...note('shared', `story/n-${i}`, 'x'.repeat(60)), updatedAt: i }))
+    const out = buildIndex(shared, [])
+    expect(out).toContain('shared/story/n-299 — ')
+    expect(out).toMatch(/shared\/story\/ \(and \d+ more: use notes_search\)/)
+    expect(out.length).toBeGreaterThan(INDEX_MAX_CHARS * 0.9)
+    expect(out.length).toBeLessThanOrEqual(INDEX_MAX_CHARS)
+  })
+
+  it('both flat shelves share the room, newest first', () => {
+    const flat = (shelf: string, from: number) => Array.from({ length: 150 }, (_, i) => ({ ...note(shelf, `n-${i}`, 'x'.repeat(60)), updatedAt: from + i }))
+    const out = buildIndex(flat('shared', 1000), flat('c', 1000))
+    expect(out.length).toBeLessThanOrEqual(INDEX_MAX_CHARS)
+    expect(out).toContain('shared/n-149 — ')
+    expect(out).toContain('chat/n-149 — ')
+  })
+
+  it('holds the cap when the count lines alone are too long', () => {
+    const shared = Array.from({ length: 1000 }, (_, i) => note('shared', `folder-${i}/n`, 'd'))
+    const out = buildIndex(shared, [])
+    expect(out.length).toBeLessThanOrEqual(INDEX_MAX_CHARS)
+    expect(out).toContain('shared/ (1000 notes)')
   })
 
   it('cuts a very long description, and says one note, not one notes', () => {
     const out = buildIndex([note('shared', 'a/b', 'x'.repeat(5000)), ...Array.from({ length: 400 }, (_, i) => note('shared', `c/n-${i}`, 'y'.repeat(60)))], [])
     expect(out).not.toContain('x'.repeat(200))
-    expect(out).toContain('shared/c/ (400 notes)')
+    expect(out).toMatch(/shared\/c\/ \(and \d+ more/)
     expect(buildIndex(Array.from({ length: 60 }, (_, i) => note('shared', `f${i}/n`, 'x'.repeat(160))), [])).toMatch(/\(1 note\)/)
   })
 })

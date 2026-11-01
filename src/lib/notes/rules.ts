@@ -6,11 +6,27 @@ export const MAX_BODY = 8000
 export const SHRINK_LIMIT = 0.5
 /** Longest path, with its shelf prefix. */
 export const MAX_PATH = 200
+/** Longest description a model may write. Mikael's own edits have no cap. */
+export const MAX_DESCRIPTION = 200
+/** Most of a model's own text that a tool result repeats back. */
+const MAX_ECHO = 100
 /** Refusal for a text change to a protected note. */
 export const PROTECTED = 'Error: This note is protected. Move or tag it, or write a new note that links to it.'
 
 /** How a model writes a note's path. A refusal must name this form, or notes_read can't use it. */
 export const shownPath = (n: Pick<Note, 'shelf' | 'path'>): string => `${n.shelf === 'shared' ? 'shared' : 'chat'}/${n.path}`
+
+/** The start of `s`, up to `n` units, or one fewer if `n` would cut an emoji in two. */
+export function safeCut(s: string, n: number): string {
+  const code = s.charCodeAt(n - 1)
+  return s.slice(0, code >= 0xd800 && code <= 0xdbff ? n - 1 : n)
+}
+
+/** A model's own text, cut for repeating in a result, which goes into storage and the next request. */
+export const echo = (s: string): string => (s.length > MAX_ECHO ? `${safeCut(s, MAX_ECHO)}…` : s)
+
+export const badPathText = (path: string): string =>
+  `Error: "${echo(path)}" is not a usable path. Start it with shared/ or chat/. Leave out square brackets, and keep it under ${MAX_PATH} characters.`
 
 /**
  * Tidy a path: one slash between parts, none at the ends, NFC form.
@@ -91,6 +107,13 @@ export function nearMatch(path: string, existing: string[]): string | null {
     if (Math.max(haveStem.length, wantStem.length) >= MIN_TYPO_LETTERS && distance(haveStem, wantStem) <= 1) return e
   }
   return null
+}
+
+/** The size rule for a description. A separate check: an edit that leaves one alone must pass. */
+export function checkDescription(description: string, writer: string): string | null {
+  const length = description.trim().length
+  if (writer === 'you' || length <= MAX_DESCRIPTION) return null
+  return `Error: The description is ${length} characters. The limit is ${MAX_DESCRIPTION}. Shorten it to one short line, then write again.`
 }
 
 /**
