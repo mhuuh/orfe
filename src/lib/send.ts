@@ -1,12 +1,18 @@
+import { enabledAbilities, runTool, toolsFor, type Ability } from './abilities/registry'
 import { fallbackModelInfo, type ModelInfo } from './catalog'
 import { estimateTokens, fingerprint, isCold, planWindow, ttlFor } from './context'
-import { buildOutgoing } from './normalise'
+import { buildOutgoing, renderRounds } from './normalise'
 import { mergeReasoning, streamChat, type ChatRequest, type OutMessage, type StreamEvent } from './openrouter'
 import { db, newId, storage } from './storage'
 import { systemFor } from './system'
-import type { ContentPart, Conversation, LastRequest, Message, Reasoning, Usage, Version } from './types'
+import type { ContentPart, Conversation, LastRequest, Message, Reasoning, ToolPart, Usage, Version } from './types'
 import { settled } from './versions'
 
+/** Tool rounds in one reply. The last one gets ROUND_LIMIT instead of running, so the model answers. */
+export const MAX_ROUNDS = 8
+const ROUND_LIMIT = 'Round limit reached. Answer now.'
+const STOPPED = 'Stopped by the user.'
+const REFUSED = 'The provider refused this reply. Try again, or pick another model.'
 const WRITE_INTERVAL_MS = 200
 /** Share of the context limit above which a cold cache triggers a trim (spec §6). */
 const SOFT_THRESHOLD = 0.85
@@ -18,6 +24,16 @@ const SOFT_THRESHOLD = 0.85
 const PROVIDER_PREFERENCE: string | null = null
 const controllers = new Map<string, AbortController>()
 const NO_CONNECTION = "Couldn't reach OpenRouter."
+
+/** The stored result of a call that already ran, or null. Stops a Continue from running a write twice. */
+export type AlreadyDone = (callId: string) => Promise<string | null>
+const neverDone: AlreadyDone = async () => null
+let alreadyDone = neverDone
+
+/** Test seam: swap the lookup. Call with no argument to reset. */
+export function setAlreadyDoneForTest(fn: AlreadyDone = neverDone): void {
+  alreadyDone = fn
+}
 
 export type GenerateTarget =
   | { kind: 'new' }
@@ -128,7 +144,25 @@ function textFromDetails(details: unknown[]): string {
   return out
 }
 
-const versionHasText = (content: ContentPart[]): boolean => content.some((p) => p.type === 'text' && p.text.trim() !== '')
+const isTool = (p: ContentPart): p is ToolPart => p.type === 'tool'
+
+/** Text or a tool step: something worth keeping when a connection drops. */
+const hasOutput = (content: ContentPart[]): boolean => content.some((p) => isTool(p) || (p.type === 'text' && p.text.trim() !== ''))
+
+/** The round after the last one here. Rounds number from 0 inside a reply. */
+const nextRound = (content: ContentPart[]): number => content.reduce((n, p) => (isTool(p) ? Math.max(n, p.round + 1) : n), 0)
+
+const stoppedOpen = (content: ContentPart[]): ContentPart[] =>
+  content.map((p) => (isTool(p) && p.status === 'running' ? { ...p, status: 'stopped' as const, result: STOPPED } : p))
+
+/** Bad JSON stays as the raw string, so it can be shown and `runTool` can answer it. */
+function parseArgs(raw: string): unknown {
+  try {
+    return raw.trim() === '' ? {} : JSON.parse(raw)
+  } catch {
+    return raw
+  }
+}
 
 function addUsage(a: Usage, b: Usage, sign: 1 | -1 = 1): Usage {
   return {
@@ -177,16 +211,27 @@ function sendable(messages: Message[], upToId: string | undefined): Message[] {
   return cut >= 0 ? sorted.slice(0, cut) : sorted
 }
 
-/** No tools go out yet. The tool loop (a later task) sets `toolsEnabled`, `toolsHash` and `overheadChars`. */
-function outgoingFor(messages: Message[], system: string | null, windowStartId: string | null, model: ModelInfo): OutMessage[] {
+function outgoingFor(
+  messages: Message[],
+  system: string | null,
+  windowStartId: string | null,
+  model: ModelInfo,
+  toolsEnabled: boolean,
+): OutMessage[] {
   return buildOutgoing(messages, {
     system,
     windowStartId,
     inputModalities: model.inputModalities,
     blobUrl: () => undefined,
     modelId: model.id,
-    toolsEnabled: false,
+    toolsEnabled,
   })
+}
+
+/** The frozen base plus the turn in flight. A turn can't open a request, so it gets the same stand-in as `buildOutgoing`. */
+function withTurn(base: OutMessage[], turn: OutMessage[]): OutMessage[] {
+  const opens = turn[0]?.role === 'assistant' && base.every((m) => m.role === 'system')
+  return opens ? [...base, { role: 'user', content: '…' }, ...turn] : [...base, ...turn]
 }
 
 /** The messages `buildOutgoing` sends for this start (from the start on, plus pinned ones before it). */
@@ -203,6 +248,8 @@ export interface ColdInput {
   /** The stored window start, before this request's planning. */
   windowStartId: string | null
   model: ModelInfo
+  /** Hash of the tools JSON that goes out. Null: no tools. */
+  toolsHash: string | null
   anthropicCacheHour: boolean
   now: number
 }
@@ -216,8 +263,8 @@ export function computeCold(a: ColdInput): boolean {
   return isCold(a.lastRequest, {
     model: a.model.id,
     provider: PROVIDER_PREFERENCE,
-    toolsHash: null,
-    outgoing: outgoingFor(a.messages, a.system, a.windowStartId, a.model),
+    toolsHash: a.toolsHash,
+    outgoing: outgoingFor(a.messages, a.system, a.windowStartId, a.model, a.toolsHash !== null),
     now: a.now,
     ttlMs: ttlFor(a.model.id, a.anthropicCacheHour),
   })
@@ -238,6 +285,8 @@ async function generateInner(
   const messages = sendable(await storage.listMessages(conversationId), isReroll ? target.messageId : undefined)
   const { system, prompt } = await systemFor(conversation)
   const setting = conversation.context ?? settings.context
+  const tools = toolsFor(conversation, prompt, model)
+  const overheadChars = tools?.json.length ?? 0
 
   // The stored start. For a reroll before it (nothing in the cut is at or after the start),
   // the chat's window does not apply: plan the cut from its beginning instead.
@@ -259,6 +308,7 @@ async function generateInner(
     system,
     windowStartId: storedId,
     model,
+    toolsHash: tools?.hash ?? null,
     anthropicCacheHour: settings.anthropicCacheHour,
     now: Date.now(),
   })
@@ -271,7 +321,7 @@ async function generateInner(
     ratio: conversation.tokenRatio,
     cold,
     soft: SOFT_THRESHOLD,
-    overheadChars: 0,
+    overheadChars,
   })
 
   // Store the start whenever it moved (a trim, or a deleted start snapped to the next message),
@@ -292,18 +342,25 @@ async function generateInner(
   const effort =
     conversation.nextEffort !== null && (model.efforts !== null || model.unlisted === true) ? conversation.nextEffort : undefined
   // Built before the new version exists, so a continue prefills with the old text.
-  const outgoing = outgoingFor(messages, system, plan.startId, model)
+  const outgoing = outgoingFor(messages, system, plan.startId, model, tools !== null)
   // Ratio 1: tokenRatio is the correction to this raw estimate, not a correction of a correction.
-  const estimate = estimateTokens(windowOf(messages, plan.startId), system, 1)
+  const estimate = estimateTokens(windowOf(messages, plan.startId), system, 1, overheadChars)
   const cacheControl: ChatRequest['cacheControl'] = model.id.startsWith('anthropic/')
     ? { type: 'ephemeral', ...(settings.anthropicCacheHour ? { ttl: '1h' as const } : {}) }
     : undefined
 
   let initial: ContentPart[] = []
+  let roundReasoning: unknown[][] | undefined
   if (target.kind === 'continue') {
     const m = messages.find((x) => x.id === target.messageId)
-    initial = (m?.versions[m.activeVersion]?.content ?? []).map((p) => ({ ...p }))
+    const old = m?.versions[m.activeVersion]
+    initial = (old?.content ?? []).map((p) => ({ ...p }))
+    roundReasoning = old?.roundReasoning
   }
+  // A continued reply goes out from its own parts, each round. If the base held it too, each call
+  // would go out twice. A text reply keeps its old first request: `outgoing` with the old text as prefill.
+  const base = target.kind === 'continue' ? outgoingFor(sendable(messages, target.messageId), system, plan.startId, model, tools !== null) : outgoing
+  const prefill = target.kind === 'continue' && !initial.some(isTool) ? outgoing : null
   const version: Version = {
     id: newId(),
     content: initial,
@@ -313,6 +370,7 @@ async function generateInner(
     ...(prompt ? { promptVersionHash: prompt.versionHash } : {}),
     reasoningEffort: effort,
     createdAt: Date.now(),
+    ...(roundReasoning ? { roundReasoning } : {}),
   }
 
   let messageId: string
@@ -335,12 +393,17 @@ async function generateInner(
     key: settings.key,
     messageId,
     version,
-    outgoing,
+    base,
+    prefill,
+    tools,
+    // A model without tools has no abilities, so a call it makes up finds nothing to run.
+    enabled: tools ? enabledAbilities(conversation, prompt) : [],
     model,
     effort,
     cacheControl,
     estimate,
     initial,
+    roundReasoning,
     controller,
   })
 }
@@ -390,50 +453,68 @@ interface RunArgs {
   key: string | null
   messageId: string
   version: Version
-  outgoing: OutMessage[]
+  /** History before the reply. Frozen for the whole reply, so each round extends the one before it. */
+  base: OutMessage[]
+  /** A continue of a text reply: its first request, with the old text at the end. */
+  prefill: OutMessage[] | null
+  tools: ReturnType<typeof toolsFor>
+  enabled: Ability[]
   model: ModelInfo
   effort: string | undefined
   cacheControl: ChatRequest['cacheControl']
   /** Raw token estimate (ratio 1) of what is sent; usage.promptTokens over this is the new tokenRatio. */
   estimate: number
   initial: ContentPart[]
+  roundReasoning: unknown[][] | undefined
   controller: AbortController
 }
 
+type ToolCall = Extract<StreamEvent, { type: 'tool_calls' }>['calls'][number]
+
+/** How one request ended. */
+interface RoundEnd {
+  finished: boolean
+  reason?: string
+  calls: ToolCall[]
+  /** This round gave text. */
+  replied: boolean
+  errored: string | null
+  aborted: boolean
+}
+
 async function run(a: RunArgs): Promise<void> {
-  const { conversation, messageId, version, controller } = a
-  if (a.key === null) {
+  const { conversation, key, messageId, version, controller } = a
+  if (key === null) {
     await patchVersion(messageId, version.id, { status: 'error', error: errorText(401, 'No OpenRouter key set.') })
     return
   }
 
   if (controller.signal.aborted) {
-    await patchVersion(messageId, version.id, { status: 'stopped' })
+    await patchVersion(messageId, version.id, { status: 'stopped', content: stoppedOpen(a.initial) })
     return
   }
 
   let content: ContentPart[] = a.initial
+  let roundReasoning = a.roundReasoning
+  let round = nextRound(content)
   let reasoningText = ''
-  let reasoningDetails: unknown[] = []
+  let reasoned = false
+  // Finished rounds, then this round. Reasoning never merges across rounds: indexes start over in each.
+  let pastDetails: unknown[] = []
+  let roundDetails: unknown[] = []
+  let pastMs = 0
   let reasoningStart: number | null = null
   let durationMs: number | null = null
-  let finished = false
-  let finishReason: string | undefined
-  let errored: string | null = null
-  let aborted = false
-  let counted: Usage | null = null
-  let accepted = false
+  let pastUsage: Usage | null = null
   const patch: Partial<Version> = {}
   let lastWrite = Date.now()
 
   const snapshot = (): Partial<Version> => {
     const p: Partial<Version> = { ...patch, content }
-    if (reasoningStart !== null) {
-      const reasoning: Reasoning = {
-        text: reasoningText,
-        details: [...reasoningDetails],
-        durationMs: durationMs ?? Date.now() - reasoningStart,
-      }
+    if (roundReasoning) p.roundReasoning = roundReasoning
+    if (reasoned) {
+      const roundMs = reasoningStart === null ? 0 : (durationMs ?? Date.now() - reasoningStart)
+      const reasoning: Reasoning = { text: reasoningText, details: [...pastDetails, ...roundDetails], durationMs: pastMs + roundMs }
       p.reasoning = reasoning
     }
     return p
@@ -445,101 +526,203 @@ async function run(a: RunArgs): Promise<void> {
     else content = [...content, { type: 'text', text }]
   }
 
-  /** Returns false when the stream should stop. */
-  const handle = async (e: StreamEvent): Promise<boolean> => {
-    if (!accepted && (e.type === 'content' || e.type === 'reasoning' || e.type === 'usage' || e.type === 'finish')) {
-      // The first output (text, thinking, usage or a finish) means the provider took the request,
-      // so its prompt is now what the cache holds. `meta` is not enough: it comes with the HTTP 200,
-      // and an in-stream error can still follow before any token. A failed request is not recorded.
-      accepted = true
-      const lastRequest: LastRequest = {
-        model: a.model.id,
-        provider: PROVIDER_PREFERENCE,
-        toolsHash: null,
-        ...fingerprint(a.outgoing),
-        at: Date.now(),
-      }
-      await storage.updateConversation(conversation.id, { lastRequest })
-    }
-    switch (e.type) {
-      case 'meta':
-        if (e.generationId) patch.generationId = e.generationId
-        if (e.provider) patch.provider = e.provider
-        break
-      case 'reasoning':
-        if (reasoningStart === null) reasoningStart = Date.now()
-        reasoningText += e.text === '' && e.details ? textFromDetails(e.details) : e.text
-        if (e.details) reasoningDetails = mergeReasoning(reasoningDetails, e.details)
-        break
-      case 'content':
-        if (reasoningStart !== null && durationMs === null) durationMs = Date.now() - reasoningStart
-        appendText(e.text)
-        break
-      case 'finish':
-        // Some providers repeat finish_reason on the usage chunk; keep the first.
-        if (!finished) finishReason = e.reason
-        finished = true
-        break
-      case 'usage': {
-        // A repeated usage chunk replaces the earlier one instead of double counting.
-        const delta = counted ? addUsage(e.usage, counted, -1) : e.usage
-        counted = e.usage
-        patch.usage = e.usage
-        const c = await storage.getConversation(conversation.id)
-        if (c) {
-          const update: Partial<Conversation> = { totals: addUsage(c.totals, delta) }
-          // promptTokens 0 means the provider did not report it: keep the old ratio.
-          if (e.usage.promptTokens > 0 && a.estimate > 0) {
-            update.tokenRatio = Math.min(2, Math.max(0.5, e.usage.promptTokens / a.estimate))
-          }
-          await storage.updateConversation(conversation.id, update)
+  /** One request and its stream. `first`: the first request of this run. */
+  const streamRound = async (first: boolean): Promise<RoundEnd> => {
+    const end: RoundEnd = { finished: false, calls: [], replied: false, errored: null, aborted: false }
+    const outgoing =
+      first && a.prefill
+        ? a.prefill
+        : withTurn(a.base, renderRounds(content, { modelId: a.model.id, toolsEnabled: a.tools !== null, reasoning: roundReasoning }))
+    let counted: Usage | null = null
+    let accepted = false
+
+    /** Returns false when the stream should stop. */
+    const handle = async (e: StreamEvent): Promise<boolean> => {
+      const took =
+        e.type === 'content' ||
+        e.type === 'reasoning' ||
+        e.type === 'tool_calls' ||
+        // A refusal comes as a filter finish with all-zero usage: the provider took nothing.
+        (e.type === 'usage' && e.usage.promptTokens > 0) ||
+        (e.type === 'finish' && e.reason !== 'content_filter')
+      if (!accepted && took) {
+        // The first output (text, thinking, calls, usage or a finish) means the provider took the request,
+        // so its prompt is now what the cache holds. `meta` is not enough: it comes with the HTTP 200,
+        // and an in-stream error can still follow before any token. A failed request is not recorded.
+        accepted = true
+        const lastRequest: LastRequest = {
+          model: a.model.id,
+          provider: PROVIDER_PREFERENCE,
+          toolsHash: a.tools?.hash ?? null,
+          ...fingerprint(outgoing),
+          at: Date.now(),
         }
-        break
+        await storage.updateConversation(conversation.id, { lastRequest })
       }
-      case 'error':
-        // A dropped connection after some text is an interruption: keep the text and offer Continue.
-        // Not an error then: the version ends 'interrupted' below, as no finish arrived.
-        if (!(e.kind === 'network' && versionHasText(content))) errored = e.kind === 'network' ? NO_CONNECTION : errorText(e.code, e.message)
-        return false
+      switch (e.type) {
+        case 'meta':
+          if (e.generationId) patch.generationId = e.generationId
+          if (e.provider) patch.provider = e.provider
+          break
+        case 'reasoning':
+          reasoned = true
+          if (reasoningStart === null) reasoningStart = Date.now()
+          reasoningText += e.text === '' && e.details ? textFromDetails(e.details) : e.text
+          if (e.details) roundDetails = mergeReasoning(roundDetails, e.details)
+          break
+        case 'content':
+          if (reasoningStart !== null && durationMs === null) durationMs = Date.now() - reasoningStart
+          appendText(e.text)
+          if (e.text.trim() !== '') end.replied = true
+          break
+        case 'tool_calls':
+          end.calls = e.calls
+          break
+        case 'finish':
+          // Some providers repeat finish_reason on the usage chunk; keep the first.
+          if (!end.finished) end.reason = e.reason
+          end.finished = true
+          break
+        case 'usage': {
+          // A repeated usage chunk replaces the earlier one instead of double counting.
+          const delta = counted ? addUsage(e.usage, counted, -1) : e.usage
+          counted = e.usage
+          patch.usage = pastUsage ? addUsage(pastUsage, e.usage) : e.usage
+          const c = await storage.getConversation(conversation.id)
+          if (c) {
+            const update: Partial<Conversation> = { totals: addUsage(c.totals, delta) }
+            // promptTokens 0 means the provider did not report it: keep the old ratio. Later rounds
+            // hold tool text that the estimate leaves out, so only the first request counts.
+            if (first && e.usage.promptTokens > 0 && a.estimate > 0) {
+              update.tokenRatio = Math.min(2, Math.max(0.5, e.usage.promptTokens / a.estimate))
+            }
+            await storage.updateConversation(conversation.id, update)
+          }
+          break
+        }
+        case 'error':
+          // A dropped connection after some output is an interruption: keep it and offer Continue.
+          // Not an error then: the version ends 'interrupted' below, as no finish arrived.
+          if (!(e.kind === 'network' && hasOutput(content))) end.errored = e.kind === 'network' ? NO_CONNECTION : errorText(e.code, e.message)
+          return false
+      }
+      return true
     }
-    return true
+
+    try {
+      const events = streamChat(
+        {
+          model: a.model.id,
+          messages: outgoing,
+          sessionId: conversation.sessionId,
+          stream: a.stream,
+          ...(a.effort !== undefined ? { reasoning: { effort: a.effort } } : {}),
+          ...(a.cacheControl !== undefined ? { cacheControl: a.cacheControl } : {}),
+          ...(a.tools ? { tools: a.tools.tools, toolChoice: 'auto' as const } : {}),
+        },
+        key,
+        controller.signal,
+      )
+      for await (const e of events) {
+        if (!(await handle(e))) break
+        if (Date.now() - lastWrite >= WRITE_INTERVAL_MS) {
+          lastWrite = Date.now()
+          await patchVersion(messageId, version.id, snapshot())
+        }
+      }
+    } catch (e) {
+      if (typeof e === 'object' && e !== null && (e as { name?: string }).name === 'AbortError') end.aborted = true
+      else end.errored = e instanceof Error ? e.message : 'Stream failed'
+    }
+    if (reasoningStart !== null && durationMs === null) durationMs = Date.now() - reasoningStart
+    return end
   }
 
-  try {
-    const events = streamChat(
-      {
-        model: a.model.id,
-        messages: a.outgoing,
-        sessionId: conversation.sessionId,
-        stream: a.stream,
-        ...(a.effort !== undefined ? { reasoning: { effort: a.effort } } : {}),
-        ...(a.cacheControl !== undefined ? { cacheControl: a.cacheControl } : {}),
-      },
-      a.key,
-      controller.signal,
-    )
-    for await (const e of events) {
-      if (!(await handle(e))) break
-      if (Date.now() - lastWrite >= WRITE_INTERVAL_MS) {
-        lastWrite = Date.now()
-        await patchVersion(messageId, version.id, snapshot())
-      }
-    }
-  } catch (e) {
-    if (typeof e === 'object' && e !== null && (e as { name?: string }).name === 'AbortError') aborted = true
-    else errored = e instanceof Error ? e.message : 'Stream failed'
+  /** Turns the model's calls into parts. A weak model can send no id or repeat one, and a request needs each id once. */
+  const partsFrom = (calls: ToolCall[]): ToolPart[] => {
+    const seen = new Set(content.filter(isTool).map((p) => p.callId))
+    return calls.map((c) => {
+      const callId = c.id && !seen.has(c.id) ? c.id : `call_${newId()}`
+      seen.add(callId)
+      return { type: 'tool', callId, round, model: a.model.id, name: c.name, args: parseArgs(c.arguments), result: '', status: 'running' }
+    })
   }
 
-  if (reasoningStart !== null && durationMs === null) durationMs = Date.now() - reasoningStart
+  /** Files this round's reasoning under its number and starts the next round clean. */
+  const closeRound = (): void => {
+    if (roundDetails.length > 0) {
+      const list = Array.from({ length: round + 1 }, (_, i) => roundReasoning?.[i] ?? [])
+      list[round] = roundDetails
+      roundReasoning = list
+    }
+    pastDetails = [...pastDetails, ...roundDetails]
+    roundDetails = []
+    if (reasoningStart !== null) pastMs += durationMs ?? 0
+    reasoningStart = null
+    durationMs = null
+    pastUsage = patch.usage ?? pastUsage
+  }
+
+  /** Runs the parts in order, one at a time. Each result is saved as it comes. */
+  const runParts = async (parts: ToolPart[]): Promise<void> => {
+    for (const part of parts) {
+      if (controller.signal.aborted) return
+      const stored = await alreadyDone(part.callId)
+      const raw = typeof part.args === 'string' ? part.args : JSON.stringify(part.args)
+      const ctx = { conversationId: conversation.id, messageId, callId: part.callId, model: part.model, key, signal: controller.signal }
+      const result = stored ?? (await runTool(part.name, raw, ctx, a.enabled))
+      // A stopped tool can hand back any text, so Stop wins over it.
+      const closed: Partial<ToolPart> =
+        stored === null && controller.signal.aborted
+          ? { status: 'stopped', result: STOPPED }
+          : { status: result.startsWith('Error:') ? 'error' : 'done', result }
+      content = content.map((p) => (isTool(p) && p.callId === part.callId ? { ...p, ...closed } : p))
+      await patchVersion(messageId, version.id, snapshot())
+    }
+  }
+
+  // A Continue first finishes what a lost run left open.
+  await runParts(content.filter(isTool).filter((p) => p.status === 'running'))
+
+  let end: RoundEnd | null = null
+  let first = true
+  while (!controller.signal.aborted) {
+    end = await streamRound(first)
+    first = false
+    if (end.errored !== null || end.aborted || !end.finished) break
+    if (end.reason === 'content_filter' && !end.replied) {
+      end.errored = REFUSED
+      break
+    }
+    // Any other finish with calls left them cut off, as with 'length'. Those must not run.
+    if (end.calls.length === 0 || (end.reason !== 'tool_calls' && end.reason !== 'stop')) break
+
+    const parts = partsFrom(end.calls)
+    closeRound()
+    if (round >= MAX_ROUNDS - 1) {
+      content = [...content, ...parts.map((p) => ({ ...p, status: 'error' as const, result: ROUND_LIMIT }))]
+      await patchVersion(messageId, version.id, snapshot())
+      // Past the last round the model had its chance to answer.
+      if (round >= MAX_ROUNDS) break
+    } else {
+      content = [...content, ...parts]
+      await patchVersion(messageId, version.id, snapshot())
+      await runParts(parts)
+    }
+    round++
+  }
+
+  const stopped = end?.aborted === true || controller.signal.aborted
+  if (stopped) content = stoppedOpen(content)
   const final = snapshot()
-  if (finishReason !== undefined) final.finishReason = finishReason
-  if (errored !== null) {
+  if (end?.reason !== undefined) final.finishReason = end.reason
+  if (end && end.errored !== null) {
     final.status = 'error'
-    final.error = errored
-  } else if (aborted || controller.signal.aborted) {
+    final.error = end.errored
+  } else if (stopped) {
     final.status = 'stopped'
   } else {
-    final.status = finished ? 'done' : 'interrupted'
+    final.status = end?.finished ? 'done' : 'interrupted'
   }
   await patchVersion(messageId, version.id, final)
 }

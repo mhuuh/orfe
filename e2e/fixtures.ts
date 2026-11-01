@@ -3,19 +3,25 @@ import { readFileSync } from 'node:fs'
 
 export { expect }
 
-const models = JSON.parse(readFileSync(new URL('../src/lib/__fixtures__/models.json', import.meta.url), 'utf8')) as unknown[]
+const models = JSON.parse(readFileSync(new URL('../src/lib/__fixtures__/models.json', import.meta.url), 'utf8')) as { id: string }[]
 
 export const MODEL_A = 'anthropic/claude-sonnet-5.5'
+/** MODEL_A can take tools. No tools go out unless a test adds an ability. */
+const withTools = models.map((m) => (m.id === MODEL_A ? { ...m, supported_parameters: ['tools'] } : m))
 export const MODEL_B = 'openai/gpt-6'
 export const MODEL_B_NAME = 'OpenAI: GPT-6'
 /** A user message containing this word gets the slow stream (one chunk, then it hangs). */
 export const SLOW = 'SLOWSTREAM'
 export const PARTIAL = 'Partial words so far'
+/** The last user message `TOOLCALL:<name>:<json>` makes the mock ask for that call. The next request gets text. */
+export const TOOLCALL = 'TOOLCALL'
 
 export interface ChatBody {
   model: string
   session_id: string
-  messages: { role: string; content: unknown }[]
+  messages: { role: string; content: unknown; tool_calls?: { id: string; function: { name: string } }[]; tool_call_id?: string }[]
+  tools?: unknown[]
+  tool_choice?: string
 }
 
 export interface Api {
@@ -25,7 +31,19 @@ export interface Api {
 
 const sse = (chunks: unknown[]): string => chunks.map((c) => `data: ${JSON.stringify(c)}\n\n`).join('') + 'data: [DONE]\n\n'
 const delta = (content: string) => ({ choices: [{ delta: { content } }] })
-const cors = { 'access-control-allow-origin': '*', 'access-control-allow-headers': '*', 'access-control-allow-methods': '*' }
+const usage = { choices: [], usage: { prompt_tokens: 10, completion_tokens: 5, cost: 0.0001 } }
+
+/** The SSE chunks for a tool call, when the request ends on a user message that asks for one. */
+function toolCallChunks(body: ChatBody, n: number): unknown[] | null {
+  const last = body.messages[body.messages.length - 1]
+  if (last?.role !== 'user' || typeof last.content !== 'string') return null
+  const m = new RegExp(`${TOOLCALL}:([^:]+):(.*)`, 's').exec(last.content)
+  if (!m) return null
+  const call = { index: 0, id: `call_${n}`, function: { name: m[1], arguments: m[2] } }
+  return [{ choices: [{ delta: { tool_calls: [call] } }] }, { choices: [{ delta: {}, finish_reason: 'tool_calls' }] }, usage]
+}
+
+const cors ={ 'access-control-allow-origin': '*', 'access-control-allow-headers': '*', 'access-control-allow-methods': '*' }
 
 /**
  * route.fulfill cannot stream, so the slow case is faked in the page instead: fetch is wrapped
@@ -72,7 +90,7 @@ export const test = base.extend<{ api: Api }>({
       const json = (body: unknown) => route.fulfill({ status: 200, contentType: 'application/json', headers: cors, body: JSON.stringify(body) })
       if (req.method() === 'OPTIONS') return route.fulfill({ status: 204, headers: cors })
       if (path === '/key') return json({ data: { limit: 10, limit_remaining: 9, usage: 1 } })
-      if (path === '/models') return json({ data: models })
+      if (path === '/models') return json({ data: withTools })
       if (path === '/chat/completions') {
         const body = JSON.parse(req.postData() ?? '{}') as ChatBody
         api.chats.push(body)
@@ -80,12 +98,14 @@ export const test = base.extend<{ api: Api }>({
         return route.fulfill({
           status: 200,
           headers: { ...cors, 'content-type': 'text/event-stream' },
-          body: sse([
-            delta(`Reply ${n} `),
-            delta(`from ${body.model}`),
-            { choices: [{ delta: {}, finish_reason: 'stop' }] },
-            { choices: [], usage: { prompt_tokens: 10, completion_tokens: 5, cost: 0.0001 } },
-          ]),
+          body: sse(
+            toolCallChunks(body, n) ?? [
+              delta(`Reply ${n} `),
+              delta(`from ${body.model}`),
+              { choices: [{ delta: {}, finish_reason: 'stop' }] },
+              usage,
+            ],
+          ),
         })
       }
       return route.fulfill({ status: 404, body: '{}' })

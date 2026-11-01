@@ -163,13 +163,24 @@ export function mergeReasoning(list: unknown[], d: unknown[]): unknown[] {
   return out
 }
 
-/** Collects streamed tool call pieces by `index`. Names and ids come once; `arguments` come in pieces. */
+/**
+ * Where a piece with no `index` goes. Weak models send odd shapes: an id we know goes to its entry,
+ * a new id starts one, and with no id it goes by its place in the chunk or to the newest entry.
+ */
+function slotFor(p: WireToolCall, i: number, count: number, into: Map<number, { id: string }>): number {
+  const keys = [...into.keys()]
+  const next = keys.length ? Math.max(...keys) + 1 : 0
+  if (p.id) return keys.find((k) => into.get(k)?.id === p.id) ?? next
+  return count > 1 || next === 0 ? i : next - 1
+}
+
+/** Collects streamed tool call pieces by `index`. An id and a name come once; `arguments` come in pieces. */
 function toolCallsFrom(pieces: WireToolCall[], into: Map<number, { id: string; name: string; arguments: string }>): void {
   pieces.forEach((p, i) => {
-    const at = typeof p.index === 'number' ? p.index : i
+    const at = typeof p.index === 'number' ? p.index : slotFor(p, i, pieces.length, into)
     const c = into.get(at) ?? { id: '', name: '', arguments: '' }
     if (p.id) c.id = p.id
-    if (p.function?.name) c.name += p.function.name
+    if (p.function?.name && c.name === '') c.name = p.function.name
     if (p.function?.arguments) c.arguments += p.function.arguments
     into.set(at, c)
   })
@@ -256,12 +267,6 @@ export async function* streamChat(req: ChatRequest, key: string, signal: AbortSi
     }
     const calls = new Map<number, { id: string; name: string; arguments: string }>()
     let callsSent = false
-    const flushCalls = (): StreamEvent | null => {
-      if (callsSent) return null
-      const ce = callsEvent(calls)
-      if (ce) callsSent = true
-      return ce
-    }
     for await (const payload of sseData(res.body)) {
       let chunk: WireChunk
       try {
@@ -282,15 +287,16 @@ export async function* streamChat(req: ChatRequest, key: string, signal: AbortSi
         if (Array.isArray(delta.tool_calls)) toolCallsFrom(delta.tool_calls, calls)
       }
       if (choice?.finish_reason) {
-        const ce = flushCalls()
-        if (ce) yield ce
+        const ce = callsSent ? null : callsEvent(calls)
+        if (ce) {
+          callsSent = true
+          yield ce
+        }
         yield { type: 'finish', reason: choice.finish_reason }
       }
       if (chunk.usage) yield { type: 'usage', usage: mapUsage(chunk.usage) }
     }
-    // The stream ended with no finish chunk: still hand over the calls it built.
-    const rest = flushCalls()
-    if (rest) yield rest
+    // A stream with no finish chunk hands over no calls: they may be cut off, so they must not run.
   } catch (e) {
     if (isAbort(e)) throw e
     // A read that throws is the connection dropping (Android kills it when the app is hidden).

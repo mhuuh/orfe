@@ -1,5 +1,6 @@
 import type { ModelInfo } from '../catalog'
 import { hashText } from '../hash'
+import { ruleFor } from '../modelRules'
 import type { Conversation, Message, Prompt, ToolPart } from '../types'
 
 export interface ToolDef {
@@ -60,13 +61,13 @@ export function enabledAbilities(c: Conversation, p: Prompt | null): Ability[] {
   return ABILITIES.filter((a) => switches?.[a.id] !== false)
 }
 
-/** Null when the model has no tools, or when no tool is on. */
+/** Null when the model has no tools, a model rule takes them away, or no tool is on. */
 export function toolsFor(
   c: Conversation,
   p: Prompt | null,
   model: ModelInfo,
 ): { json: string; hash: string; tools: ToolDef[] } | null {
-  if (!model.tools) return null
+  if (!model.tools || ruleFor(model.id).noTools) return null
   // Key order is fixed here, so the same set always gives the same bytes.
   const tools: ToolDef[] = enabledAbilities(c, p).flatMap((a) =>
     a.tools.map((t) => ({ name: t.name, description: t.description, parameters: t.parameters })),

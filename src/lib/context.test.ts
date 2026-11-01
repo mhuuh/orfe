@@ -55,17 +55,17 @@ describe('estimateTokens', () => {
       msg(3, 'divider', [], { dividerLabel: 'Context starts here' }),
     ]
     // 8 + 12 + system 4 = 24 chars → 6 → × 1.5 = 9
-    expect(estimateTokens(messages, 'sys!', 1.5)).toBe(9)
-    expect(estimateTokens(messages, null, 1)).toBe(5)
+    expect(estimateTokens(messages, 'sys!', 1.5, 0)).toBe(9)
+    expect(estimateTokens(messages, null, 1, 0)).toBe(5)
     // rounds up: 5 chars → 1.25 → 2
-    expect(estimateTokens([msg(1, 'user', 'abcde')], null, 1)).toBe(2)
-    expect(estimateTokens([], null, 1)).toBe(0)
+    expect(estimateTokens([msg(1, 'user', 'abcde')], null, 1, 0)).toBe(2)
+    expect(estimateTokens([], null, 1, 0)).toBe(0)
   })
 
   it('counts tool text and adds overheadChars', () => {
     // name 4 + args {"q":"a"} 9 + result 11 = 24 chars → 6. With 16 of overhead: 40 → 10.
     const messages = [msg(1, 'assistant', [step('c1', 'find', { q: 'a' }, 'x'.repeat(11))])]
-    expect(estimateTokens(messages, null, 1)).toBe(6)
+    expect(estimateTokens(messages, null, 1, 0)).toBe(6)
     expect(estimateTokens(messages, null, 1, 16)).toBe(10)
   })
 })
@@ -392,7 +392,7 @@ describe('planWindow', () => {
 })
 
 describe('viewWindow', () => {
-  const view = { windowStartId: null, windowStartOrder: null, setting: tokens100, system: null, ratio: 1 }
+  const view = { windowStartId: null, windowStartOrder: null, setting: tokens100, system: null, ratio: 1, overheadChars: 0 }
 
   it('shows the stored start and never trims, even over the limit', () => {
     // 10 × 40 chars = 100 tokens from m3 on (8 messages = 80) plus pinned m1 (10) = 90; limit 50.
@@ -405,7 +405,7 @@ describe('viewWindow', () => {
     expect(v.limit).toBe(50)
   })
 
-  it('counts overheadChars when given, and needs none', () => {
+  it('counts overheadChars', () => {
     const messages = transcript(4)
     expect(viewWindow({ ...view, messages }).size).toBe(40)
     expect(viewWindow({ ...view, messages, overheadChars: 40 }).size).toBe(50)

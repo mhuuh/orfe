@@ -28,7 +28,7 @@ function charsToTokens(chars: number, ratio: number): number {
  * (the tools JSON), times `ratio` (the correction from the last real `usage.prompt_tokens`),
  * rounded up.
  */
-export function estimateTokens(messages: Message[], system: string | null, ratio: number, overheadChars = 0): number {
+export function estimateTokens(messages: Message[], system: string | null, ratio: number, overheadChars: number): number {
   let chars = (system?.length ?? 0) + overheadChars
   for (const m of messages) chars += messageChars(m)
   return charsToTokens(chars, ratio)
@@ -220,11 +220,10 @@ export function planWindow(input: PlanInput): Plan {
  * start exactly as `planWindow` does (deleted start → next by order, dividers skipped, never past
  * the last user message) but never trims: only a send moves the start.
  */
-export function viewWindow(input: Omit<PlanInput, 'cold' | 'soft' | 'overheadChars'> & { overheadChars?: number }): Plan {
+export function viewWindow(input: Omit<PlanInput, 'cold' | 'soft'>): Plan {
   const limit = Math.max(1, fin(input.setting.limit, 32000))
   const plan = planWindow({
     ...input,
-    overheadChars: input.overheadChars ?? 0,
     setting: { ...input.setting, limit: Number.MAX_SAFE_INTEGER },
     cold: false,
     soft: 1,

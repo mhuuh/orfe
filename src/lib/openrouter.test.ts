@@ -314,6 +314,50 @@ describe('streamChat tool calls', () => {
     expect(events[0]).toEqual({ type: 'tool_calls', calls: [{ id: '', name: 'a', arguments: '{"x"' }] })
   })
 
+  it('a piece with no index but a new id starts a new entry', async () => {
+    const piece = (id: string, name: string, args: string) => ({ id, function: { name, arguments: args } })
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async () =>
+        sseResponse([
+          ev({ choices: [{ delta: { tool_calls: [piece('c1', 'a', '{"x"')] } }] }),
+          ev({ choices: [{ delta: { tool_calls: [{ function: { arguments: ':1}' } }] } }] }),
+          ev({ choices: [{ delta: { tool_calls: [piece('c2', 'b', '{}')] } }] }),
+          ev({ choices: [{ delta: {}, finish_reason: 'tool_calls' }] }),
+        ]),
+      ),
+    )
+    expect((await run())[0]).toEqual({
+      type: 'tool_calls',
+      calls: [
+        { id: 'c1', name: 'a', arguments: '{"x":1}' },
+        { id: 'c2', name: 'b', arguments: '{}' },
+      ],
+    })
+  })
+
+  it('a repeated name does not join to the first', async () => {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async () =>
+        sseResponse([
+          ev({ choices: [{ delta: { tool_calls: [tc(0, { name: 'note_read', arguments: '{' }, 'c1')] } }] }),
+          ev({ choices: [{ delta: { tool_calls: [tc(0, { name: 'note_read', arguments: '}' })] } }] }),
+          ev({ choices: [{ delta: {}, finish_reason: 'tool_calls' }] }),
+        ]),
+      ),
+    )
+    expect((await run())[0]).toEqual({ type: 'tool_calls', calls: [{ id: 'c1', name: 'note_read', arguments: '{}' }] })
+  })
+
+  it('a stream with no finish hands over no calls, because they may be cut off', async () => {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async () => sseResponse([ev({ choices: [{ delta: { tool_calls: [tc(0, { name: 'a', arguments: '{"x"' }, 'c1')] } }] })])),
+    )
+    expect((await run()).map((e) => e.type)).toEqual([])
+  })
+
   it('sends tools and tool_choice, and neither when absent', async () => {
     const fetchMock = vi.fn(async (_url: string, _init: RequestInit) => sseResponse(['data: [DONE]\n\n']))
     vi.stubGlobal('fetch', fetchMock)
