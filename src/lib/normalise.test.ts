@@ -279,6 +279,22 @@ describe('tool steps', () => {
     ])
   })
 
+  it.each(['', 'notes write', 'a.b', 'x'.repeat(65)])('a step named %j flattens, so a strict provider never sees it', (name) => {
+    const out = buildOutgoing([msg('m1', 'user', 'q'), msg('m2', 'assistant', [step('c1', { name }), step('c2')])], withTools)
+    expect(JSON.stringify(out)).not.toContain('"c1"')
+    expect(out).toEqual([
+      { role: 'user', content: 'q' },
+      { role: 'assistant', content: `(Used ${name}.)`, tool_calls: [call('c2')] },
+      toolMsg('c2'),
+    ])
+  })
+
+  it('a name of 64 allowed characters stays a real call', () => {
+    const name = 'a_B-9'.repeat(12) + 'abcd'
+    const out = buildOutgoing([msg('m1', 'assistant', [step('c1', { name })])], withTools)
+    expect(out[1]).toMatchObject({ role: 'assistant', tool_calls: [{ id: 'c1', function: { name } }] })
+  })
+
   it('a mixed reply keeps text order around the rounds', () => {
     const content = [text('one'), step('c1'), step('c2'), text('two'), step('c3', { round: 1 }), text('three')]
     expect(renderRounds(content, inFlight)).toEqual([

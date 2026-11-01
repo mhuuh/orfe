@@ -72,9 +72,12 @@ function toOut(turn: Turn): OutMessage {
 /** The result a model reads for a call. A running step has none yet, and its call must still get an answer. */
 const UNFINISHED = 'This call did not finish. Its result is not known. Check before you run it again.'
 
+/** The name pattern strict providers enforce. One bad name would make them refuse every later turn. */
+const CALL_NAME = /^[a-zA-Z0-9_-]{1,64}$/
+
 /** A step that goes out as a real call. Any other step flattens to text. */
 function isCall(part: ContentPart, o: RoundOptions): part is ToolPart {
-  return part.type === 'tool' && o.toolsEnabled && part.model === o.modelId
+  return part.type === 'tool' && o.toolsEnabled && part.model === o.modelId && CALL_NAME.test(part.name)
 }
 
 function toCall(part: ToolPart): OutToolCall {

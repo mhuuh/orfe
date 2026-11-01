@@ -975,6 +975,46 @@ describe('tool loop', () => {
     expectValid(bodyOf(f, 2).messages)
   })
 
+  it('an id used in an earlier reply gets a new one, so no request holds it twice', async () => {
+    const f = stubFetch(
+      () => sse(asks(['call_0', 'echo', '{}'])),
+      () => sse(reply('one')),
+      () => sse(asks(['call_0', 'echo', '{}'])),
+      () => sse(reply('two')),
+    )
+    await sendUserMessage(convId, 'first', { reply: true, model: T })
+    await sendUserMessage(convId, 'second', { reply: true, model: T })
+    expect((await steps())[0].callId).not.toBe('call_0')
+    expectValid(bodyOf(f, 3).messages)
+    expect(bodyOf(f, 3).messages.filter((m) => m.tool_calls)).toHaveLength(2)
+  })
+
+  it('a fresh call with a reused id runs, and no lookup can skip it', async () => {
+    let ran = 0
+    const lookups: string[] = []
+    setAbilitiesForTest([
+      ability(async () => {
+        ran++
+        return 'ran now'
+      }),
+    ])
+    setAlreadyDoneForTest(async (id) => {
+      lookups.push(id)
+      return 'old result'
+    })
+    stubFetch(
+      () => sse(asks(['call_0', 'echo', '{}'])),
+      () => sse(reply('one')),
+      () => sse(asks(['call_0', 'echo', '{}'])),
+      () => sse(reply('two')),
+    )
+    await sendUserMessage(convId, 'first', { reply: true, model: T })
+    await sendUserMessage(convId, 'second', { reply: true, model: T })
+    expect(ran).toBe(2)
+    expect(lookups).toEqual([])
+    expect((await steps())[0]).toMatchObject({ status: 'done', result: 'ran now' })
+  })
+
   it('a finish of stop with calls still runs them', async () => {
     const f = stubFetch(() => sse([callPiece('c1', 'echo', '{}'), finish('stop')]), () => sse(reply('ok')))
     await sendUserMessage(convId, 'go', { reply: true, model: T })
@@ -1119,11 +1159,20 @@ describe('tool loop: Continue', () => {
         return 'ran now'
       }),
     ])
-    setAlreadyDoneForTest(async (id) => (id === 'written' ? 'stored result' : null))
+    const lookups: [string, string][] = []
+    setAlreadyDoneForTest(async (id, messageId) => {
+      lookups.push([id, messageId])
+      return id === 'written' ? 'stored result' : null
+    })
     const f = stubFetch(() => sse(reply('Finished')))
     const m = await cutOff([open('written', 0), open('lost', 0), step('closed', 0)])
     await generate(convId, { kind: 'continue', messageId: m.id }, T)
     expect(ran).toEqual(['lost'])
+    // Only open parts are looked up, each with its message.
+    expect(lookups).toEqual([
+      ['written', m.id],
+      ['lost', m.id],
+    ])
     expect(await steps()).toMatchObject([
       { callId: 'written', status: 'done', result: 'stored result' },
       { callId: 'lost', status: 'done', result: 'ran now' },
@@ -1137,6 +1186,72 @@ describe('tool loop: Continue', () => {
     const after = await lastMsg()
     expect(after.versions).toHaveLength(2)
     expect(after.versions[0].status).toBe('interrupted')
+  })
+
+  it('a failed lookup is a readable result, the call does not run, and the loop goes on', async () => {
+    const ran: string[] = []
+    setAbilitiesForTest([
+      ability(async (_n, _a, ctx) => {
+        ran.push(ctx.callId)
+        return 'ran now'
+      }),
+    ])
+    setAlreadyDoneForTest(async (id) => {
+      if (id === 'c1') throw new Error('database gone')
+      return null
+    })
+    const f = stubFetch(() => sse(reply('Finished')))
+    const m = await cutOff([open('c1', 0), open('c2', 0)])
+    await generate(convId, { kind: 'continue', messageId: m.id }, T)
+    // A write could run twice, so the call that could not be checked stays unrun.
+    expect(ran).toEqual(['c2'])
+    const [failed, next] = await steps()
+    expect(failed.status).toBe('error')
+    expect(failed.result).toMatch(/^Error: /)
+    expect(next).toMatchObject({ status: 'done', result: 'ran now' })
+    expect(bodyOf(f, 0).messages.find((x) => x.tool_call_id === 'c1')?.content).toBe(failed.result)
+    expect((await activeVersion()).status).toBe('done')
+  })
+
+  it('Stop during the lookup does not start the tool', async () => {
+    let ran = 0
+    setAbilitiesForTest([
+      ability(async () => {
+        ran++
+        return 'ran now'
+      }),
+    ])
+    setAlreadyDoneForTest(async () => {
+      stop(convId)
+      return null
+    })
+    const f = stubFetch(() => sse(reply('no')))
+    const m = await cutOff([open('c1', 0)])
+    await generate(convId, { kind: 'continue', messageId: m.id }, T)
+    expect(ran).toBe(0)
+    expect(f).not.toHaveBeenCalled()
+    expect((await steps())[0]).toMatchObject({ status: 'stopped', result: 'Stopped by the user.' })
+    expect((await activeVersion()).status).toBe('stopped')
+  })
+
+  it('Stop during the lookup keeps a result that was found', async () => {
+    setAlreadyDoneForTest(async () => {
+      stop(convId)
+      return 'stored result'
+    })
+    stubFetch(() => sse(reply('no')))
+    const m = await cutOff([open('c1', 0)])
+    await generate(convId, { kind: 'continue', messageId: m.id }, T)
+    expect((await steps())[0]).toMatchObject({ status: 'done', result: 'stored result' })
+    expect((await activeVersion()).status).toBe('stopped')
+  })
+
+  it('a new call cannot take an id from the reply it continues', async () => {
+    const f = stubFetch(() => sse(asks(['c1', 'echo', '{}'])), () => sse(reply('ok')))
+    const m = await cutOff([step('c1', 0)])
+    await generate(convId, { kind: 'continue', messageId: m.id }, T)
+    expect((await steps()).map((p) => p.callId)[1]).not.toBe('c1')
+    expectValid(bodyOf(f, 1).messages)
   })
 
   it('sends each call once', async () => {

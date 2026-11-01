@@ -13,6 +13,7 @@ export const MAX_ROUNDS = 8
 const ROUND_LIMIT = 'Round limit reached. Answer now.'
 const STOPPED = 'Stopped by the user.'
 const REFUSED = 'The provider refused this reply. Try again, or pick another model.'
+const UNCHECKED = 'Error: could not check if this call already finished, so it did not run again. Check before you run it again.'
 const WRITE_INTERVAL_MS = 200
 /** Share of the context limit above which a cold cache triggers a trim (spec §6). */
 const SOFT_THRESHOLD = 0.85
@@ -25,8 +26,12 @@ const PROVIDER_PREFERENCE: string | null = null
 const controllers = new Map<string, AbortController>()
 const NO_CONNECTION = "Couldn't reach OpenRouter."
 
-/** The stored result of a call that already ran, or null. Stops a Continue from running a write twice. */
-export type AlreadyDone = (callId: string) => Promise<string | null>
+/**
+ * The stored result of a call that already ran, or null. A Continue asks this for parts left open,
+ * so it never runs a write twice. A fresh call is never looked up: it can't have run yet, and a
+ * reused id could only give a wrong skip.
+ */
+export type AlreadyDone = (callId: string, messageId: string) => Promise<string | null>
 const neverDone: AlreadyDone = async () => null
 let alreadyDone = neverDone
 
@@ -638,9 +643,13 @@ async function run(a: RunArgs): Promise<void> {
     return end
   }
 
-  /** Turns the model's calls into parts. A weak model can send no id or repeat one, and a request needs each id once. */
+  /**
+   * Turns the model's calls into parts. A weak model can send no id, or repeat one from this reply
+   * or an earlier one, and a request needs each id once.
+   */
   const partsFrom = (calls: ToolCall[]): ToolPart[] => {
-    const seen = new Set(content.filter(isTool).map((p) => p.callId))
+    const history = a.base.flatMap((m) => (m.role === 'assistant' ? (m.tool_calls ?? []).map((c) => c.id) : []))
+    const seen = new Set([...history, ...content.filter(isTool).map((p) => p.callId)])
     return calls.map((c) => {
       const callId = c.id && !seen.has(c.id) ? c.id : `call_${newId()}`
       seen.add(callId)
@@ -663,26 +672,48 @@ async function run(a: RunArgs): Promise<void> {
     pastUsage = patch.usage ?? pastUsage
   }
 
+  /** Saves how a call ended. */
+  const closePart = async (callId: string, closed: Partial<ToolPart>): Promise<void> => {
+    content = content.map((p) => (isTool(p) && p.callId === callId ? { ...p, ...closed } : p))
+    await patchVersion(messageId, version.id, snapshot())
+  }
+
+  const resultOf = (result: string): Partial<ToolPart> => ({ status: result.startsWith('Error:') ? 'error' : 'done', result })
+
+  const runPart = async (part: ToolPart): Promise<void> => {
+    const raw = typeof part.args === 'string' ? part.args : JSON.stringify(part.args)
+    const ctx = { conversationId: conversation.id, messageId, callId: part.callId, model: part.model, key, signal: controller.signal }
+    const result = await runTool(part.name, raw, ctx, a.enabled)
+    // A stopped tool can hand back any text, so Stop wins over it.
+    await closePart(part.callId, controller.signal.aborted ? { status: 'stopped', result: STOPPED } : resultOf(result))
+  }
+
   /** Runs the parts in order, one at a time. Each result is saved as it comes. */
   const runParts = async (parts: ToolPart[]): Promise<void> => {
     for (const part of parts) {
       if (controller.signal.aborted) return
-      const stored = await alreadyDone(part.callId)
-      const raw = typeof part.args === 'string' ? part.args : JSON.stringify(part.args)
-      const ctx = { conversationId: conversation.id, messageId, callId: part.callId, model: part.model, key, signal: controller.signal }
-      const result = stored ?? (await runTool(part.name, raw, ctx, a.enabled))
-      // A stopped tool can hand back any text, so Stop wins over it.
-      const closed: Partial<ToolPart> =
-        stored === null && controller.signal.aborted
-          ? { status: 'stopped', result: STOPPED }
-          : { status: result.startsWith('Error:') ? 'error' : 'done', result }
-      content = content.map((p) => (isTool(p) && p.callId === part.callId ? { ...p, ...closed } : p))
-      await patchVersion(messageId, version.id, snapshot())
+      await runPart(part)
     }
   }
 
-  // A Continue first finishes what a lost run left open.
-  await runParts(content.filter(isTool).filter((p) => p.status === 'running'))
+  /** A Continue first finishes what a lost run left open. Only these parts can have run before. */
+  const finishOpen = async (): Promise<void> => {
+    for (const part of content.filter(isTool).filter((p) => p.status === 'running')) {
+      if (controller.signal.aborted) return
+      let stored: string | null
+      try {
+        stored = await alreadyDone(part.callId, messageId)
+      } catch {
+        // Running it could write twice, so the model gets the doubt instead.
+        await closePart(part.callId, resultOf(UNCHECKED))
+        continue
+      }
+      if (stored !== null) await closePart(part.callId, resultOf(stored))
+      else if (!controller.signal.aborted) await runPart(part)
+    }
+  }
+
+  await finishOpen()
 
   let end: RoundEnd | null = null
   let first = true
