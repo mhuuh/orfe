@@ -3,7 +3,7 @@ import { deleteChat, restoreChat } from '../send'
 import { db, storage } from '../storage'
 import type { Note } from '../types'
 import { MAX_BODY } from './rules'
-import { notes, YOU, type NoteRef, type Result, type WriteInput, type Writer } from './store'
+import { notes, refOf, YOU, type NoteRef, type Result, type WriteInput, type Writer } from './store'
 
 const CHAT = 'c1'
 const shared = (path: string): NoteRef => ({ path: `shared/${path}`, conversationId: CHAT })
@@ -795,5 +795,146 @@ describe('deleteChat and restoreChat', () => {
     okNote(await notes.move(chat('todo', c.id), 'shared/todo', model()))
     await deleteChat(c.id)
     expect((await notes.list('shared')).map((n) => n.path)).toEqual(['todo'])
+  })
+})
+
+describe('reads and restores for the vault', () => {
+  const remove = async (ref: NoteRef, by: Writer = YOU) => okNote(await notes.remove(ref, by))
+
+  it('get finds a note by id, in Trash too', async () => {
+    const n = await create(shared('a'))
+    expect((await notes.get(n.id))?.path).toBe('a')
+    await remove(shared('a'))
+    expect((await notes.get(n.id))?.deletedAt).not.toBeNull()
+    expect(await notes.get('nobody')).toBeUndefined()
+  })
+
+  it('all lists the live notes of every shelf', async () => {
+    await create(shared('a'))
+    await create(chat('b'))
+    await create(chat('c', 'c2'))
+    await create(shared('gone'))
+    await remove(shared('gone'))
+    expect((await notes.all()).map((n) => `${n.shelf}/${n.path}`).sort()).toEqual(['c1/b', 'c2/c', 'shared/a'])
+  })
+
+  it('trash lists the deleted notes, the newest delete first', async () => {
+    await create(shared('old'))
+    await create(chat('new'))
+    await create(shared('live'))
+    const first = await remove(shared('old'))
+    const second = await remove(chat('new'))
+    await db.notes.update(first.id, { deletedAt: 100 })
+    await db.notes.update(second.id, { deletedAt: 200 })
+    expect((await notes.trash()).map((n) => n.path)).toEqual(['new', 'old'])
+  })
+
+  it('restore brings a note back with a revision by the writer', async () => {
+    const n = await create(shared('a'), 'kept words')
+    await remove(shared('a'))
+    const back = okNote(await notes.restore(n.id, YOU))
+    expect(back).toMatchObject({ deletedAt: null, body: 'kept words', version: 3 })
+    expect((await notes.read(shared('a')))?.id).toBe(n.id)
+    expect((await last(n.id)).writer).toBe('you')
+    expect((await last(n.id)).after?.deletedAt).toBeNull()
+    expect((await last(n.id)).undoes).toBeUndefined()
+  })
+
+  it('a restore is a later write, so Undo on the delete line leaves the note alone', async () => {
+    const n = await create(shared('a'))
+    await notes.remove(shared('a'), model('call-del', 'm2'))
+    const del = await last(n.id)
+    okNote(await notes.restore(n.id, YOU))
+    expect(await notes.revert(del.id, YOU)).toBe('changed-later')
+    expect((await notes.read(shared('a')))?.id).toBe(n.id)
+  })
+
+  it('restore is refused while another note holds the path, and the note stays in Trash', async () => {
+    const n = await create(shared('a'))
+    await remove(shared('a'))
+    await create(shared('a'), 'the new one')
+    const r = refusal(await notes.restore(n.id, YOU))
+    expect(r).toMatch(/^Error:/)
+    expect(r).toMatch(/shared\/a/)
+    expect((await notes.get(n.id))?.deletedAt).not.toBeNull()
+    expect((await notes.read(shared('a')))?.body).toBe('the new one')
+  })
+
+  it('restore refuses a note that is not in Trash, and one that is gone', async () => {
+    const n = await create(shared('a'))
+    expect(refusal(await notes.restore(n.id, YOU))).toMatch(/^Error:/)
+    expect(await notes.revisions(n.id)).toHaveLength(1)
+    expect(refusal(await notes.restore('nobody', YOU))).toMatch(/^Error:/)
+  })
+
+  it('a restored note drops an old path that another note took while it was away', async () => {
+    const n = await create(shared('old'))
+    okNote(await notes.move(shared('old'), 'shared/new', model()))
+    await remove(shared('new'))
+    await create(shared('old'), 'someone else')
+    const back = okNote(await notes.restore(n.id, YOU))
+    expect(back.aliases).toEqual([])
+    expect((await notes.read(shared('old')))?.body).toBe('someone else')
+  })
+
+  it('restoreRevision puts back the words, description and tags as a new write', async () => {
+    const n = okNote(await notes.write(shared('a'), body('first', { tags: ['one'] }), model()))
+    okNote(await notes.write(shared('a'), { body: 'second', description: 'New line', tags: ['two'], expectedVersion: 1 }, model()))
+    const [v1] = await notes.revisions(n.id)
+    const back = okNote(await notes.restoreRevision(v1.id, YOU))
+    expect(back).toMatchObject({ body: 'first', description: 'A line', tags: ['one'], version: 3 })
+    expect((await last(n.id)).writer).toBe('you')
+    expect((await last(n.id)).before?.body).toBe('second')
+    // The stored hash follows the words.
+    expect(back.bodyHash).toBe(v1.after?.bodyHash)
+  })
+
+  it('restoreRevision keeps the path and the protection of today', async () => {
+    const n = await create(shared('a'), 'first')
+    okNote(await notes.write(shared('a'), body('second', { expectedVersion: 1 }), model()))
+    okNote(await notes.move(shared('a'), 'shared/b', model()))
+    okNote(await notes.setProtected(n.id, true, YOU))
+    const [v1] = await notes.revisions(n.id)
+    const back = okNote(await notes.restoreRevision(v1.id, YOU))
+    expect(back).toMatchObject({ path: 'b', protected: true, body: 'first' })
+  })
+
+  it('restoreRevision refuses a model on a protected note', async () => {
+    const n = await create(shared('a'), 'first')
+    okNote(await notes.write(shared('a'), body('second', { expectedVersion: 1 }), model()))
+    okNote(await notes.setProtected(n.id, true, model()))
+    const [v1] = await notes.revisions(n.id)
+    expect(refusal(await notes.restoreRevision(v1.id, model()))).toMatch(/protected/)
+  })
+
+  it('restoreRevision of the words a note has now writes nothing', async () => {
+    const n = await create(shared('a'))
+    okNote(await notes.setProtected(n.id, true, YOU))
+    const [v1] = await notes.revisions(n.id)
+    expect(okNote(await notes.restoreRevision(v1.id, YOU)).version).toBe(2)
+    expect(await notes.revisions(n.id)).toHaveLength(2)
+  })
+
+  it('restoreRevision refuses a delete row, a note in Trash and an unknown id', async () => {
+    const n = await create(shared('a'))
+    await remove(shared('a'))
+    const [v1, del] = await notes.revisions(n.id)
+    expect(refusal(await notes.restoreRevision(del.id, YOU))).toMatch(/^Error:/)
+    expect(refusal(await notes.restoreRevision(v1.id, YOU))).toMatch(/Trash/)
+    expect(refusal(await notes.restoreRevision('nobody', YOU))).toMatch(/^Error:/)
+  })
+
+  it('refOf finds a note on any shelf, a chat with no row included', async () => {
+    const a = await create(shared('a'))
+    const b = await create(chat('b', 'gone-chat'))
+    expect((await notes.read(refOf(a)))?.id).toBe(a.id)
+    expect((await notes.read(refOf(b)))?.id).toBe(b.id)
+    // Mikael's edit on a chat that is not open works the same.
+    expect(okNote(await notes.edit(refOf(b), { newText: 'more', expectedVersion: 1 }, YOU)).version).toBe(2)
+  })
+
+  it('refOf lets a shared note move to the given chat', async () => {
+    const a = await create(shared('a'))
+    expect(okNote(await notes.move(refOf(a, 'c2'), 'chat/a', YOU)).shelf).toBe('c2')
   })
 })

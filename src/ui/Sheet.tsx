@@ -7,13 +7,15 @@ interface Props {
   onClose: () => void
   title: string
   children: ReactNode
-  /** 'bottom' is the default sheet; 'left' is used by the drawer. */
-  side?: 'bottom' | 'left'
+  /** 'bottom' is the default sheet; 'left' is used by the drawer; 'full' covers the screen and draws its own head. */
+  side?: 'bottom' | 'left' | 'full'
+  /** The panel's colour. 'bg' lets the surface-coloured pills of the vault show on it. */
+  tone?: 'surface' | 'bg'
 }
 
 const EXIT_MS = 180
 
-export function Sheet({ open, onClose, title, children, side = 'bottom' }: Props) {
+export function Sheet({ open, onClose, title, children, side = 'bottom', tone = 'surface' }: Props) {
   const [mounted, setMounted] = useState(open)
   const [shown, setShown] = useState(false)
 
@@ -49,7 +51,7 @@ export function Sheet({ open, onClose, title, children, side = 'bottom' }: Props
     <div className={`${css.root} ${shown ? css.shown : ''}`}>
       <div className={css.scrim} onClick={onClose} />
       <section
-        className={`${css.panel} ${side === 'left' ? css.left : css.bottom}`}
+        className={`${css.panel} ${css[side]} ${tone === 'bg' ? css.onBg : ''}`}
         role="dialog"
         aria-modal="true"
         aria-label={title}

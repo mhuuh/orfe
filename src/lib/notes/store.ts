@@ -1,7 +1,7 @@
 import { hashText } from '../hash'
 import { db, newId } from '../storage'
 import type { Note, NoteRevision } from '../types'
-import { PROTECTED, badPathText, checkDescription, checkWrite, echo, nearMatch, shelfOf, shownPath } from './rules'
+import { PROTECTED, badPathText, checkDescription, checkWrite, echo, nearMatch, sameWords, shelfOf, shownPath } from './rules'
 
 /** The note store. With `storage.ts`, this file is the Dexie seam for notes (Ruling P3). */
 
@@ -55,7 +55,13 @@ export interface RedoReport {
 export interface NoteStore {
   /** Follows aliases, skips deleted. */
   read(ref: NoteRef): Promise<Note | undefined>
+  /** Any note by id, in Trash too. */
+  get(id: string): Promise<Note | undefined>
   list(shelf: string): Promise<Note[]>
+  /** The live notes of every shelf, in no set order. */
+  all(): Promise<Note[]>
+  /** Notes in Trash, the newest delete first. */
+  trash(): Promise<Note[]>
   search(shelves: string[], q: string, limit: number): Promise<{ note: Note; snippet: string }[]>
   write(ref: NoteRef, input: WriteInput, by: Writer): Promise<Result>
   edit(ref: NoteRef, change: EditChange, by: Writer): Promise<Result>
@@ -66,6 +72,10 @@ export interface NoteStore {
   /** Oldest first. */
   revisions(noteId: string): Promise<NoteRevision[]>
   revert(revisionId: string, by: Writer): Promise<'done' | 'changed-later'>
+  /** Brings a note out of Trash to its own place, as a later write. Refused while another note holds that place. */
+  restore(id: string, by: Writer): Promise<Result>
+  /** Puts back the words of an old revision as a new write. The path and the protection stay as they are. */
+  restoreRevision(revisionId: string, by: Writer): Promise<Result>
   undoCalls(messageId: string, callIds: string[], shelves: 'chat'): Promise<UndoReport>
   /** Takes the message too, because a model can reuse an id across replies. */
   redoCalls(callIds: string[], messageId: string): Promise<RedoReport>
@@ -82,6 +92,12 @@ export interface NoteStore {
 /** Mikael, acting in the app. */
 export const YOU: Writer = { writer: 'you', messageId: null, callId: null }
 
+/** The ref that finds a note you hold, on any shelf. `chat`: what 'chat/' means in a move of a shared note. */
+export const refOf = (n: Note, chat?: string): NoteRef => ({
+  path: shownPath(n),
+  conversationId: n.shelf === 'shared' ? (chat ?? n.shelf) : n.shelf,
+})
+
 const SNIPPET_SIDE = 60
 
 const lower = (s: string): string => s.toLowerCase()
@@ -95,6 +111,8 @@ const badPath = (path: string): Result => refuse(badPathText(path))
 const missingText = (path: string): string => `Error: There is no note at ${echo(path)}. Use notes_search to find it.`
 
 const missing = (path: string): Result => refuse(missingText(path))
+
+const GONE = 'Error: This note is gone. Use notes_search to find it.'
 
 /** Where a note is, in the form `aliases` keeps. */
 const place = (n: Pick<Note, 'shelf' | 'path'>): string => `${n.shelf}/${n.path}`
@@ -267,8 +285,17 @@ export function writeResult(rev: NoteRevision): string {
 export const notes: NoteStore = {
   read: find,
 
+  get: (id) => db.notes.get(id),
+
   async list(shelf) {
     return (await live(shelf)).sort((a, b) => a.path.localeCompare(b.path))
+  },
+
+  all: () => db.notes.filter((n) => n.deletedAt === null).toArray(),
+
+  async trash() {
+    const rows = await db.notes.filter((n) => n.deletedAt !== null).toArray()
+    return rows.sort((a, b) => (b.deletedAt ?? 0) - (a.deletedAt ?? 0))
   },
 
   async search(shelves, q, limit) {
@@ -407,7 +434,7 @@ export const notes: NoteStore = {
   async setProtected(id, on, by) {
     return rw(async () => {
       const prev = await db.notes.get(id)
-      if (!prev || prev.deletedAt !== null) return refuse('Error: This note is gone. Use notes_search to find it.')
+      if (!prev || prev.deletedAt !== null) return refuse(GONE)
       if (!on && by.writer !== 'you') return refuse('Error: Only Mikael can clear protection. Move or tag this note, or write a new note that links to it.')
       if (prev.protected === on) return { ok: prev }
       return { ok: await commit(prev, bump(prev, { protected: on }), by) }
@@ -421,6 +448,31 @@ export const notes: NoteStore = {
       const rev = await db.noteRevisions.get(revisionId)
       if (!rev || !isLatest(await history(rev.noteId), rev)) return 'changed-later'
       return (await undo(rev, by)) ? 'done' : 'changed-later'
+    })
+  },
+
+  async restore(id, by) {
+    return rw(async () => {
+      const n = await db.notes.get(id)
+      if (!n) return refuse(GONE)
+      if (n.deletedAt === null) return refuse('Error: This note is not in Trash.')
+      const holder = await locate(n.shelf, n.path, n.shelf)
+      if (holder) return refuse(`Error: ${shownPath(holder)} holds this path now. Move that note, then restore this one.`)
+      const next = bump(n, { deletedAt: null })
+      return { ok: await commit(n, await atPlace({ ...next, aliases: await freeAliases(next) }), by) }
+    })
+  },
+
+  async restoreRevision(revisionId, by) {
+    return rw(async () => {
+      const rev = await db.noteRevisions.get(revisionId)
+      const cur = rev && (await db.notes.get(rev.noteId))
+      if (!rev?.after || !cur) return refuse('Error: That version holds no text to restore.')
+      if (cur.deletedAt !== null) return refuse('Error: This note is in Trash. Restore it first.')
+      if (cur.protected && by.writer !== 'you') return refuse(PROTECTED)
+      if (sameWords(cur, rev.after)) return { ok: cur }
+      const { body, description, tags } = rev.after
+      return { ok: await commit(cur, bump(cur, { body, description, tags }), by) }
     })
   },
 

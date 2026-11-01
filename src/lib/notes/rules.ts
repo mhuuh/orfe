@@ -16,6 +16,21 @@ export const PROTECTED = 'Error: This note is protected. Move or tag it, or writ
 /** How a model writes a note's path. A refusal must name this form, or notes_read can't use it. */
 export const shownPath = (n: Pick<Note, 'shelf' | 'path'>): string => `${n.shelf === 'shared' ? 'shared' : 'chat'}/${n.path}`
 
+/**
+ * A note's name, from its path without the shelf. A one-word last part says too little, so it
+ * keeps its folder: 'mira/voice' reads 'Mira, voice', as a tool line does.
+ */
+export function noteName(path: string): string {
+  const words = path.split('/').map((s) => s.replace(/[-_]/g, ' '))
+  const last = words[words.length - 1]
+  const name = words.length > 1 && !last.includes(' ') ? `${words[words.length - 2]}, ${last}` : last
+  return name.charAt(0).toUpperCase() + name.slice(1)
+}
+
+/** Whether two notes hold the same words: what a restore of an old revision puts back. */
+export const sameWords = (a: Note, b: Note): boolean =>
+  a.body === b.body && a.description === b.description && a.tags.join('\n') === b.tags.join('\n')
+
 /** The start of `s`, up to `n` units, or one fewer if `n` would cut an emoji in two. */
 export function safeCut(s: string, n: number): string {
   const code = s.charCodeAt(n - 1)

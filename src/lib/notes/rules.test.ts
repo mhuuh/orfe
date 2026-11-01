@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest'
 import type { Note } from '../types'
-import { MAX_BODY, MAX_DESCRIPTION, MAX_PATH, checkDescription, checkWrite, echo, nearMatch, normalisePath, safeCut, shelfOf } from './rules'
+import { MAX_BODY, MAX_DESCRIPTION, MAX_PATH, checkDescription, checkWrite, echo, nearMatch, normalisePath, noteName, safeCut, shelfOf } from './rules'
 
 function note(over: Partial<Note> = {}): Note {
   return {
@@ -162,5 +162,18 @@ describe('checkWrite', () => {
   it('passes a clean write', () => {
     expect(checkWrite(null, ok, 'm')).toBeNull()
     expect(checkWrite(note(), ok, 'm')).toBeNull()
+  })
+})
+
+describe('noteName', () => {
+  it('reads the last part of a path as words', () => {
+    expect(noteName('plot-threads')).toBe('Plot threads')
+    expect(noteName('lists/favourite_insects')).toBe('Favourite insects')
+  })
+
+  it('keeps the folder when the last part is one word, as a tool line does', () => {
+    expect(noteName('mira/voice')).toBe('Mira, voice')
+    expect(noteName('a/mira/voice')).toBe('Mira, voice')
+    expect(noteName('harbour')).toBe('Harbour')
   })
 })
