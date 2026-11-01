@@ -51,12 +51,14 @@ async function parse(file: Blob): Promise<BackupFile> {
     throw new Error('This file is not an ORFE backup.')
   }
   if (f.version > VERSION) throw new Error('This backup is from a newer version of ORFE.')
+  const names = new Set(kept().map((t) => t.name))
+  if (!Object.keys(f.tables).some((n) => names.has(n))) throw new Error('This backup has no data ORFE knows.')
   return f as BackupFile
 }
 
 /**
  * Merge adds the file's rows by id and keeps the rest; settings on the phone stay as they are.
- * Replace makes the phone match the file. Both keep this phone's key. `added` counts rows that were new here.
+ * Replace makes each table in the file match it; tables the file lacks stay. Both keep this phone's key. `added` counts rows that were new here.
  */
 export async function importBackup(file: Blob, mode: 'merge' | 'replace'): Promise<{ added: number }> {
   const data = await parse(file)
@@ -74,8 +76,10 @@ export async function importBackup(file: Blob, mode: 'merge' | 'replace'): Promi
         await storage.setSettings({ key: own.key, lastBackupAt: own.lastBackupAt })
         continue
       }
+      // A table the file does not have (an older backup) is left as it is, even on replace.
+      if (!Array.isArray(rows)) continue
       if (mode === 'replace') await t.clear()
-      if (!Array.isArray(rows) || rows.length === 0) continue
+      if (rows.length === 0) continue
       const keyPath = t.schema.primKey.keyPath as string
       if (mode === 'merge') {
         const have = await t.bulkGet(rows.map((r) => (r as Record<string, unknown>)[keyPath] as string))

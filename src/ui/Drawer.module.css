@@ -71,15 +71,15 @@
 .new:focus-visible,
 .row:focus-visible,
 .act:focus-visible,
-.nudge {
-  margin-top: var(--s2);
-  color: var(--mute);
-  font: 400 13px/20px var(--font-mono);
-}
 .nudge:focus-visible,
 .settings:focus-visible {
   outline: 2px solid var(--ink);
   outline-offset: -2px;
+}
+.nudge {
+  margin-top: var(--s2);
+  color: var(--mute);
+  font: 400 13px/20px var(--font-mono);
 }
 .actions {
   display: flex;

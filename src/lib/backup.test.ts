@@ -69,10 +69,23 @@ describe('backup', () => {
 
   it('rejects a file that is not an ORFE backup', async () => {
     const a = await storage.createConversation({ title: 'A' })
-    for (const bad of ['not json', '{"hello":1}', '{"format":"orfe-backup","version":1}']) {
+    const empty = '{"format":"orfe-backup","version":1,"tables":{}}'
+    const unknown = '{"format":"orfe-backup","version":1,"tables":{"nope":[{"id":"x"}]}}'
+    for (const bad of ['not json', '{"hello":1}', '{"format":"orfe-backup","version":1}', empty, unknown]) {
       await expect(importBackup(new Blob([bad]), 'replace')).rejects.toThrow()
     }
     expect(await storage.getConversation(a.id)).toBeTruthy()
+  })
+
+  it('replace leaves a table alone when the file does not have it', async () => {
+    const chat = await storage.createConversation({ title: 'Mine' })
+    await storage.savePrompt({ name: 'P', parentId: null, text: 'x' })
+    const file = new Blob([
+      JSON.stringify({ format: 'orfe-backup', version: 1, exportedAt: 1, tables: { prompts: [] } }),
+    ])
+    await importBackup(file, 'replace')
+    expect(await db.prompts.count()).toBe(0) // in the file, so replaced
+    expect(await storage.getConversation(chat.id)).toBeTruthy() // not in the file, so kept
   })
 
   it('restores a backup from an older schema', async () => {
