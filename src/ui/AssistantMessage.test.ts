@@ -19,6 +19,12 @@ describe('statusNote', () => {
     expect(statusNote(version({ status: 'stopped' }), false)?.more).toBe(false)
   })
 
+  it('an interrupted reply says why when it knows, and offers Continue', () => {
+    const why = 'The model used all its steps without an answer.'
+    expect(statusNote(version({ status: 'interrupted', error: why, content: [step] }), true)).toEqual({ text: why, retry: true, more: true })
+    expect(statusNote(version({ status: 'interrupted' }), true)).toEqual({ text: 'Interrupted', retry: true, more: true })
+  })
+
   it('a reply that is fine has no note', () => {
     expect(statusNote(version({}), true)).toBeNull()
     expect(statusNote(version({ finishReason: 'length' }), true)).toEqual({ text: 'Hit the length limit', retry: false, more: true })

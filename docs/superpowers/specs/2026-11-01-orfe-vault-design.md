@@ -126,7 +126,7 @@ Lives in `src/lib/send.ts`. All tools run on the phone.
 1. Send with `tools` and a constant `tool_choice: 'auto'`.
 2. Collect `delta.tool_calls` by index until `finish_reason: 'tool_calls'`. Accumulate `reasoning_details` by `index`, and never merge across indexes, because that gives "Invalid signature".
 3. Run the calls in order, one at a time. Save each `ToolPart` as it starts and as it ends.
-4. Send the next round. Stop at 8 rounds per reply: return a result that says so, and let the model answer. (my call)
+4. Send the next round. Stop at 8 rounds per run: return a result that says so, and let the model answer. A model that still gives no answer ends `interrupted`, with a note, and a Continue starts a fresh count. (my call)
 
 A tool error is a normal result the model can read, never a thrown failure. Refusals say what to do next.
 

@@ -48,7 +48,7 @@ export function statusNote(version: Version, isLast: boolean): { text: string; r
     case 'stopped':
       return { text: 'Stopped', retry: true, more: isLast }
     case 'interrupted':
-      return { text: 'Interrupted', retry: true, more: isLast }
+      return { text: version.error || 'Interrupted', retry: true, more: isLast }
     case 'error':
       // Retry runs the tools again and keeps shared-shelf writes. Continue goes on from the steps.
       return { text: version.error || 'Something went wrong', retry: true, more: isLast && version.content.some((p) => p.type === 'tool') }

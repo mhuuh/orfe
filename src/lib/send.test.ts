@@ -839,14 +839,58 @@ describe('tool loop', () => {
     expect(v.content.at(-1)).toEqual({ type: 'text', text: 'Answer' })
   })
 
-  it('calls after the limit are stored as errors and the reply ends done', async () => {
+  it('a model that ignores the limit ends interrupted with a note, and its calls stay stored', async () => {
     let n = 0
     const f = vi.fn(async () => sse(asks([`c${++n}`, 'echo', '{}'])))
     vi.stubGlobal('fetch', f)
     await sendUserMessage(convId, 'go', { reply: true, model: T })
     expect(f).toHaveBeenCalledTimes(9)
+    expect(bodyOf(f as never, 8).tool_choice).toBe('auto')
     expect((await steps()).at(-1)).toMatchObject({ callId: 'c9', round: 8, status: 'error', result: 'Round limit reached. Answer now.' })
-    expect((await activeVersion()).status).toBe('done')
+    const v = await activeVersion()
+    expect(v.status).toBe('interrupted')
+    expect(v.error).toBe('The model used all its steps without an answer.')
+    expect(v.finishReason).toBe('tool_calls')
+  })
+
+  it('text in the last request is an answer, so that reply ends done', async () => {
+    let n = 0
+    vi.stubGlobal('fetch', vi.fn(async () => (++n <= MAX_ROUNDS ? sse(asks([`c${n}`, 'echo', '{}'])) : sse([ev({ choices: [{ delta: { content: 'Answer' } }] }), ...asks(['late', 'echo', '{}'])]))))
+    await sendUserMessage(convId, 'go', { reply: true, model: T })
+    const v = await activeVersion()
+    expect(v.status).toBe('done')
+    expect(v.error).toBeUndefined()
+  })
+
+  it('Continue after that starts a fresh count of rounds', async () => {
+    let n = 0
+    let ran = 0
+    setAbilitiesForTest([
+      ability(async () => {
+        ran++
+        return 'x'
+      }),
+    ])
+    const out = vi.fn(async () => sse(asks([`c${++n}`, 'echo', '{}'])))
+    vi.stubGlobal('fetch', out)
+    await sendUserMessage(convId, 'go', { reply: true, model: T })
+    const m = await lastMsg()
+    const ranBefore = ran
+    const stored = (await steps()).length
+
+    n = 100
+    const back = vi.fn(async () => (++n <= 100 + MAX_ROUNDS - 1 ? sse(asks([`c${n}`, 'echo', '{}'])) : sse(reply('Answer'))))
+    vi.stubGlobal('fetch', back)
+    await generate(convId, { kind: 'continue', messageId: m.id }, T)
+    // Seven rounds run, as in a new reply.
+    expect(ran - ranBefore).toBe(MAX_ROUNDS - 1)
+    const v = await activeVersion()
+    expect(v.status).toBe('done')
+    expect(v.error).toBeUndefined()
+    expect(v.content.at(-1)).toEqual({ type: 'text', text: 'Answer' })
+    expect((await steps()).length).toBe(stored + MAX_ROUNDS - 1)
+    // Round numbers go on, so the reasoning of each round stays apart.
+    expect((await steps()).at(-1)?.round).toBe(15)
   })
 
   it('sends reasoning_details inside the loop', async () => {
@@ -1484,12 +1528,12 @@ describe('tool loop: Continue', () => {
     expect(bodyOf(f, 1).messages.filter((x) => x.tool_calls).map((x) => x.tool_calls!.map((c) => c.id))).toEqual([['c1'], ['c2'], ['c3']])
   })
 
-  it('counts the rounds of the old version toward the limit', async () => {
-    const f = stubFetch(() => sse(asks(['late', 'echo', '{}'])))
+  it('does not count the rounds of the old version toward the limit', async () => {
+    const f = stubFetch(() => sse(asks(['late', 'echo', '{}'])), () => sse(reply('Done')))
     const m = await cutOff([step('c1', MAX_ROUNDS - 1)])
     await generate(convId, { kind: 'continue', messageId: m.id }, T)
-    expect(f).toHaveBeenCalledTimes(1)
-    expect((await steps()).at(-1)).toMatchObject({ callId: 'late', status: 'error' })
+    expect(f).toHaveBeenCalledTimes(2)
+    expect((await steps()).at(-1)).toMatchObject({ callId: 'late', status: 'done', round: MAX_ROUNDS })
     expect((await activeVersion()).status).toBe('done')
   })
 

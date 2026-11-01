@@ -11,9 +11,13 @@ import { systemFor, systemText } from './system'
 import type { ContentPart, Conversation, LastRequest, Message, Reasoning, ToolPart, Usage, Version } from './types'
 import { settled, settledVersion, STOPPED, withoutActiveVersion, withVersionAt } from './versions'
 
-/** Tool rounds in one reply. The last one gets ROUND_LIMIT instead of running, so the model answers. */
+/**
+ * Tool rounds in one run. The last one gets ROUND_LIMIT instead of running, so the model answers.
+ * A Continue is a new run, so it gets a fresh count.
+ */
 export const MAX_ROUNDS = 8
 const ROUND_LIMIT = 'Round limit reached. Answer now.'
+const OUT_OF_ROUNDS = 'The model used all its steps without an answer.'
 const REFUSED = 'The provider refused this reply. Try again, or pick another model.'
 const WRITE_INTERVAL_MS = 200
 /** Share of the context limit above which a cold cache triggers a trim (spec §6). */
@@ -1018,6 +1022,7 @@ async function run(a: RunArgs): Promise<void> {
 
   let end: RoundEnd | null = null
   let first = true
+  let outOfRounds = false
   while (!controller.signal.aborted) {
     end = await streamRound(first)
     first = false
@@ -1031,11 +1036,15 @@ async function run(a: RunArgs): Promise<void> {
 
     const parts = await partsFrom(end.calls)
     closeRound()
-    if (round >= MAX_ROUNDS - 1) {
+    const used = round - firstRound
+    if (used >= MAX_ROUNDS - 1) {
       content = [...content, ...parts.map((p) => ({ ...p, status: 'error' as const, result: ROUND_LIMIT }))]
       await patchVersion(messageId, version.id, snapshot())
       // Past the last round the model had its chance to answer.
-      if (round >= MAX_ROUNDS) break
+      if (used >= MAX_ROUNDS) {
+        outOfRounds = !end.replied
+        break
+      }
     } else {
       content = [...content, ...parts]
       await patchVersion(messageId, version.id, snapshot())
@@ -1053,6 +1062,9 @@ async function run(a: RunArgs): Promise<void> {
     final.error = end.errored
   } else if (stopped) {
     final.status = 'stopped'
+  } else if (outOfRounds) {
+    final.status = 'interrupted'
+    final.error = OUT_OF_ROUNDS
   } else {
     final.status = end?.finished ? 'done' : 'interrupted'
   }
