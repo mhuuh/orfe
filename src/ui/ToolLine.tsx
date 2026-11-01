@@ -1,12 +1,10 @@
 import { useState } from 'react'
-import { describeStep } from '../lib/abilities/registry'
+import { describeStep, writesNotes } from '../lib/abilities/registry'
 import { notes, YOU } from '../lib/notes/store'
-import { setToolUndone } from '../lib/send'
+import { okStep, setToolUndone } from '../lib/send'
 import type { ToolPart } from '../lib/types'
 import css from './ToolLine.module.css'
 
-/** Tools that change a note. Only a finished one can be undone. */
-const WRITES = new Set(['notes_write', 'notes_edit', 'notes_delete'])
 const DETAIL_LINES = 3
 const STAYS = 'The note changed since. This write stays.'
 
@@ -27,8 +25,9 @@ export interface LineView {
 export function lineView(part: ToolPart, locked = false): LineView {
   const words = describeStep(part)
   const live = part.status === 'running'
-  // While the reply streams, its writer also saves the steps. A flag set now would be overwritten.
-  const write = WRITES.has(part.name) && part.status === 'done' && !locked
+  // Only a finished write can be undone. While the reply streams, its writer also saves the steps,
+  // so a flag set now would be overwritten.
+  const write = writesNotes(part.name) && part.status === 'done' && !locked
   const undone = part.undone === true
   const lines = part.result.split('\n')
   return {
@@ -73,10 +72,12 @@ interface Props {
   messageId: string
   /** The reply is still streaming. Undo and Redo are off. */
   locked?: boolean
+  /** Set while this step waits for a visible OK: the chat it runs in. */
+  waitingIn?: string
 }
 
 /** One step of the reply, in mono. Tap to see what it read or changed. */
-export function ToolLine({ part, messageId, locked = false }: Props) {
+export function ToolLine({ part, messageId, locked = false, waitingIn }: Props) {
   const [open, setOpen] = useState(false)
   const [note, setNote] = useState<string | null>(null)
   const [working, setWorking] = useState(false)
@@ -104,8 +105,18 @@ export function ToolLine({ part, messageId, locked = false }: Props) {
 
   if (v.live) {
     return (
-      <div className={`${css.line} ${css.live}`} role="status">
-        {label}
+      <div>
+        <div className={`${css.line} ${css.live}`} role="status">
+          {label}
+        </div>
+        {waitingIn !== undefined && (
+          <div className={css.detail} onClick={(e) => e.stopPropagation()}>
+            <div className={css.note}>This reply read outside text, so this step waits for your OK. Stop ends the reply.</div>
+            <button className={css.action} onClick={() => okStep(waitingIn, part.callId)}>
+              OK
+            </button>
+          </div>
+        )}
       </div>
     )
   }

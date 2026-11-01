@@ -1,4 +1,4 @@
-import { useEffect, useState, type ReactNode } from 'react'
+import { useEffect, useRef, useState, type ReactNode, type Ref } from 'react'
 import { useLiveQuery } from 'dexie-react-hooks'
 import { noteName } from '../lib/notes/rules'
 import { notes, YOU } from '../lib/notes/store'
@@ -9,6 +9,8 @@ import css from './Vault.module.css'
 
 interface Props {
   conversationId: string | null
+  /** Above 0: scroll to this chat's shelf. A new number scrolls again. */
+  jump?: number
   onOpen: (id: string) => void
 }
 
@@ -40,7 +42,7 @@ export const plainRefusal = (refused: string): string => refused.replace(/^Error
 /** A search snippet is raw Markdown, for a model. Marks that stand alone are noise here. */
 export const plainSnippet = (snippet: string): string => snippet.replace(/(^|\s)[#>*-]+\s+/g, '$1')
 
-const count = (n: number): string => `${n} ${n === 1 ? 'note' : 'notes'}`
+export const noteCount = (n: number): string => `${n} ${n === 1 ? 'note' : 'notes'}`
 
 export interface NoteRow {
   kind: 'note'
@@ -187,7 +189,7 @@ function Rows({ rows, now, onOpen }: RowsProps) {
               <span className={css.top}>
                 <span className={css.name}>{r.name}</span>
                 <span className={css.right}>
-                  {count(r.rows.length)} <span className={opened ? css.chevOpen : css.chev}>›</span>
+                  {noteCount(r.rows.length)} <span className={opened ? css.chevOpen : css.chev}>›</span>
                 </span>
               </span>
               <span className={css.detail}>Folder</span>
@@ -201,23 +203,24 @@ function Rows({ rows, now, onOpen }: RowsProps) {
 }
 
 interface ShelfProps extends Omit<RowsProps, 'rows'> {
+  ref?: Ref<HTMLElement>
   label: string
   list: Note[]
 }
 
-function Shelf({ label, list, now, onOpen }: ShelfProps) {
+function Shelf({ label, list, now, onOpen, ref }: ShelfProps) {
   return (
-    <section className={css.shelf} aria-label={label}>
+    <section ref={ref} className={css.shelf} aria-label={label}>
       <div className={css.head}>
         <span className={css.headText}>{label}</span>
-        <span className={css.headCount}>{count(list.length)}</span>
+        <span className={css.headCount}>{noteCount(list.length)}</span>
       </div>
       <Rows rows={shelfRows(list)} now={now} onOpen={onOpen} />
     </section>
   )
 }
 
-export function Vault({ conversationId, onOpen }: Props) {
+export function Vault({ conversationId, jump = 0, onOpen }: Props) {
   const [query, setQuery] = useState('')
   /** The query that last sat still. */
   const [settled, setSettled] = useState('')
@@ -225,11 +228,17 @@ export function Vault({ conversationId, onOpen }: Props) {
   const [trashOpen, setTrashOpen] = useState(false)
   const [allTrash, setAllTrash] = useState(false)
   const toast = useToast()
+  const chatShelf = useRef<HTMLElement>(null)
 
   const data = useLiveQuery(async () => {
     const [all, chats, trash] = await Promise.all([notes.all(), storage.listConversations(), notes.trash()])
     return { all, chats, trash }
   }, [])
+
+  const loaded = data !== undefined
+  useEffect(() => {
+    if (jump > 0) chatShelf.current?.scrollIntoView({ block: 'start' })
+  }, [jump, loaded])
 
   useEffect(() => {
     const t = setTimeout(() => setSettled(query.trim()), SEARCH_DELAY_MS)
@@ -298,6 +307,7 @@ export function Vault({ conversationId, onOpen }: Props) {
           <Shelf label="Shared" list={all.filter((n) => n.shelf === 'shared')} now={now} onOpen={onOpen} />
           {conversationId && (
             <Shelf
+              ref={chatShelf}
               label={here ? `This chat · ${here}` : 'This chat'}
               list={all.filter((n) => n.shelf === conversationId)}
               now={now}
@@ -317,7 +327,7 @@ export function Vault({ conversationId, onOpen }: Props) {
                     aria-pressed={s.id === pickedShelf}
                     onClick={() => setPickedShelf(s.id === pickedShelf ? null : s.id)}
                   >
-                    <span className={css.chipName}>{s.title}</span> · {count(s.notes.length)}
+                    <span className={css.chipName}>{s.title}</span> · {noteCount(s.notes.length)}
                   </button>
                 ))}
               </div>
@@ -333,7 +343,7 @@ export function Vault({ conversationId, onOpen }: Props) {
             >
               <span className={css.name}>Trash</span>
               <span className={css.right}>
-                {count(trash.length)} {trash.length > 0 && <span className={trashOpen ? css.chevOpen : css.chev}>›</span>}
+                {noteCount(trash.length)} {trash.length > 0 && <span className={trashOpen ? css.chevOpen : css.chev}>›</span>}
               </span>
             </button>
             {trashOpen && (

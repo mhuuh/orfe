@@ -1,7 +1,34 @@
-import { describe, expect, it } from 'vitest'
+import { afterEach, describe, expect, it } from 'vitest'
 import { fallbackModelInfo, type ModelInfo } from '../lib/catalog'
-import { canStop, clean, nextEffort, promptChipLabel, sendAction, shownEffort, STOP_GRACE_MS } from './Composer'
+import { setModelRulesForTest } from '../lib/modelRules'
+import type { Conversation } from '../lib/types'
+import { canStop, clean, losesAbilities, nextEffort, promptChipLabel, sendAction, shownEffort, STOP_GRACE_MS } from './Composer'
 import { modelMeta } from './ModelSheet'
+
+describe('losesAbilities', () => {
+  const listed = (tools: boolean): ModelInfo => ({ ...fallbackModelInfo('a/b'), unlisted: undefined, tools })
+  const conv = (over: Partial<Conversation> = {}) => ({ abilities: null, plain: false, ...over }) as Conversation
+
+  afterEach(() => setModelRulesForTest())
+
+  it('is true for a listed model without tools, in a chat that wants them', () => {
+    expect(losesAbilities(listed(false), conv(), null)).toBe(true)
+    expect(losesAbilities(listed(true), conv(), null)).toBe(false)
+  })
+  it('counts a model rule that takes tools away', () => {
+    setModelRulesForTest([{ pattern: /^a\//, rule: { noTools: true } }])
+    expect(losesAbilities(listed(true), conv(), null)).toBe(true)
+  })
+  it('is false in a plain chat: the chat asked for that', () => {
+    expect(losesAbilities(listed(false), conv({ plain: true }), null)).toBe(false)
+  })
+  it('is false with every ability switched off', () => {
+    expect(losesAbilities(listed(false), conv({ abilities: { notes: false } }), null)).toBe(false)
+  })
+  it('is false for a stand-in while the catalog loads: its tools are unknown', () => {
+    expect(losesAbilities(fallbackModelInfo('a/b'), conv(), null)).toBe(false)
+  })
+})
 
 const reasoning: ModelInfo = {
   ...fallbackModelInfo('anthropic/claude-sonnet-5.5'),

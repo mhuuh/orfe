@@ -1,9 +1,9 @@
-import { TOOLCALL, expect, send, signIn, test } from './fixtures'
+import { MODEL_A, MODEL_B, MODEL_B_NAME, TOOLCALL, TWOCALLS, expect, send, signIn, test } from './fixtures'
 import type { Page } from '@playwright/test'
 import type { Ability } from '../src/lib/abilities/registry'
 
 /** Swaps the abilities in the app's own registry, through the dev server. */
-async function setAbilities(page: Page, list: 'echo' | 'none'): Promise<void> {
+async function setAbilities(page: Page, list: 'echo' | 'trust' | 'none'): Promise<void> {
   await page.evaluate(async (list) => {
     const url = '/orfe/src/lib/abilities/registry.ts'
     const registry = (await import(/* @vite-ignore */ url)) as { setAbilitiesForTest(list: Ability[]): void }
@@ -16,7 +16,9 @@ async function setAbilities(page: Page, list: 'echo' | 'none'): Promise<void> {
       describe: () => ({ running: 'echoing', done: 'echoed', past: '(Echoed.)' }),
       traits: {},
     }
-    registry.setAbilitiesForTest(list === 'echo' ? [echo] : [])
+    const web: Ability = { ...echo, id: 'web', tools: [{ ...echo.tools[0], name: 'web' }], traits: { untrusted: true } }
+    const save: Ability = { ...echo, id: 'save', tools: [{ ...echo.tools[0], name: 'save' }], writes: ['save'] }
+    registry.setAbilitiesForTest(list === 'echo' ? [echo] : list === 'trust' ? [web, save] : [])
   }, list)
 }
 
@@ -155,4 +157,218 @@ test('a tap on the reply text still opens the message actions', async ({ page })
   await expect(reply).toBeVisible()
   await reply.click()
   await expect(page.getByRole('toolbar', { name: 'Message actions' })).toBeVisible()
+})
+
+/** Opens the chat's settings by tapping the title. */
+async function chatSettings(page: Page) {
+  await page.locator('header').getByRole('button', { name: /turn/ }).click()
+  return page.getByRole('dialog', { name: 'Chat' })
+}
+
+test('switching notes off removes the tools from the request', async ({ page, api }) => {
+  await signIn(page)
+  await send(page, 'hi')
+  await expect(page.getByText(/^Reply 1 /)).toBeVisible()
+  expect(api.chats[0].tools).toHaveLength(5)
+
+  const sheet = await chatSettings(page)
+  const notes = sheet.getByRole('switch', { name: 'Notes' })
+  await expect(notes).toBeChecked()
+  await expect(sheet.getByText('Read and write the vault')).toBeVisible()
+  await expect(sheet.getByText(/next reply cost more/)).toBeVisible()
+  await notes.click()
+  await expect(notes).not.toBeChecked()
+  await sheet.getByRole('button', { name: 'Close' }).click()
+
+  await send(page, 'again')
+  await expect(page.getByText(/^Reply 2 /)).toBeVisible()
+  expect(api.chats[1]).not.toHaveProperty('tools')
+  expect(JSON.stringify(api.chats[1].messages)).not.toContain('notes_search')
+})
+
+test('a plain chat sends only the prompt and the messages', async ({ page, api }) => {
+  await signIn(page)
+  await page.getByRole('button', { name: /^Prompt:/ }).click()
+  await page.getByRole('button', { name: 'New prompt' }).click()
+  await page.getByLabel('Prompt name').fill('Chef')
+  await page.getByLabel('Prompt text').fill('You are a chef.')
+  await page.getByRole('button', { name: 'Save' }).click()
+  await page.getByRole('button', { name: 'Chef', exact: true }).click()
+  await send(page, 'hi')
+  await expect(page.getByText(/^Reply 1 /)).toBeVisible()
+  expect(api.chats[0].messages[0].content).toContain('notes_search')
+
+  const sheet = await chatSettings(page)
+  const notes = sheet.getByRole('switch', { name: 'Notes' })
+  await sheet.getByRole('switch', { name: 'Plain chat' }).click()
+  await expect(notes).toBeDisabled()
+  await expect(notes).toBeChecked()
+  await expect(sheet.getByRole('switch', { name: 'Capability note' })).toBeDisabled()
+  await sheet.getByRole('button', { name: 'Close' }).click()
+
+  await send(page, 'plain now')
+  await expect(page.getByText(/^Reply 2 /)).toBeVisible()
+  expect(api.chats[1]).not.toHaveProperty('tools')
+  expect(api.chats[1]).not.toHaveProperty('tool_choice')
+  expect(api.chats[1].messages).toEqual([
+    { role: 'system', content: 'You are a chef.' },
+    { role: 'user', content: 'hi' },
+    { role: 'assistant', content: `Reply 1 from ${MODEL_A}` },
+    { role: 'user', content: 'plain now' },
+  ])
+
+  // Off again, the switches are as they were and the model has its tools back.
+  await chatSettings(page)
+  await sheet.getByRole('switch', { name: 'Plain chat' }).click()
+  await expect(notes).toBeEnabled()
+  await sheet.getByRole('button', { name: 'Close' }).click()
+  await send(page, 'tools again')
+  await expect(page.getByText(/^Reply 3 /)).toBeVisible()
+  expect(api.chats[2].tools).toHaveLength(5)
+})
+
+test("a prompt's Abilities row sets what its chats follow", async ({ page, api }) => {
+  await signIn(page)
+  await page.getByRole('button', { name: /^Prompt:/ }).click()
+  await page.getByRole('button', { name: 'New prompt' }).click()
+  await page.getByLabel('Prompt name').fill('Chef')
+  await page.getByLabel('Prompt text').fill('You are a chef.')
+  await page.getByRole('switch', { name: 'Notes' }).click()
+  await page.getByRole('button', { name: 'Save' }).click()
+  await page.getByRole('button', { name: 'Chef', exact: true }).click()
+  await send(page, 'hi')
+  await expect(page.getByText(/^Reply 1 /)).toBeVisible()
+  expect(api.chats[0]).not.toHaveProperty('tools')
+
+  // The chat reads the prompt's value until it sets its own.
+  const sheet = await chatSettings(page)
+  const notes = sheet.getByRole('switch', { name: 'Notes' })
+  await expect(notes).not.toBeChecked()
+  await notes.click()
+  await sheet.getByRole('button', { name: 'Close' }).click()
+  await send(page, 'again')
+  await expect(page.getByText(/^Reply 2 /)).toBeVisible()
+  expect(api.chats[1].tools).toHaveLength(5)
+
+  // The editor reads the switch back, and a delete's Undo keeps it.
+  const openEditor = async () => {
+    await page.getByRole('button', { name: /^Prompt:/ }).click()
+    await page.getByRole('button', { name: 'Edit Chef' }).click()
+  }
+  await openEditor()
+  await expect(page.getByRole('switch', { name: 'Notes' })).not.toBeChecked()
+  await page.getByRole('dialog', { name: 'Edit prompt' }).getByRole('button', { name: 'Delete' }).click()
+  await page.getByRole('button', { name: 'Undo' }).click()
+  await page.getByRole('button', { name: 'Edit Chef' }).click()
+  await expect(page.getByRole('switch', { name: 'Notes' })).not.toBeChecked()
+})
+
+test('a no-tools model shows the notice and still replies', async ({ page, api }) => {
+  await signIn(page)
+  const notice = page.getByText("This model can't use notes.")
+  await expect(page.getByRole('button', { name: /^Model:/ })).toBeVisible()
+  await expect(notice).toHaveCount(0)
+
+  await page.getByRole('button', { name: /^Model:/ }).click()
+  await page.getByRole('button', { name: new RegExp(MODEL_B_NAME) }).click()
+  await expect(notice).toBeVisible()
+
+  await send(page, 'hi')
+  await expect(page.getByText(/^Reply 1 /)).toBeVisible()
+  await expect(notice).toHaveCount(0)
+  expect(api.chats[0].model).toBe(MODEL_B)
+  expect(api.chats[0]).not.toHaveProperty('tools')
+
+  // Once per model: a reload and a way back do not repeat it.
+  await page.reload()
+  await expect(page.getByLabel('Message')).toBeVisible()
+  await expect(page.getByRole('button', { name: `Model: ${MODEL_B_NAME}. Change` })).toBeVisible()
+  await expect(notice).toHaveCount(0)
+})
+
+test('a plain chat on a no-tools model shows no notice', async ({ page }) => {
+  await signIn(page)
+  await send(page, 'hi')
+  await expect(page.getByText(/^Reply 1 /)).toBeVisible()
+  const sheet = await chatSettings(page)
+  await sheet.getByRole('switch', { name: 'Plain chat' }).click()
+  await sheet.getByRole('button', { name: 'Close' }).click()
+
+  await page.getByRole('button', { name: /^Model:/ }).click()
+  await page.getByRole('button', { name: new RegExp(MODEL_B_NAME) }).click()
+  await expect(page.getByRole('button', { name: `Model: ${MODEL_B_NAME}. Change` })).toBeVisible()
+  await expect(page.getByText("This model can't use notes.")).toHaveCount(0)
+})
+
+test('after untrusted content a write waits for a visible OK', async ({ page, api }) => {
+  await signIn(page)
+  await setAbilities(page, 'trust')
+  await send(page, `${TWOCALLS}:web:save`)
+
+  const ok = page.getByRole('button', { name: 'OK', exact: true })
+  await expect(ok).toBeVisible()
+  await expect(page.getByText(/waits for your OK/)).toBeVisible()
+  await expect(page.getByRole('button', { name: 'Stop' })).toBeVisible()
+  expect(api.chats).toHaveLength(1)
+
+  await ok.click()
+  await expect(page.getByText(/^Reply 2 /)).toBeVisible()
+  await expect(ok).toHaveCount(0)
+  expect(api.chats[1].messages.at(-1)).toMatchObject({ role: 'tool', content: 'echoed {}' })
+})
+
+test('a lock during the wait leaves Continue, and Continue asks again', async ({ page, api }) => {
+  await signIn(page)
+  await setAbilities(page, 'trust')
+  await send(page, `${TWOCALLS}:web:save`)
+  const ok = page.getByRole('button', { name: 'OK', exact: true })
+  await expect(ok).toBeVisible()
+
+  // A lost page: the run is gone, so the OK must go too. Reload resets the test abilities.
+  await page.reload()
+  await expect(page.getByLabel('Message')).toBeVisible()
+  await setAbilities(page, 'trust')
+  await expect(ok).toHaveCount(0)
+  await page.getByRole('button', { name: 'Continue' }).click()
+
+  await expect(ok).toBeVisible()
+  expect(api.chats).toHaveLength(1)
+  await ok.click()
+  await expect(page.getByText(/^Reply 2 /)).toBeVisible()
+})
+
+test('Stop ends a reply that waits for an OK', async ({ page }) => {
+  await signIn(page)
+  await setAbilities(page, 'trust')
+  await send(page, `${TWOCALLS}:web:save`)
+  const ok = page.getByRole('button', { name: 'OK', exact: true })
+  await expect(ok).toBeVisible()
+  // Past the grace after a send, a tap on Stop counts.
+  await page.waitForTimeout(450)
+  await page.getByRole('button', { name: 'Stop' }).click()
+  await expect(ok).toHaveCount(0)
+  await expect(page.getByLabel('Message')).toBeEnabled()
+  await expect(page.getByRole('button', { name: 'Stop' })).toHaveCount(0)
+})
+
+test("This chat's notes opens the vault on the chat's shelf", async ({ page }) => {
+  await signIn(page)
+  await send(page, `${TOOLCALL}:notes_write:${harbour}`)
+  await expect(page.getByText(/^Reply 2 /)).toBeVisible()
+  // A long shared shelf, so the chat's shelf starts below the fold.
+  await page.evaluate(async () => {
+    const url = '/orfe/src/lib/notes/store.ts'
+    const { notes, YOU } = (await import(/* @vite-ignore */ url)) as typeof import('../src/lib/notes/store')
+    for (let i = 0; i < 30; i++) {
+      await notes.write(
+        { path: `shared/filler-${i}`, conversationId: 'none' },
+        { body: 'x', description: 'Filler', isNew: true },
+        YOU,
+      )
+    }
+  })
+  const sheet = await chatSettings(page)
+  await sheet.getByRole('button', { name: /This chat's notes/ }).click()
+  const vault = page.getByRole('dialog', { name: 'Vault' })
+  await expect(vault.getByRole('region', { name: /^This chat/ }).getByRole('button', { name: /Harbour/ })).toBeInViewport()
 })

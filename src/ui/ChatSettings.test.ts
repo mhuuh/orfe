@@ -1,5 +1,36 @@
-import { describe, expect, it } from 'vitest'
-import { clampLimit, contextSummary, stepTrim } from './ChatSettings'
+import { afterEach, describe, expect, it } from 'vitest'
+import { setAbilitiesForTest, type Ability } from '../lib/abilities/registry'
+import type { Conversation, Prompt } from '../lib/types'
+import { abilityRows, clampLimit, contextSummary, stepTrim } from './ChatSettings'
+
+describe('ability rows', () => {
+  const fake = (id: string): Ability =>
+    ({ id, title: id.toUpperCase(), summary: `About ${id}`, tools: [], traits: {} }) as unknown as Ability
+  const conv = (over: Partial<Conversation> = {}) => ({ abilities: null, plain: false, ...over }) as Conversation
+  const on = (rows: ReturnType<typeof abilityRows>) => rows.map((r) => r.on)
+
+  afterEach(() => setAbilitiesForTest())
+
+  it('has one row per ability, in registry order, all on by default', () => {
+    setAbilitiesForTest([fake('a'), fake('b')])
+    expect(abilityRows(conv(), null)).toEqual([
+      { id: 'a', title: 'A', summary: 'About a', on: true },
+      { id: 'b', title: 'B', summary: 'About b', on: true },
+    ])
+  })
+
+  it('shows the prompt default until the chat sets its own', () => {
+    setAbilitiesForTest([fake('a'), fake('b')])
+    const prompt = { abilities: { a: false } } as unknown as Prompt
+    expect(on(abilityRows(conv(), prompt))).toEqual([false, true])
+    expect(on(abilityRows(conv({ abilities: { a: true, b: false } }), prompt))).toEqual([true, false])
+  })
+
+  it('keeps the values while the chat is plain', () => {
+    setAbilitiesForTest([fake('a'), fake('b')])
+    expect(on(abilityRows(conv({ abilities: { a: false }, plain: true }), null))).toEqual([false, true])
+  })
+})
 
 describe('context fields', () => {
   it('clampLimit keeps tokens in 1000–2,000,000 and messages in 2–1000', () => {

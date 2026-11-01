@@ -77,7 +77,7 @@ export interface Storage {
   appendMessage(conversationId: string, role: Role, first: Version): Promise<Message>
   listPrompts(): Promise<Prompt[]>
   getPrompt(id: string): Promise<Prompt | undefined>
-  savePrompt(p: { id?: string; name: string; parentId: string | null; text: string }): Promise<Prompt>
+  savePrompt(p: { id?: string; name: string; parentId: string | null; text: string; abilities?: Record<string, boolean> }): Promise<Prompt>
   /** Refuses (and deletes nothing) while other prompts name this one as their parent. */
   deletePrompt(id: string): Promise<'deleted' | 'has-variants'>
   getSettings(): Promise<Settings>
@@ -249,6 +249,7 @@ export const storage: Storage = {
       text: p.text,
       updatedAt: Date.now(),
       versionHash: hashText(p.text),
+      ...(p.abilities ? { abilities: p.abilities } : {}),
     }
     await db.prompts.put(row)
     return row

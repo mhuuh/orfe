@@ -37,7 +37,14 @@ export function cacheState(messages: Message[]): CacheState {
   return 'none'
 }
 
-export function Header({ conversationId, onMenu }: { conversationId: string | null; onMenu: () => void }) {
+interface Props {
+  conversationId: string | null
+  onMenu: () => void
+  /** Show this chat's notes in the vault. */
+  onNotes: () => void
+}
+
+export function Header({ conversationId, onMenu, onNotes }: Props) {
   const [settingsOpen, setSettingsOpen] = useState(false)
   const { models } = useCatalog()
   const info = useLiveQuery(async () => {
@@ -96,7 +103,15 @@ export function Header({ conversationId, onMenu }: { conversationId: string | nu
         </button>
       </header>
       {conversationId && (
-        <ChatSettings open={settingsOpen} onClose={() => setSettingsOpen(false)} conversationId={conversationId} />
+        <ChatSettings
+          open={settingsOpen}
+          onClose={() => setSettingsOpen(false)}
+          conversationId={conversationId}
+          onNotes={() => {
+            setSettingsOpen(false)
+            onNotes()
+          }}
+        />
       )}
     </>
   )

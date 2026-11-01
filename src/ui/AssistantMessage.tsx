@@ -143,6 +143,7 @@ export function AssistantMessage({ message, isLast, busy, selected, editing, aft
             part={x.part}
             messageId={message.id}
             locked={writing}
+            waitingIn={streaming && version.waitingFor === x.part.callId ? message.conversationId : undefined}
           />
         if (editing) {
           return i === firstText ? (

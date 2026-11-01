@@ -1,8 +1,12 @@
 import { useCallback, useEffect, useId, useRef, useState, type InputHTMLAttributes } from 'react'
 import { useLiveQuery } from 'dexie-react-hooks'
+import { ABILITIES, abilityOn } from '../lib/abilities/registry'
+import { notes } from '../lib/notes/store'
+import { setAbility, setPlain } from '../lib/send'
 import { NO_WINDOW_START, storage } from '../lib/storage'
-import type { ContextSetting, Conversation, Settings } from '../lib/types'
+import type { ContextSetting, Conversation, Prompt, Settings } from '../lib/types'
 import { Sheet } from './Sheet'
+import { noteCount } from './Vault'
 import shared from './Settings.module.css'
 import css from './ChatSettings.module.css'
 
@@ -165,33 +169,76 @@ export function ContextFields({ value, onChange }: { value: ContextSetting; onCh
   )
 }
 
-export function SwitchRow({ id, label, checked, onToggle }: { id: string; label: string; checked: boolean; onToggle: () => void }) {
+interface SwitchRowProps {
+  id: string
+  label: string
+  /** A second line, in mute. */
+  hint?: string
+  checked: boolean
+  /** Greyed out. The value stays. */
+  disabled?: boolean
+  onToggle: () => void
+}
+
+export function SwitchRow({ id, label, hint, checked, disabled = false, onToggle }: SwitchRowProps) {
   return (
-    <div className={shared.row}>
-      <span id={id}>{label}</span>
-      <button className={shared.switch} role="switch" aria-checked={checked} aria-labelledby={id} onClick={onToggle}>
+    <div className={`${shared.row} ${hint ? shared.hinted : ''} ${disabled ? shared.greyed : ''}`}>
+      <span>
+        <span id={id} className={shared.name}>
+          {label}
+        </span>
+        {hint && <span className={shared.hint}>{hint}</span>}
+      </span>
+      <button className={shared.switch} role="switch" aria-checked={checked} aria-labelledby={id} disabled={disabled} onClick={onToggle}>
         <span className={shared.knob} />
       </button>
     </div>
   )
 }
 
+/** One row per ability, in registry order, with each switch as it reads now. */
+export function abilityRows(conv: Conversation, prompt: Prompt | null) {
+  return ABILITIES.map((a) => ({ id: a.id, title: a.title, summary: a.summary, on: abilityOn(conv, prompt, a.id) }))
+}
+
 const num = new Intl.NumberFormat('en-US')
 
-export function ChatSettings({ open, onClose, conversationId }: { open: boolean; onClose: () => void; conversationId: string }) {
+interface Props {
+  open: boolean
+  onClose: () => void
+  conversationId: string
+  /** Show this chat's notes in the vault. */
+  onNotes: () => void
+}
+
+export function ChatSettings({ open, onClose, conversationId, onNotes }: Props) {
   const data = useLiveQuery(async () => {
-    const [conv, settings] = await Promise.all([storage.getConversation(conversationId), storage.getSettings()])
-    return conv ? { conv, settings } : null
+    const [conv, settings, shelf] = await Promise.all([
+      storage.getConversation(conversationId),
+      storage.getSettings(),
+      notes.list(conversationId),
+    ])
+    // A ref to a deleted prompt reads as no prompt.
+    const prompt = conv?.systemPromptRef ? ((await storage.getPrompt(conv.systemPromptRef)) ?? null) : null
+    return conv ? { conv, settings, prompt, notesOnShelf: shelf.length } : null
   }, [conversationId])
 
   return (
     <Sheet open={open} onClose={onClose} title="Chat">
-      {data && data.conv.id === conversationId && <Body {...data} />}
+      {data && data.conv.id === conversationId && <Body {...data} onNotes={onNotes} />}
     </Sheet>
   )
 }
 
-function Body({ conv, settings }: { conv: Conversation; settings: Settings }) {
+interface BodyProps {
+  conv: Conversation
+  settings: Settings
+  prompt: Prompt | null
+  notesOnShelf: number
+  onNotes: () => void
+}
+
+function Body({ conv, settings, prompt, notesOnShelf, onNotes }: BodyProps) {
   const id = conv.id
   const custom = conv.context
   const t = conv.totals
@@ -216,6 +263,42 @@ function Body({ conv, settings }: { conv: Conversation; settings: Settings }) {
           normalize={(d) => d.trim() || conv.title}
           onCommit={(title) => void storage.updateConversation(id, { title })}
         />
+      </section>
+
+      <section className={shared.group}>
+        <h3 className={shared.label}>Abilities</h3>
+        <SwitchRow
+          id="plain-chat"
+          label="Plain chat"
+          hint="Only the prompt and the messages"
+          checked={conv.plain}
+          onToggle={() => void setPlain(id, !conv.plain)}
+        />
+        {abilityRows(conv, prompt).map((a) => (
+          <SwitchRow
+            key={a.id}
+            id={`ability-${a.id}`}
+            label={a.title}
+            hint={a.summary}
+            checked={a.on}
+            disabled={conv.plain}
+            onToggle={() => void setAbility(id, a.id, !a.on)}
+          />
+        ))}
+        <div className={shared.meta}>A change makes the next reply cost more, once, because the cache starts over.</div>
+      </section>
+
+      <section className={shared.group}>
+        <h3 className={shared.label}>Notes</h3>
+        <button className={css.link} onClick={onNotes}>
+          <span>
+            <span className={shared.name}>This chat's notes</span>
+            <span className={shared.hint}>{noteCount(notesOnShelf)}</span>
+          </span>
+          <span className={css.chev} aria-hidden="true">
+            ›
+          </span>
+        </button>
       </section>
 
       <section className={shared.group}>
@@ -251,6 +334,7 @@ function Body({ conv, settings }: { conv: Conversation; settings: Settings }) {
           id="cap-note"
           label="Capability note"
           checked={conv.capabilityNote}
+          disabled={conv.plain}
           onToggle={() => void storage.mutateConversation(id, (c) => ({ capabilityNote: !c.capabilityNote }))}
         />
         <div className={shared.meta}>Tells the model it can use Markdown and inline styling.</div>

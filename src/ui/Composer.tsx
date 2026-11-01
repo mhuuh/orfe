@@ -1,10 +1,11 @@
-import { useLayoutEffect, useRef, useState, type CSSProperties, type KeyboardEvent } from 'react'
+import { useEffect, useLayoutEffect, useRef, useState, type CSSProperties, type KeyboardEvent } from 'react'
 import { useLiveQuery } from 'dexie-react-hooks'
+import { enabledAbilities, takesTools } from '../lib/abilities/registry'
 import type { ModelInfo } from '../lib/catalog'
 import { noteDraft } from '../lib/appUpdate'
 import { generate, isGenerating, sendUserMessage, stop } from '../lib/send'
 import { storage } from '../lib/storage'
-import type { Conversation, Role } from '../lib/types'
+import type { Conversation, Prompt, Role } from '../lib/types'
 import { shortModel } from './Divider'
 import { ModelSheet } from './ModelSheet'
 import { PromptSheet } from './PromptSheet'
@@ -23,6 +24,9 @@ const LENS_RIM = 16
 const LENS_DEBOUNCE_MS = 100
 /** A second tap this soon after sending is a double tap, not a request to stop. */
 export const STOP_GRACE_MS = 400
+
+/** The cache row with the models that already showed the no-tools notice. */
+const NOTICED_KEY = 'no-tools-noticed'
 
 /** Unsent text per chat, kept while switching chats (not across reloads). */
 const drafts = new Map<string, string>()
@@ -65,6 +69,14 @@ export function nextEffort(efforts: string[], shown: string | null): string {
   return efforts[(i + 1) % efforts.length]
 }
 
+/**
+ * This chat wants abilities that this model can't use (spec §6). A plain chat asked for that, so it
+ * wants none. A stand-in for a model the catalog does not hold yet is unknown, so it says nothing.
+ */
+export function losesAbilities(model: ModelInfo, c: Conversation, prompt: Prompt | null): boolean {
+  return !model.unlisted && !takesTools(model) && enabledAbilities(c, prompt).length > 0
+}
+
 export function Composer({ conversationId: id }: { conversationId: string }) {
   const data = useLiveQuery(async () => {
     const [conversation, messages] = await Promise.all([storage.getConversation(id), storage.listMessages(id)])
@@ -76,6 +88,7 @@ export function Composer({ conversationId: id }: { conversationId: string }) {
       prompt: ref ? ((await storage.getPrompt(ref)) ?? null) : null,
       lastRole: turns[turns.length - 1]?.role,
       streaming: messages.some((m) => m.versions.some((v) => v.status === 'streaming')),
+      noticed: (await storage.getCache<string[]>(NOTICED_KEY))?.value ?? [],
     }
   }, [id])
   const { models } = useCatalog()
@@ -87,6 +100,8 @@ export function Composer({ conversationId: id }: { conversationId: string }) {
   const [promptSheet, setPromptSheet] = useState(false)
   // A model picked in the sheet may come from a fresher catalog than ours.
   const [picked, setPicked] = useState<ModelInfo | null>(null)
+  /** The model whose no-tools notice shows now. It goes at the next send. */
+  const [notice, setNotice] = useState<string | null>(null)
 
   const root = useRef<HTMLElement>(null)
   const field = useRef<HTMLTextAreaElement>(null)
@@ -104,6 +119,15 @@ export function Composer({ conversationId: id }: { conversationId: string }) {
   const effort = shownEffort(model, conv?.nextEffort ?? null)
   const busy = pending || (data?.streaming ?? false)
   const action = data ? sendAction(text, data.lastRole, busy) : 'none'
+  const loses = conv !== undefined && losesAbilities(model, conv, data?.prompt ?? null)
+  const noticed = data?.noticed
+
+  // Once per model. It stays on screen after the row is written.
+  useEffect(() => {
+    if (!loses || !noticed || noticed.includes(model.id)) return
+    setNotice(model.id)
+    void storage.setCache(NOTICED_KEY, [...noticed, model.id])
+  }, [loses, noticed, model.id])
 
   // Grow with the text, 1 to 8 lines, then scroll inside.
   useLayoutEffect(() => {
@@ -187,6 +211,7 @@ export function Composer({ conversationId: id }: { conversationId: string }) {
   const run = (work: Promise<void>) => {
     startedAt.current = Date.now()
     setPending(true)
+    setNotice(null)
     work
       .catch((e: unknown) => {
         console.error(e)
@@ -307,6 +332,11 @@ export function Composer({ conversationId: id }: { conversationId: string }) {
           onChange={(e) => edit(e.target.value)}
           onKeyDown={onKey}
         />
+        {loses && notice === model.id && (
+          <div className={css.notice} role="status">
+            This model can't use notes.
+          </div>
+        )}
         <div className={css.tools}>
           <button className={css.chip} onClick={() => setSheet(true)} aria-label={`Model: ${model.name}. Change`}>
             <span className={css.chipText}>{modelId ? shortModel(modelId) : 'model'}</span>

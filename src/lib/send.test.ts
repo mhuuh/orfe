@@ -3,7 +3,7 @@ import { fallbackModelInfo, type ModelInfo } from './catalog'
 import { db, newId, storage } from './storage'
 import { setAbilitiesForTest, toolsFor, type Ability } from './abilities/registry'
 import { setModelRulesForTest } from './modelRules'
-import { computeCold, deleteChat, deleteMessage, deleteVersion, errorText, generate, MAX_ROUNDS, patchVersion, isGenerating, recoverInterrupted, replacePromptRef, restoreChat, restoreMessage, restoreVersion, sendUserMessage, setAlreadyDoneForTest, setPrompt, setToolUndone, stop, undoReplyWrites } from './send'
+import { computeCold, deleteChat, deleteMessage, deleteVersion, errorText, generate, MAX_ROUNDS, okStep, patchVersion, isGenerating, recoverInterrupted, replacePromptRef, restoreChat, restoreMessage, restoreVersion, sendUserMessage, setAbility, setAlreadyDoneForTest, setPlain, setPrompt, setToolUndone, stop, undoReplyWrites } from './send'
 import { notes, YOU } from './notes/store'
 import { CAPABILITY_NOTE, systemFor } from './system'
 import { fingerprint } from './context'
@@ -2014,5 +2014,280 @@ describe('replacePromptRef', () => {
     await storage.updateConversation(convId, { systemPromptRef: 'p2' })
     expect(await replacePromptRef(convId, null, 'p1')).toBe(false)
     expect((await storage.getConversation(convId))!.systemPromptRef).toBe('p2')
+  })
+})
+
+/** The tool names in request `i`. */
+const toolNames = (f: ReturnType<typeof stubFetch>, i: number) =>
+  ((bodyOf(f, i).tools ?? []) as { function: { name: string } }[]).map((t) => t.function.name)
+
+describe('abilities in settings', () => {
+  const go = (text: string) => sendUserMessage(convId, text, { reply: true, model: T })
+
+  beforeEach(() => setAbilitiesForTest([ability(undefined, 'one'), ability(undefined, 'two')]))
+
+  it('a switch changes the tool list and the next request reads cold', async () => {
+    const f = stubFetch(() => sse(reply('ok')))
+    await go('first')
+    expect(toolNames(f, 0)).toEqual(['one', 'two'])
+    expect(await coldNow(T)).toBe(false)
+
+    await setAbility(convId, 'one', false)
+    expect((await storage.getConversation(convId))!.abilities).toEqual({ one: false })
+    expect(await coldNow(T)).toBe(true)
+
+    await go('second')
+    expect(toolNames(f, 1)).toEqual(['two'])
+    expect(await coldNow(T)).toBe(false)
+  })
+
+  it('a chat with a prompt default follows it until the chat sets its own', async () => {
+    const f = stubFetch(() => sse(reply('ok')))
+    const saved = { name: 'Chef', parentId: null, text: 'You are a chef.' }
+    const p = await storage.savePrompt({ ...saved, abilities: { one: false } })
+    await setPrompt(convId, p.id)
+    await go('first')
+    expect(toolNames(f, 0)).toEqual(['two'])
+
+    // A chat with no set of its own follows the prompt.
+    await storage.savePrompt({ ...saved, id: p.id, abilities: { two: false } })
+    await go('second')
+    expect(toolNames(f, 1)).toEqual(['one'])
+
+    // The first switch keeps what the chat followed, so the other switch reads the same.
+    await setAbility(convId, 'one', true)
+    expect((await storage.getConversation(convId))!.abilities).toEqual({ one: true, two: false })
+    await storage.savePrompt({ ...saved, id: p.id, abilities: { one: false } })
+    await go('third')
+    expect(toolNames(f, 2)).toEqual(['one'])
+  })
+
+  it('a plain chat sends no tools, no index, no instructions, no summary block and no capability note', async () => {
+    setAbilitiesForTest()
+    const f = stubFetch(() => sse(reply('ok')))
+    await notes.write(
+      { path: 'shared/harbour', conversationId: convId },
+      { body: 'Boats.', description: 'The harbour', isNew: true },
+      YOU,
+    )
+    await storage.updateConversation(convId, { capabilityNote: true, summaryBlock: 'The story so far.' })
+    await go('first')
+    expect(bodyOf(f, 0).tools).toBeDefined()
+    expect(JSON.stringify(bodyOf(f, 0).messages[0])).toContain('harbour')
+
+    const p = await storage.savePrompt({ name: 'Chef', parentId: null, text: 'You are a chef.' })
+    await setPrompt(convId, p.id)
+    await setPlain(convId, true)
+    await go('second')
+    const sent = bodyOf(f, 1)
+    expect(Object.keys(sent).sort()).toEqual(['messages', 'model', 'session_id', 'stream'])
+    expect(sent.messages).toEqual([
+      { role: 'system', content: 'You are a chef.' },
+      { role: 'user', content: 'first' },
+      { role: 'assistant', content: 'ok' },
+      { role: 'user', content: 'second' },
+    ])
+
+    // With no prompt there is no system message at all.
+    await setPrompt(convId, null)
+    await go('third')
+    expect(bodyOf(f, 2).messages[0]).toEqual({ role: 'user', content: 'first' })
+  })
+
+  it('a call that a plain chat gets anyway finds no tool', async () => {
+    const f = stubFetch(() => sse(asks(['c1', 'one', '{}'])), () => sse(reply('Fine')))
+    await setPlain(convId, true)
+    await go('first')
+    expect(bodyOf(f, 0)).not.toHaveProperty('tools')
+    expect((await steps())[0].status).toBe('error')
+    expect((await steps())[0].result).toContain('You have no tools in this chat.')
+  })
+
+  it('old steps go out as plain text in a plain chat, so no tool message is left without its tools', async () => {
+    const f = stubFetch(() => sse(asks(['c1', 'one', '{}'])), () => sse(reply('Done')), () => sse(reply('Fine')))
+    await go('first')
+    await setPlain(convId, true)
+    await go('second')
+    const { messages } = bodyOf(f, 2)
+    expect(messages.map((m) => m.role)).toEqual(['user', 'assistant', 'user'])
+    expect(messages[1].content).toContain('(Used one.)')
+    expect(messages[1].tool_calls).toBeUndefined()
+  })
+
+  it('turning plain off brings back the switches as they were, and the next request reads cold', async () => {
+    const f = stubFetch(() => sse(reply('ok')))
+    await setAbility(convId, 'one', false)
+    await go('first')
+    expect(toolNames(f, 0)).toEqual(['two'])
+
+    await setPlain(convId, true)
+    expect(await coldNow(T)).toBe(true)
+    await go('second')
+    expect(bodyOf(f, 1)).not.toHaveProperty('tools')
+    expect(bodyOf(f, 1).messages[0].role).toBe('user')
+    expect((await storage.getConversation(convId))!.abilities).toEqual({ one: false })
+
+    await setPlain(convId, false)
+    expect(await coldNow(T)).toBe(true)
+    await go('third')
+    expect(toolNames(f, 2)).toEqual(['two'])
+    expect(bodyOf(f, 2).messages[0]).toEqual({ role: 'system', content: CAPABILITY_NOTE })
+  })
+})
+
+describe('trust gate', () => {
+  /** The tools that really ran, in order. */
+  let ran: string[]
+  const tool = (name: string, extra: Partial<Ability>): Ability => ({
+    ...ability(async () => {
+      ran.push(name)
+      return `${name} ran`
+    }, name),
+    ...extra,
+  })
+  const go = () => sendUserMessage(convId, 'go', { reply: true, model: T })
+  const waitsFor = (callId: string) => vi.waitFor(async () => expect((await activeVersion()).waitingFor).toBe(callId))
+  /** A reply that a run left behind, with `content` as its steps. */
+  async function leftBehind(content: Version['content'], extra: Partial<Version> = {}) {
+    await storage.appendMessage(convId, 'user', doneVersion('go'))
+    return storage.appendMessage(convId, 'assistant', { id: newId(), content, status: 'interrupted', model: T.id, createdAt: 1, ...extra })
+  }
+  const webThenOpenSave = () => [step('c1', 0, { name: 'web' }), step('c2', 0, { name: 'save', status: 'running', result: '' })]
+
+  beforeEach(() => {
+    ran = []
+    setAbilitiesForTest([
+      tool('web', { traits: { untrusted: true } }),
+      tool('save', { writes: ['save'] }),
+      tool('post', { traits: { outward: true } }),
+      tool('look', {}),
+    ])
+  })
+
+  it('after untrusted content a note write waits for OK', async () => {
+    const f = stubFetch(() => sse(asks(['c1', 'web', '{}'], ['c2', 'save', '{}'])), () => sse(reply('Done')))
+    const running = go()
+    await waitsFor('c2')
+    expect(ran).toEqual(['web'])
+    expect((await steps())[1].status).toBe('running')
+    expect((await activeVersion()).status).toBe('streaming')
+    expect(f).toHaveBeenCalledTimes(1)
+
+    okStep(convId, 'c2')
+    await running
+    expect(ran).toEqual(['web', 'save'])
+    const v = await activeVersion()
+    expect(v.waitingFor).toBeUndefined()
+    expect(v.status).toBe('done')
+    expect(f).toHaveBeenCalledTimes(2)
+  })
+
+  it('an outward tool waits too, a later round counts, and a plain read does not wait', async () => {
+    stubFetch(
+      () => sse(asks(['c1', 'web', '{}'])),
+      () => sse(asks(['c2', 'look', '{}'], ['c3', 'post', '{}'])),
+      () => sse(reply('Done')),
+    )
+    const running = go()
+    await waitsFor('c3')
+    expect(ran).toEqual(['web', 'look'])
+    okStep(convId, 'c3')
+    await running
+    expect(ran).toEqual(['web', 'look', 'post'])
+  })
+
+  it('a write before the untrusted content does not wait, and a new reply starts clean', async () => {
+    stubFetch(
+      () => sse(asks(['c1', 'save', '{}'], ['c2', 'web', '{}'])),
+      () => sse(reply('Done')),
+      () => sse(asks(['c3', 'save', '{}'])),
+      () => sse(reply('Done')),
+    )
+    await go()
+    expect(ran).toEqual(['save', 'web'])
+    await go()
+    expect(ran).toEqual(['save', 'web', 'save'])
+  })
+
+  it('an untrusted call that was stopped gave nothing to read, so nothing waits', async () => {
+    stubFetch(() => sse(reply('Done')))
+    const m = await leftBehind([
+      step('c1', 0, { name: 'web', status: 'stopped', result: 'Stopped by the user.' }),
+      step('c2', 0, { name: 'save', status: 'running', result: '' }),
+    ])
+    await generate(convId, { kind: 'continue', messageId: m.id }, T)
+    expect(ran).toEqual(['save'])
+  })
+
+  it('an OK for another step does nothing', async () => {
+    stubFetch(() => sse(asks(['c1', 'web', '{}'], ['c2', 'save', '{}'])), () => sse(reply('Done')))
+    const running = go()
+    await waitsFor('c2')
+    okStep(convId, 'other')
+    okStep('other chat', 'c2')
+    await new Promise((r) => setTimeout(r, 20))
+    expect(ran).toEqual(['web'])
+    okStep(convId, 'c2')
+    await running
+  })
+
+  it('Stop ends the wait: the step never runs and the next request is valid', async () => {
+    const f = stubFetch(
+      () => sse(asks(['c1', 'web', '{}'], ['c2', 'save', '{}'], ['c3', 'save', '{}'])),
+      () => sse(reply('Fine')),
+    )
+    const running = go()
+    await waitsFor('c2')
+    stop(convId)
+    await running
+    expect(ran).toEqual(['web'])
+    expect(isGenerating(convId)).toBe(false)
+    const v = await activeVersion()
+    expect(v.status).toBe('stopped')
+    expect(v.waitingFor).toBeUndefined()
+    expect((await steps()).map((p) => p.status)).toEqual(['done', 'stopped', 'stopped'])
+
+    await sendUserMessage(convId, 'next', { reply: true, model: T })
+    expectValid(bodyOf(f, 1).messages)
+  })
+
+  it('deleting the chat during the wait ends the reply', async () => {
+    stubFetch(() => sse(asks(['c1', 'web', '{}'], ['c2', 'save', '{}'])))
+    const running = go()
+    await waitsFor('c2')
+    await deleteChat(convId)
+    await running
+    expect(ran).toEqual(['web'])
+    expect(isGenerating(convId)).toBe(false)
+  })
+
+  it('a lock during the wait is not a dead end: Continue asks again', async () => {
+    const f = stubFetch(() => sse(reply('Done')))
+    // What a lost run leaves. Startup then marks it interrupted.
+    const m = await leftBehind(webThenOpenSave(), { status: 'streaming', waitingFor: 'c2' })
+    await recoverInterrupted()
+    expect((await activeVersion()).status).toBe('interrupted')
+
+    const again = generate(convId, { kind: 'continue', messageId: m.id }, T)
+    await vi.waitFor(async () => {
+      const v = await activeVersion()
+      expect(v.status).toBe('streaming')
+      expect(v.waitingFor).toBe('c2')
+    })
+    expect(ran).toEqual([])
+    expect(f).not.toHaveBeenCalled()
+    okStep(convId, 'c2')
+    await again
+    expect(ran).toEqual(['save'])
+    expect((await activeVersion()).status).toBe('done')
+  })
+
+  it('Continue does not ask again for a write that landed before the lock', async () => {
+    setAlreadyDoneForTest(async () => 'stored result')
+    stubFetch(() => sse(reply('Done')))
+    const m = await leftBehind(webThenOpenSave())
+    await generate(convId, { kind: 'continue', messageId: m.id }, T)
+    expect(ran).toEqual([])
+    expect((await steps())[1]).toMatchObject({ status: 'done', result: 'stored result' })
   })
 })

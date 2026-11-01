@@ -7,11 +7,14 @@ import {
   ABILITIES,
   type Ability,
   type AbilityCtx,
+  abilityOn,
   describeStep,
   enabledAbilities,
+  needsOk,
   runTool,
   setAbilitiesForTest,
   toolsFor,
+  writesNotes,
 } from './registry'
 
 const model: ModelInfo = { ...fallbackModelInfo('m/x'), tools: true }
@@ -140,5 +143,56 @@ describe('registry', () => {
     expect(ABILITIES).toEqual([])
     setAbilitiesForTest()
     expect(ABILITIES.map((a) => a.id)).toEqual(['notes'])
+  })
+})
+
+describe('switches and the trust gate', () => {
+  const step = (name: string, status: ToolPart['status'] = 'done'): ToolPart => ({
+    type: 'tool',
+    callId: name,
+    round: 0,
+    model: 'm/x',
+    name,
+    args: {},
+    result: 'x',
+    status,
+  })
+
+  it('abilityOn reads the chat, then the prompt, then on. Plain does not change a switch', () => {
+    const p = { abilities: { a: false } } as unknown as Prompt
+    expect(abilityOn(conv(), null, 'a')).toBe(true)
+    expect(abilityOn(conv(), p, 'a')).toBe(false)
+    expect(abilityOn(conv({ abilities: { a: true } }), p, 'a')).toBe(true)
+    expect(abilityOn(conv({ abilities: { a: false }, plain: true }), null, 'a')).toBe(false)
+    expect(abilityOn(conv({ abilities: { a: true }, plain: true }), null, 'a')).toBe(true)
+  })
+
+  it('the shipped notes tools that change a note are the writes', () => {
+    const names = ['notes_search', 'notes_read', 'notes_write', 'notes_edit', 'notes_delete']
+    expect(names.filter(writesNotes)).toEqual(['notes_write', 'notes_edit', 'notes_delete'])
+  })
+
+  it('needsOk holds a write or an outward tool after an untrusted result, and nothing else', () => {
+    setAbilitiesForTest([
+      { ...fake('web', ['web']), traits: { untrusted: true } },
+      { ...fake('out', ['out']), traits: { outward: true } },
+      { ...fake('note', ['save', 'read']), writes: ['save'] },
+    ])
+    const read = [step('web')]
+    expect(needsOk('save', read)).toBe(true)
+    expect(needsOk('out', read)).toBe(true)
+    expect(needsOk('read', read)).toBe(false)
+    expect(needsOk('web', read)).toBe(false)
+    expect(needsOk('save', [])).toBe(false)
+    expect(needsOk('save', [step('read')])).toBe(false)
+    // An error can still quote what it read. A stopped or open call gave nothing.
+    expect(needsOk('save', [step('web', 'error')])).toBe(true)
+    expect(needsOk('save', [step('web', 'stopped')])).toBe(false)
+    expect(needsOk('save', [step('web', 'running')])).toBe(false)
+  })
+
+  it('nothing shipped is untrusted, so the gate stays closed', () => {
+    expect(ABILITIES.filter((a) => a.traits.untrusted)).toEqual([])
+    expect(needsOk('notes_write', [step('notes_read')])).toBe(false)
   })
 })

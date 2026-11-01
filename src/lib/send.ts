@@ -1,5 +1,5 @@
 import { UNCHECKED } from './abilities/outcome'
-import { activeAbilities, runTool, toolsFor, wantsIndex, type Ability } from './abilities/registry'
+import { activeAbilities, needsOk, runTool, toolsFor, wantsIndex, type Ability } from './abilities/registry'
 import { fallbackModelInfo, type ModelInfo } from './catalog'
 import { estimateTokens, fingerprint, isCold, planWindow, ttlFor } from './context'
 import { buildOutgoing, renderRounds } from './normalise'
@@ -25,6 +25,8 @@ const SOFT_THRESHOLD = 0.85
  */
 const PROVIDER_PREFERENCE: string | null = null
 const controllers = new Map<string, AbortController>()
+/** The step that waits for an OK, by chat. A chat runs one step at a time. */
+const waits = new Map<string, { callId: string; release: () => void }>()
 const NO_CONNECTION = "Couldn't reach OpenRouter."
 
 /**
@@ -77,6 +79,12 @@ export function onGenerationEnd(fn: () => void): () => void {
 
 export function stop(conversationId: string): void {
   controllers.get(conversationId)?.abort()
+}
+
+/** The visible OK on a step that waits. A tap for any other step does nothing. */
+export function okStep(conversationId: string, callId: string): void {
+  const wait = waits.get(conversationId)
+  if (wait?.callId === callId) wait.release()
 }
 
 export interface ChatSnapshot {
@@ -674,6 +682,23 @@ export async function replacePromptRef(conversationId: string, from: string | nu
   })
 }
 
+/**
+ * Sets one ability switch for this chat. The first change copies what the chat follows now, so its
+ * other switches keep their values. From then on the chat has its own set.
+ */
+export async function setAbility(conversationId: string, id: string, on: boolean): Promise<void> {
+  await db.transaction('rw', db.conversations, db.prompts, async () => {
+    const ref = (await storage.getConversation(conversationId))?.systemPromptRef
+    const prompt = ref ? await db.prompts.get(ref) : undefined
+    await storage.mutateConversation(conversationId, (c) => ({ abilities: { ...(c.abilities ?? prompt?.abilities), [id]: on } }))
+  })
+}
+
+/** Plain on or off. The ability switches keep their values, so off brings them back. */
+export async function setPlain(conversationId: string, on: boolean): Promise<void> {
+  await storage.mutateConversation(conversationId, () => ({ plain: on }))
+}
+
 interface RunArgs {
   conversation: Conversation
   stream: boolean
@@ -915,7 +940,33 @@ async function run(a: RunArgs): Promise<void> {
     await patchVersion(messageId, version.id, snapshot())
   }
 
+  /**
+   * Holds the run until the OK or Stop. There is no timer: a lock freezes the page with the wait
+   * still open, and a lost run ends `interrupted`, where Continue comes back here and asks again.
+   */
+  const waitForOk = async (callId: string): Promise<void> => {
+    patch.waitingFor = callId
+    await patchVersion(messageId, version.id, snapshot())
+    await new Promise<void>((resolve) => {
+      if (controller.signal.aborted) return resolve()
+      const release = () => {
+        waits.delete(conversation.id)
+        controller.signal.removeEventListener('abort', release)
+        resolve()
+      }
+      waits.set(conversation.id, { callId, release })
+      controller.signal.addEventListener('abort', release)
+    })
+    patch.waitingFor = undefined
+    await patchVersion(messageId, version.id, snapshot())
+  }
+
   const runPart = async (part: ToolPart): Promise<void> => {
+    if (needsOk(part.name, content.filter(isTool))) {
+      await waitForOk(part.callId)
+      // Stop: the end of the run closes this part with the other open ones.
+      if (controller.signal.aborted) return
+    }
     const raw = typeof part.args === 'string' ? part.args : JSON.stringify(part.args)
     const ctx = { conversationId: conversation.id, messageId, callId: part.callId, model: part.model, key, signal: controller.signal }
     const result = await runTool(part.name, raw, ctx, a.enabled)

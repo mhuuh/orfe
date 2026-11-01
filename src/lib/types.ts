@@ -58,6 +58,8 @@ export interface Version {
   editedAt?: number
   /** The reasoning_details of each tool round, stored unchanged. */
   roundReasoning?: unknown[][]
+  /** The step that waits for a visible OK (spec §13). Only counts while the version streams. */
+  waitingFor?: string
 }
 
 export interface Message {

@@ -1,12 +1,15 @@
 import { useEffect, useLayoutEffect, useRef, useState } from 'react'
 import { useLiveQuery } from 'dexie-react-hooks'
+import { ABILITIES } from '../lib/abilities/registry'
 import { isGenerating, replacePromptRef, setPrompt } from '../lib/send'
 import { storage } from '../lib/storage'
 import type { Prompt } from '../lib/types'
+import { SwitchRow } from './ChatSettings'
 import { Sheet } from './Sheet'
 import { openSheet } from './sheetHistory'
 import { useToast } from './Toast'
 import { useUnsavedGate } from './useUnsavedGate'
+import shared from './Settings.module.css'
 import css from './PromptSheet.module.css'
 
 interface Props {
@@ -64,6 +67,11 @@ export function variantParent(p: Prompt, prompts: Prompt[]): string {
 }
 
 const VARIANT_SUFFIX = 'variant'
+
+/** What a prompt stores. With all switches on it stores no set, so its chats read the defaults. */
+export function storedAbilities(switches: Record<string, boolean>): Record<string, boolean> | undefined {
+  return ABILITIES.some((a) => switches[a.id] === false) ? switches : undefined
+}
 
 /** What the editor works on: a saved prompt, or a new one. */
 type Draft = { prompt: Prompt | null; focusName: boolean }
@@ -252,6 +260,7 @@ function Editor({ draft, prompts, conversationId, current, onDone, onOpen, toast
   const saved = draft.prompt
   const [name, setName] = useState(saved?.name ?? '')
   const [text, setText] = useState(saved?.text ?? '')
+  const [switches, setSwitches] = useState(saved?.abilities ?? {})
   const [working, setWorking] = useState(false)
   const nameField = useRef<HTMLInputElement>(null)
   const textField = useRef<HTMLTextAreaElement>(null)
@@ -266,9 +275,11 @@ function Editor({ draft, prompts, conversationId, current, onDone, onOpen, toast
   }, [draft.focusName])
 
   const cleanName = name.trim()
-  const changed = saved === null || cleanName !== saved.name || text !== saved.text
-  // A new prompt counts as edited once anything is typed; a saved one once it differs.
-  const dirty = saved === null ? cleanName !== '' || text.trim() !== '' : changed
+  const abilities = storedAbilities(switches)
+  const sameAbilities = ABILITIES.every((a) => (saved?.abilities?.[a.id] !== false) === (switches[a.id] !== false))
+  const changed = saved === null || cleanName !== saved.name || text !== saved.text || !sameAbilities
+  // A new prompt counts as edited once anything is typed or switched; a saved one once it differs.
+  const dirty = saved === null ? cleanName !== '' || text.trim() !== '' || !sameAbilities : changed
   const { onDirty } = guard
   useEffect(() => {
     onDirty(dirty)
@@ -290,7 +301,7 @@ function Editor({ draft, prompts, conversationId, current, onDone, onOpen, toast
 
   const save = () =>
     act(async () => {
-      if (changed) await storage.savePrompt({ id: saved?.id, name: cleanName, parentId: saved?.parentId ?? null, text })
+      if (changed) await storage.savePrompt({ id: saved?.id, name: cleanName, parentId: saved?.parentId ?? null, text, abilities })
       onDone()
     }, "Couldn't save the prompt.")
 
@@ -302,6 +313,7 @@ function Editor({ draft, prompts, conversationId, current, onDone, onOpen, toast
         name: `${cleanName || saved.name}, ${VARIANT_SUFFIX}`,
         parentId: variantParent(saved, prompts),
         text,
+        abilities,
       })
       onOpen(copy)
     }, "Couldn't make the variant.")
@@ -320,7 +332,7 @@ function Editor({ draft, prompts, conversationId, current, onDone, onOpen, toast
         label: 'Undo',
         run: () => {
           void (async () => {
-            await storage.savePrompt({ id: saved.id, name: saved.name, parentId: saved.parentId, text: saved.text })
+            await storage.savePrompt({ id: saved.id, name: saved.name, parentId: saved.parentId, text: saved.text, abilities: saved.abilities })
             if (wasCurrent) await replacePromptRef(conversationId, null, saved.id)
           })().catch((e: unknown) => {
             console.error(e)
@@ -360,6 +372,23 @@ function Editor({ draft, prompts, conversationId, current, onDone, onOpen, toast
           if (e.key === 'Enter' && (e.ctrlKey || e.metaKey) && canSave) void save()
         }}
       />
+      <div>
+        <h3 className={shared.label}>Abilities</h3>
+        {ABILITIES.map((a) => {
+          const on = switches[a.id] !== false
+          return (
+            <SwitchRow
+              key={a.id}
+              id={`prompt-ability-${a.id}`}
+              label={a.title}
+              hint={a.summary}
+              checked={on}
+              onToggle={() => setSwitches((s) => ({ ...s, [a.id]: !on }))}
+            />
+          )
+        })}
+        <div className={shared.meta}>Chats on this prompt follow these until they set their own.</div>
+      </div>
       {/* Sticky, so Save stays in reach when the keyboard shrinks the sheet. */}
       <div className={css.bar}>
         {guard.asking ? (

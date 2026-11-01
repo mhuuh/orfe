@@ -25,9 +25,11 @@ export function assembleSystem(
 
 /**
  * The system text for this chat and model, with `index` as the note index. A chat with no tools
- * for this model, or with notes off, gets no instructions or no index.
+ * for this model, or with notes off, gets no instructions or no index. A plain chat gets its prompt
+ * and nothing else.
  */
 export function systemText(c: Conversation, prompt: Prompt | null, model: ModelInfo, index: string | null): string | null {
+  if (c.plain) return assembleSystem(prompt?.text ?? null, false)
   const enabled = activeAbilities(c, prompt, model)
   const extras = [abilityInstructions(enabled, model), wantsIndex(enabled) ? index : null]
   return assembleSystem(prompt?.text ?? null, c.capabilityNote, extras)

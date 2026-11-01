@@ -44,4 +44,12 @@ describe('system assembly', () => {
     expect(r.prompt?.id).toBe(p.id)
     expect(r.system).toBe('Hi')
   })
+  it('a plain chat keeps its prompt and drops all the rest', async () => {
+    const p = await storage.savePrompt({ name: 'P', parentId: null, text: 'Hi' })
+    const c = await storage.createConversation()
+    const plain = { ...c, plain: true, capabilityNote: true, notesIndex: 'The index', summaryBlock: 'The story' }
+    const tools = { ...model, tools: true }
+    expect((await systemFor({ ...plain, systemPromptRef: p.id }, tools)).system).toBe('Hi')
+    expect((await systemFor(plain, tools)).system).toBeNull()
+  })
 })

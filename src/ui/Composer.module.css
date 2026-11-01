@@ -84,6 +84,14 @@
   opacity: 1;
 }
 
+/* Sits on the model chip's left edge, just above it. The chip row has no room for a sentence. */
+.notice {
+  margin-bottom: calc(-1 * var(--s2));
+  padding: 0 4px;
+  font: 400 11px/16px var(--font-mono);
+  color: var(--mute);
+}
+
 .tools {
   display: flex;
   align-items: center;

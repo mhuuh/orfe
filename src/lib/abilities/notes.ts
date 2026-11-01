@@ -354,10 +354,11 @@ function describe(part: ToolPart): StepWords {
 export const notesAbility: Ability = {
   id: 'notes',
   title: 'Notes',
-  summary: 'The model keeps notes that last across turns and chats.',
+  summary: 'Read and write the vault',
   tools: TOOLS,
   instructions,
   run: async (name, args, ctx) => run(name, asArgs(args), ctx),
   describe,
   traits: { private: true },
+  writes: ['notes_write', 'notes_edit', 'notes_delete'],
 }

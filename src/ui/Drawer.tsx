@@ -1,4 +1,4 @@
-import { useRef, useState } from 'react'
+import { useEffect, useRef, useState } from 'react'
 import { useLiveQuery } from 'dexie-react-hooks'
 import { deleteChat, restoreChat } from '../lib/send'
 import { backupDue } from '../lib/backup'
@@ -16,13 +16,15 @@ interface Props {
   onSelect: (id: string) => void
   onNew: () => void
   onSettings: () => void
+  /** Goes up when chat settings asks for this chat's notes. */
+  vaultAsked: number
 }
 
 const LONG_PRESS_MS = 450
 
 const TABS = ['Chats', 'Vault'] as const
 
-export function Drawer({ open, onClose, currentId, onSelect, onNew, onSettings }: Props) {
+export function Drawer({ open, onClose, currentId, onSelect, onNew, onSettings, vaultAsked }: Props) {
   const convs = useLiveQuery(() => storage.listConversations(), [], [])
   const toast = useToast()
   const due = useLiveQuery(async () => {
@@ -39,10 +41,18 @@ export function Drawer({ open, onClose, currentId, onSelect, onNew, onSettings }
   const [renameId, setRenameId] = useState<string | null>(null)
   const [draft, setDraft] = useState('')
   const [tab, setTab] = useState<(typeof TABS)[number]>('Chats')
+  /** The ask the vault should scroll for. A tap on a tab clears it. */
+  const [jump, setJump] = useState(0)
   /** Stays set while the sheet slides out, so the note does not blank during the exit. */
   const [noteId, setNoteId] = useState<string | null>(null)
   const [noteOpen, setNoteOpen] = useState(false)
   const press = useRef<{ timer: ReturnType<typeof setTimeout>; fired: boolean } | null>(null)
+
+  useEffect(() => {
+    if (vaultAsked === 0) return
+    setTab('Vault')
+    setJump(vaultAsked)
+  }, [vaultAsked])
 
   const startPress = (id: string) => {
     const p = { fired: false, timer: setTimeout(() => ((p.fired = true), setMenuId(id)), LONG_PRESS_MS) }
@@ -85,7 +95,10 @@ export function Drawer({ open, onClose, currentId, onSelect, onNew, onSettings }
                 className={`${css.tab} ${t === tab ? css.on : ''}`}
                 role="tab"
                 aria-selected={t === tab}
-                onClick={() => setTab(t)}
+                onClick={() => {
+                  setTab(t)
+                  setJump(0)
+                }}
               >
                 {t}
               </button>
@@ -94,6 +107,7 @@ export function Drawer({ open, onClose, currentId, onSelect, onNew, onSettings }
           {vault ? (
             <Vault
               conversationId={currentId}
+              jump={jump}
               onOpen={(id) => {
                 setNoteId(id)
                 setNoteOpen(true)
