@@ -4,6 +4,7 @@ import { db, newId, storage } from './storage'
 import { setAbilitiesForTest, toolsFor, type Ability } from './abilities/registry'
 import { setModelRulesForTest } from './modelRules'
 import { computeCold, deleteChat, errorText, generate, MAX_ROUNDS, patchVersion, isGenerating, recoverInterrupted, replacePromptRef, restoreChat, sendUserMessage, setAlreadyDoneForTest, setPrompt, stop } from './send'
+import { notes, YOU } from './notes/store'
 import { CAPABILITY_NOTE, systemFor } from './system'
 import { fingerprint } from './context'
 import type { ToolPart, Version } from './types'
@@ -87,7 +88,7 @@ async function setup() {
 const lastMsg = async () => (await storage.listMessages(convId)).at(-1)!
 
 beforeEach(async () => {
-  await Promise.all([db.conversations.clear(), db.messages.clear(), db.settings.clear(), db.cache.clear(), db.prompts.clear()])
+  await Promise.all(db.tables.map((t) => t.clear()))
   await setup()
 })
 afterEach(() => {
@@ -1244,6 +1245,141 @@ describe('tool loop: Continue', () => {
     await generate(convId, { kind: 'continue', messageId: m.id }, T)
     expect((await steps())[0]).toMatchObject({ status: 'done', result: 'stored result' })
     expect((await activeVersion()).status).toBe('stopped')
+  })
+
+  /** A tool that writes one chat-shelf note, like `notes_write`. */
+  const writes = (onWrite?: () => void) =>
+    ability(async (_n, _a, ctx) => {
+      await notes.write(
+        { path: 'chat/todo', conversationId: ctx.conversationId },
+        { body: `from ${ctx.callId}`, description: 'A line', isNew: true },
+        { writer: ctx.model, messageId: ctx.messageId, callId: ctx.callId },
+      )
+      onWrite?.()
+      return 'written now'
+    })
+  const todo = () => ({ path: 'chat/todo', conversationId: convId })
+
+  it('the real lookup finds a write from its revision, with path and version', async () => {
+    setAbilitiesForTest([writes()])
+    const m = await cutOff([open('c1', 0)])
+    await notes.write(
+      { path: 'shared/lists/insects', conversationId: convId },
+      { body: 'moth', description: 'A line' },
+      { writer: T.id, messageId: m.id, callId: 'c1' },
+    )
+    const f = stubFetch(() => sse(reply('Finished')))
+    await generate(convId, { kind: 'continue', messageId: m.id }, T)
+    const [part] = await steps()
+    expect(part.status).toBe('done')
+    expect(part.result).toContain('shared/lists/insects')
+    expect(part.result).toContain('version 1')
+    expect(bodyOf(f, 0).messages.find((x) => x.tool_call_id === 'c1')?.content).toBe(part.result)
+    expect(await notes.read(todo())).toBeUndefined()
+  })
+
+  it('the real lookup ignores the same id on another message', async () => {
+    setAbilitiesForTest([writes()])
+    await notes.write(
+      { path: 'shared/old', conversationId: convId },
+      { body: 'x', description: 'A line' },
+      { writer: T.id, messageId: 'other', callId: 'c1' },
+    )
+    stubFetch(() => sse(reply('Finished')))
+    const m = await cutOff([open('c1', 0)])
+    await generate(convId, { kind: 'continue', messageId: m.id }, T)
+    expect((await steps())[0]).toMatchObject({ status: 'done', result: 'written now' })
+    expect(await notes.byCall('c1', m.id)).toBeDefined()
+  })
+
+  it('an open part on a reroll is not taken for a write of an older version', async () => {
+    setAbilitiesForTest([writes()])
+    stubFetch(
+      () => sse(asks(['call_0', 'echo', '{}'])),
+      () => sse(reply('one')),
+      () => sse(asks(['call_0', 'echo', '{}'])),
+      () => sse(reply('two')),
+    )
+    await sendUserMessage(convId, 'go', { reply: true, model: T })
+    const m = await lastMsg()
+    expect(await notes.byCall('call_0', m.id)).toBeDefined()
+    await notes.remove(todo(), YOU)
+
+    // The model reuses the id on the reroll. The new part must not share it.
+    await generate(convId, { kind: 'reroll', messageId: m.id }, T)
+    const [part] = await steps()
+    expect(part.callId).not.toBe('call_0')
+    expect(await notes.read(todo())).toBeDefined()
+
+    // Now say the phone locked before that write landed: Continue must run it.
+    const row = await notes.byCall(part.callId, m.id)
+    await db.noteRevisions.delete(row!.id)
+    await notes.remove(todo(), YOU)
+    await storage.mutateMessage(m.id, (x) => ({
+      ...x,
+      versions: x.versions.map((v, i) =>
+        i === x.activeVersion ? { ...v, status: 'interrupted' as const, content: [{ ...part, status: 'running' as const, result: '' }] } : v,
+      ),
+    }))
+    stubFetch(() => sse(reply('Finished')))
+    await generate(convId, { kind: 'continue', messageId: m.id }, T)
+    expect((await steps())[0]).toMatchObject({ callId: part.callId, status: 'done', result: 'written now' })
+    expect(await notes.byCall(part.callId, m.id)).toBeDefined()
+  })
+
+  it('a write that lands just before Stop does not read as stopped', async () => {
+    setAbilitiesForTest([writes(() => stop(convId))])
+    const f = stubFetch(() => sse(asks(['c1', 'echo', '{}'])), () => sse(reply('no')))
+    await sendUserMessage(convId, 'go', { reply: true, model: T })
+    expect(f).toHaveBeenCalledTimes(1)
+    const [part] = await steps()
+    expect(part.status).toBe('done')
+    expect(part.result).toContain('chat/todo')
+    expect((await activeVersion()).status).toBe('stopped')
+  })
+
+  it('a call that Stop cut before its write stays stopped', async () => {
+    setAbilitiesForTest([
+      ability(async () => {
+        stop(convId)
+        return 'no write'
+      }),
+    ])
+    stubFetch(() => sse(asks(['c1', 'echo', '{}'])))
+    await sendUserMessage(convId, 'go', { reply: true, model: T })
+    expect((await steps())[0]).toMatchObject({ status: 'stopped', result: 'Stopped by the user.' })
+  })
+
+  it('Stop before a Continue starts keeps a write that had landed', async () => {
+    setAbilitiesForTest([writes()])
+    const m = await cutOff([open('c1', 0), open('c2', 0)])
+    await notes.write(
+      { path: 'shared/a', conversationId: convId },
+      { body: 'x', description: 'A line' },
+      { writer: T.id, messageId: m.id, callId: 'c1' },
+    )
+    const f = stubFetch(() => sse(reply('no')))
+    const p = generate(convId, { kind: 'continue', messageId: m.id }, T)
+    stop(convId)
+    await p
+    expect(f).not.toHaveBeenCalled()
+    expect(await steps()).toMatchObject([
+      { callId: 'c1', status: 'done' },
+      { callId: 'c2', status: 'stopped', result: 'Stopped by the user.' },
+    ])
+  })
+
+  it('a failed lookup at Stop is a readable result, not a stopped one', async () => {
+    setAlreadyDoneForTest(async () => {
+      stop(convId)
+      throw new Error('database gone')
+    })
+    stubFetch(() => sse(reply('no')))
+    const m = await cutOff([open('c1', 0)])
+    await generate(convId, { kind: 'continue', messageId: m.id }, T)
+    const [part] = await steps()
+    expect(part.status).toBe('error')
+    expect(part.result).toMatch(/^Error: /)
   })
 
   it('a new call cannot take an id from the reply it continues', async () => {

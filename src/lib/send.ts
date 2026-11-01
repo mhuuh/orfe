@@ -2,6 +2,7 @@ import { enabledAbilities, runTool, toolsFor, type Ability } from './abilities/r
 import { fallbackModelInfo, type ModelInfo } from './catalog'
 import { estimateTokens, fingerprint, isCold, planWindow, ttlFor } from './context'
 import { buildOutgoing, renderRounds } from './normalise'
+import { notes, writeResult } from './notes/store'
 import { mergeReasoning, streamChat, type ChatRequest, type OutMessage, type StreamEvent } from './openrouter'
 import { db, newId, storage } from './storage'
 import { systemFor } from './system'
@@ -28,15 +29,18 @@ const NO_CONNECTION = "Couldn't reach OpenRouter."
 
 /**
  * The stored result of a call that already ran, or null. A Continue asks this for parts left open,
- * so it never runs a write twice. A fresh call is never looked up: it can't have run yet, and a
- * reused id could only give a wrong skip.
+ * so it never runs a write twice, and Stop asks it, so a write that landed does not read as stopped.
+ * A fresh call is never looked up: it can't have run yet, and a reused id could only give a wrong skip.
  */
 export type AlreadyDone = (callId: string, messageId: string) => Promise<string | null>
-const neverDone: AlreadyDone = async () => null
-let alreadyDone = neverDone
+const fromRevisions: AlreadyDone = async (callId, messageId) => {
+  const rev = await notes.byCall(callId, messageId)
+  return rev ? writeResult(rev) : null
+}
+let alreadyDone = fromRevisions
 
 /** Test seam: swap the lookup. Call with no argument to reset. */
-export function setAlreadyDoneForTest(fn: AlreadyDone = neverDone): void {
+export function setAlreadyDoneForTest(fn: AlreadyDone = fromRevisions): void {
   alreadyDone = fn
 }
 
@@ -77,25 +81,32 @@ export function stop(conversationId: string): void {
 export interface ChatSnapshot {
   conversation: Conversation
   messages: Message[]
+  /** The stamp on the chat's notes in Trash. Undo brings back those notes and no others. */
+  notesDeletedAt: number
 }
 
 /**
- * Stops the chat's stream, then deletes it. Returns what Undo puts back, with any
- * streaming version marked stopped (it would otherwise block Reroll/Continue).
+ * Stops the chat's stream, then deletes it and sends its shelf to Trash. Returns what Undo puts
+ * back, with any streaming version marked stopped (it would otherwise block Reroll/Continue).
  */
 export async function deleteChat(id: string): Promise<ChatSnapshot | null> {
   stop(id)
-  const conversation = await storage.getConversation(id)
-  if (!conversation) return null
-  const messages = (await storage.listMessages(id)).map(settled)
-  await storage.deleteConversation(id)
-  return { conversation, messages }
+  return db.transaction('rw', db.conversations, db.messages, db.notes, db.noteRevisions, async () => {
+    const conversation = await storage.getConversation(id)
+    if (!conversation) return null
+    const messages = (await storage.listMessages(id)).map(settled)
+    await storage.deleteConversation(id)
+    const notesDeletedAt = Date.now()
+    await notes.trashShelf(id, notesDeletedAt)
+    return { conversation, messages, notesDeletedAt }
+  })
 }
 
 export async function restoreChat(s: ChatSnapshot): Promise<void> {
-  await db.transaction('rw', db.conversations, db.messages, async () => {
+  await db.transaction('rw', db.conversations, db.messages, db.notes, db.noteRevisions, async () => {
     await db.conversations.put(s.conversation)
     await db.messages.bulkPut(s.messages)
+    await notes.restoreShelf(s.conversation.id, s.notesDeletedAt)
   })
 }
 
@@ -157,8 +168,26 @@ const hasOutput = (content: ContentPart[]): boolean => content.some((p) => isToo
 /** The round after the last one here. Rounds number from 0 inside a reply. */
 const nextRound = (content: ContentPart[]): number => content.reduce((n, p) => (isTool(p) ? Math.max(n, p.round + 1) : n), 0)
 
-const stoppedOpen = (content: ContentPart[]): ContentPart[] =>
-  content.map((p) => (isTool(p) && p.status === 'running' ? { ...p, status: 'stopped' as const, result: STOPPED } : p))
+const resultOf = (result: string): Partial<ToolPart> => ({ status: result.startsWith('Error:') ? 'error' : 'done', result })
+
+/**
+ * How a call ends at Stop. A write that landed just before Stop keeps its result, or the model
+ * repeats it on Continue. A failed lookup gives the model the doubt.
+ */
+async function endAtStop(callId: string, messageId: string): Promise<Partial<ToolPart>> {
+  try {
+    const stored = await alreadyDone(callId, messageId)
+    return stored === null ? { status: 'stopped', result: STOPPED } : resultOf(stored)
+  } catch {
+    return resultOf(UNCHECKED)
+  }
+}
+
+async function stoppedOpen(content: ContentPart[], messageId: string): Promise<ContentPart[]> {
+  const out: ContentPart[] = []
+  for (const p of content) out.push(isTool(p) && p.status === 'running' ? { ...p, ...(await endAtStop(p.callId, messageId)) } : p)
+  return out
+}
 
 /** Bad JSON stays as the raw string, so it can be shown and `runTool` can answer it. */
 function parseArgs(raw: string): unknown {
@@ -495,7 +524,7 @@ async function run(a: RunArgs): Promise<void> {
   }
 
   if (controller.signal.aborted) {
-    await patchVersion(messageId, version.id, { status: 'stopped', content: stoppedOpen(a.initial) })
+    await patchVersion(messageId, version.id, { status: 'stopped', content: await stoppedOpen(a.initial, messageId) })
     return
   }
 
@@ -644,17 +673,29 @@ async function run(a: RunArgs): Promise<void> {
   }
 
   /**
-   * Turns the model's calls into parts. A weak model can send no id, or repeat one from this reply
-   * or an earlier one, and a request needs each id once.
+   * An older version of this reply wrote under this id. A part must not share it: on Continue that
+   * write would pass for this call, and this call's write would be lost. If we can't tell, say yes.
    */
-  const partsFrom = (calls: ToolCall[]): ToolPart[] => {
+  const usedByOldVersion = (id: string): Promise<boolean> =>
+    notes.byCall(id, messageId).then(
+      (rev) => rev !== undefined,
+      () => true,
+    )
+
+  /**
+   * Turns the model's calls into parts. A weak model can send no id, or repeat one from this reply,
+   * an earlier one or an older version of this one, and a request needs each id once.
+   */
+  const partsFrom = async (calls: ToolCall[]): Promise<ToolPart[]> => {
     const history = a.base.flatMap((m) => (m.role === 'assistant' ? (m.tool_calls ?? []).map((c) => c.id) : []))
     const seen = new Set([...history, ...content.filter(isTool).map((p) => p.callId)])
-    return calls.map((c) => {
-      const callId = c.id && !seen.has(c.id) ? c.id : `call_${newId()}`
+    const parts: ToolPart[] = []
+    for (const c of calls) {
+      const callId = c.id && !seen.has(c.id) && !(await usedByOldVersion(c.id)) ? c.id : `call_${newId()}`
       seen.add(callId)
-      return { type: 'tool', callId, round, model: a.model.id, name: c.name, args: parseArgs(c.arguments), result: '', status: 'running' }
-    })
+      parts.push({ type: 'tool', callId, round, model: a.model.id, name: c.name, args: parseArgs(c.arguments), result: '', status: 'running' })
+    }
+    return parts
   }
 
   /** Files this round's reasoning under its number and starts the next round clean. */
@@ -678,14 +719,12 @@ async function run(a: RunArgs): Promise<void> {
     await patchVersion(messageId, version.id, snapshot())
   }
 
-  const resultOf = (result: string): Partial<ToolPart> => ({ status: result.startsWith('Error:') ? 'error' : 'done', result })
-
   const runPart = async (part: ToolPart): Promise<void> => {
     const raw = typeof part.args === 'string' ? part.args : JSON.stringify(part.args)
     const ctx = { conversationId: conversation.id, messageId, callId: part.callId, model: part.model, key, signal: controller.signal }
     const result = await runTool(part.name, raw, ctx, a.enabled)
-    // A stopped tool can hand back any text, so Stop wins over it.
-    await closePart(part.callId, controller.signal.aborted ? { status: 'stopped', result: STOPPED } : resultOf(result))
+    // A stopped tool can hand back any text, so its text does not count.
+    await closePart(part.callId, controller.signal.aborted ? await endAtStop(part.callId, messageId) : resultOf(result))
   }
 
   /** Runs the parts in order, one at a time. Each result is saved as it comes. */
@@ -728,7 +767,7 @@ async function run(a: RunArgs): Promise<void> {
     // Any other finish with calls left them cut off, as with 'length'. Those must not run.
     if (end.calls.length === 0 || (end.reason !== 'tool_calls' && end.reason !== 'stop')) break
 
-    const parts = partsFrom(end.calls)
+    const parts = await partsFrom(end.calls)
     closeRound()
     if (round >= MAX_ROUNDS - 1) {
       content = [...content, ...parts.map((p) => ({ ...p, status: 'error' as const, result: ROUND_LIMIT }))]
@@ -744,7 +783,7 @@ async function run(a: RunArgs): Promise<void> {
   }
 
   const stopped = end?.aborted === true || controller.signal.aborted
-  if (stopped) content = stoppedOpen(content)
+  if (stopped) content = await stoppedOpen(content, messageId)
   const final = snapshot()
   if (end?.reason !== undefined) final.finishReason = end.reason
   if (end && end.errored !== null) {

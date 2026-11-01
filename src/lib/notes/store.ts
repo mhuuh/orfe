@@ -1,0 +1,441 @@
+import { hashText } from '../hash'
+import { db, newId } from '../storage'
+import type { Note, NoteRevision } from '../types'
+import { PROTECTED, checkWrite, nearMatch, shelfOf } from './rules'
+
+/** The note store. With `storage.ts`, this file is the Dexie seam for notes (Ruling P3). */
+
+export interface NoteRef {
+  /** Starts with 'shared/' or 'chat/'. */
+  path: string
+  conversationId: string
+}
+
+export interface WriteInput {
+  body: string
+  description: string
+  tags?: string[]
+  expectedVersion?: number
+  isNew?: boolean
+  shrink?: boolean
+  protected?: boolean
+  supersedes?: string
+}
+
+export interface EditChange {
+  /** Must match once, exactly. Left out or empty with `newText`: insert `newText` at the end. */
+  oldText?: string
+  newText?: string
+  tags?: string[]
+  description?: string
+  expectedVersion: number
+}
+
+export interface Writer {
+  writer: string
+  messageId: string | null
+  callId: string | null
+  runId?: string
+}
+
+export type Result = { ok: Note } | { refused: string }
+
+/** Call ids. `kept` means changed later, so the write stays. A shared-shelf write is in neither list. */
+export interface UndoReport {
+  undone: string[]
+  kept: string[]
+}
+
+export interface NoteStore {
+  /** Follows aliases, skips deleted. */
+  read(ref: NoteRef): Promise<Note | undefined>
+  list(shelf: string): Promise<Note[]>
+  search(shelves: string[], q: string, limit: number): Promise<{ note: Note; snippet: string }[]>
+  write(ref: NoteRef, input: WriteInput, by: Writer): Promise<Result>
+  edit(ref: NoteRef, change: EditChange, by: Writer): Promise<Result>
+  remove(ref: NoteRef, by: Writer): Promise<Result>
+  move(ref: NoteRef, newPath: string, by: Writer): Promise<Result>
+  /** Off is refused unless `by.writer` is 'you'. */
+  setProtected(id: string, on: boolean, by: Writer): Promise<Result>
+  /** Oldest first. */
+  revisions(noteId: string): Promise<NoteRevision[]>
+  revert(revisionId: string, by: Writer): Promise<'done' | 'changed-later'>
+  undoCalls(messageId: string, callIds: string[], shelves: 'chat'): Promise<UndoReport>
+  /** Give the message when you have it: a model can reuse an id across replies. */
+  redoCalls(callIds: string[], messageId?: string): Promise<void>
+  /** The write a call made, never an undo of it. After a redo, that is the redo. */
+  byCall(callId: string, messageId?: string): Promise<NoteRevision | undefined>
+  /** Sends a chat's live notes to Trash, all stamped `deletedAt`. */
+  trashShelf(shelf: string, deletedAt: number): Promise<void>
+  /** Brings back only the notes with that stamp. Notes already in Trash stay there (Ruling P8). */
+  restoreShelf(shelf: string, deletedAt: number): Promise<void>
+}
+
+/** Mikael, acting in the app. */
+export const YOU: Writer = { writer: 'you', messageId: null, callId: null }
+
+const SNIPPET_SIDE = 60
+
+const lower = (s: string): string => s.toLowerCase()
+
+const rw = <T>(fn: () => Promise<T>): Promise<T> => db.transaction('rw', db.notes, db.noteRevisions, fn)
+
+const refuse = (refused: string): Result => ({ refused })
+
+const badPath = (path: string): Result =>
+  refuse(`Error: "${path}" is not a usable path. Start it with shared/ or chat/. Leave out square brackets, and keep it under 200 characters.`)
+
+const missing = (path: string): Result => refuse(`Error: There is no note at ${path}. Use notes_search to find it.`)
+
+/** How a model writes this note's path. */
+const shown = (n: Pick<Note, 'shelf' | 'path'>): string => `${n.shelf === 'shared' ? 'shared' : 'chat'}/${n.path}`
+
+/** Where a note is, in the form `aliases` keeps. */
+const place = (n: Pick<Note, 'shelf' | 'path'>): string => `${n.shelf}/${n.path}`
+
+/** The next state of a note. A write always raises the version, an undo too. */
+function bump(prev: Note, patch: Partial<Note>): Note {
+  const next = { ...prev, ...patch, version: prev.version + 1, updatedAt: Date.now() }
+  return { ...next, bodyHash: hashText(next.body) }
+}
+
+/** Stores a note and its revision. Call inside `rw`. */
+async function commit(before: Note | null, next: Note, by: Writer, undoes?: string): Promise<Note> {
+  await db.notes.put(next)
+  await db.noteRevisions.add({
+    id: newId(),
+    noteId: next.id,
+    version: next.version,
+    before,
+    after: next.deletedAt === null ? next : null,
+    writer: by.writer,
+    messageId: by.messageId,
+    callId: by.callId,
+    runId: by.runId ?? null,
+    at: next.updatedAt,
+    ...(undoes ? { undoes } : {}),
+  })
+  return next
+}
+
+const live = (shelf: string): Promise<Note[]> =>
+  db.notes
+    .where('shelf')
+    .equals(shelf)
+    .filter((n) => n.deletedAt === null)
+    .toArray()
+
+/**
+ * The live note at this place, by path or by an old path, ignoring case. An old path can lead to
+ * another shelf, but never into the shelf of another chat.
+ */
+async function locate(shelf: string, path: string, conversationId: string): Promise<Note | undefined> {
+  const wanted = lower(path)
+  const here = (await live(shelf)).find((n) => lower(n.path) === wanted)
+  if (here) return here
+  const old = lower(`${shelf}/${path}`)
+  return db.notes
+    .filter((n) => n.deletedAt === null && (n.shelf === 'shared' || n.shelf === conversationId) && n.aliases.some((a) => lower(a) === old))
+    .first()
+}
+
+async function find(ref: NoteRef): Promise<Note | undefined> {
+  const at = shelfOf(ref.path, ref.conversationId)
+  return at ? locate(at.shelf, at.path, ref.conversationId) : undefined
+}
+
+/** Whether another live note holds this note's path. */
+async function taken(n: Note): Promise<boolean> {
+  const holder = await locate(n.shelf, n.path, n.shelf)
+  return holder !== undefined && holder.id !== n.id
+}
+
+const history = (noteId: string): Promise<NoteRevision[]> =>
+  db.noteRevisions.where('[noteId+version]').between([noteId, -Infinity], [noteId, Infinity]).toArray()
+
+/** The writes that still count, newest first. An undo and the revision it took back cancel out. */
+function standing(revs: NoteRevision[]): NoteRevision[] {
+  const cancelled = new Set<string>()
+  const writes: NoteRevision[] = []
+  for (const r of [...revs].reverse()) {
+    if (cancelled.has(r.id)) continue
+    if (r.undoes === undefined) writes.push(r)
+    else cancelled.add(r.undoes)
+  }
+  return writes
+}
+
+/** The undo rule: only a note's latest change can be undone. The last row may itself be an undo. */
+const isLatest = (revs: NoteRevision[], rev: NoteRevision): boolean => revs.at(-1)?.id === rev.id || standing(revs)[0]?.id === rev.id
+
+/** Puts a note back as it was before `rev`. False if its path is now taken. Call inside `rw`. */
+async function undo(rev: NoteRevision, by: Writer): Promise<boolean> {
+  const cur = await db.notes.get(rev.noteId)
+  if (!cur) return false
+  const next = bump(cur, rev.before ?? { deletedAt: Date.now() })
+  if (next.deletedAt === null && (await taken(next))) return false
+  await commit(cur, next, by, rev.id)
+  return true
+}
+
+/** All that a reader can see. Version and time do not count. */
+const stateOf = (n: Note): string =>
+  JSON.stringify([n.shelf, n.path, n.aliases, n.description, n.tags, n.body, n.protected, n.supersedes, n.deletedAt !== null])
+
+/**
+ * Applies `rev` again, only while the note is exactly as that write found it: nothing that came
+ * after the undo can be overwritten. A create finds the note in Trash, with its own text.
+ */
+async function redo(rev: NoteRevision): Promise<void> {
+  const cur = await db.notes.get(rev.noteId)
+  if (!cur) return
+  const untouched = rev.before
+    ? stateOf(cur) === stateOf(rev.before)
+    : rev.after !== null && cur.deletedAt !== null && stateOf({ ...cur, deletedAt: null }) === stateOf(rev.after)
+  if (!untouched) return
+  const next = bump(cur, rev.after ?? { deletedAt: Date.now() })
+  if (next.deletedAt === null && (await taken(next))) return
+  await commit(cur, next, { ...YOU, messageId: rev.messageId, callId: rev.callId })
+}
+
+/** A write that goes near the shared shelf stays when a reply is rerolled. */
+const chatOnly = (rev: NoteRevision): boolean => [rev.before, rev.after].every((n) => n?.shelf !== 'shared')
+
+function count(body: string, text: string): number {
+  let n = 0
+  for (let i = body.indexOf(text); i !== -1; i = body.indexOf(text, i + 1)) n++
+  return n
+}
+
+function snippet(note: Note, terms: string[]): string {
+  const body = lower(note.body)
+  const at = terms.map((t) => body.indexOf(t)).find((i) => i !== -1)
+  if (at === undefined) return note.description
+  const from = Math.max(0, at - SNIPPET_SIDE)
+  const part = note.body.slice(from, at + SNIPPET_SIDE).replace(/\s+/g, ' ').trim()
+  return `${from > 0 ? '…' : ''}${part}${at + SNIPPET_SIDE < note.body.length ? '…' : ''}`
+}
+
+/** The tool result for a write that already ran. It comes from the revision (Ruling P5). */
+export function writeResult(rev: NoteRevision): string {
+  const n = rev.after ?? rev.before
+  const path = n ? shown(n) : 'The note'
+  return rev.after ? `Already done: ${path} is at version ${rev.version}.` : `Already done: ${path} is deleted.`
+}
+
+export const notes: NoteStore = {
+  read: find,
+
+  async list(shelf) {
+    return (await live(shelf)).sort((a, b) => a.path.localeCompare(b.path))
+  },
+
+  async search(shelves, q, limit) {
+    const terms = lower(q).split(/\s+/).filter(Boolean)
+    if (terms.length === 0) return []
+    const rows = await db.notes
+      .where('shelf')
+      .anyOf(shelves)
+      .filter((n) => n.deletedAt === null)
+      .toArray()
+    const hits = rows.flatMap((note) => {
+      const label = lower([note.path, note.description, ...note.tags].join(' '))
+      const body = lower(note.body)
+      if (!terms.every((t) => label.includes(t) || body.includes(t))) return []
+      return [{ note, score: terms.filter((t) => label.includes(t)).length }]
+    })
+    hits.sort((a, b) => b.score - a.score || b.note.updatedAt - a.note.updatedAt)
+    return hits.slice(0, limit).map(({ note }) => ({ note, snippet: snippet(note, terms) }))
+  },
+
+  async write(ref, input, by) {
+    const at = shelfOf(ref.path, ref.conversationId)
+    if (!at) return badPath(ref.path)
+    return rw(async () => {
+      const prev = (await locate(at.shelf, at.path, ref.conversationId)) ?? null
+      if (!prev && input.expectedVersion !== undefined) return missing(ref.path)
+      if (!prev && !input.isNew) {
+        const prefix = `${at.shelf}/`
+        const old = (await live(at.shelf)).flatMap((n) => [
+          n.path,
+          ...n.aliases.filter((a) => a.startsWith(prefix)).map((a) => a.slice(prefix.length)),
+        ])
+        const near = nearMatch(at.path, old)
+        if (near !== null) {
+          const name = shown({ shelf: at.shelf, path: near })
+          return refuse(`Error: A note with a close path exists: ${name}. Update that note, or write again with new: true if this one is different.`)
+        }
+      }
+      const refusal = checkWrite(prev, input, by.writer)
+      if (refusal) return refuse(refusal)
+      if (prev && by.writer !== 'you' && input.expectedVersion === undefined) {
+        return refuse(`Error: ${shown(prev)} already exists, at version ${prev.version}. Use notes_read to see it, then write again with expected_version ${prev.version}.`)
+      }
+      const description = input.description.trim()
+      const next: Note = prev
+        ? bump(prev, {
+            body: input.body,
+            description,
+            tags: input.tags ?? prev.tags,
+            protected: input.protected ?? prev.protected,
+            supersedes: input.supersedes ?? prev.supersedes,
+          })
+        : {
+            id: newId(),
+            shelf: at.shelf,
+            path: at.path,
+            aliases: [],
+            description,
+            tags: input.tags ?? [],
+            body: input.body,
+            protected: input.protected ?? false,
+            bodyHash: hashText(input.body),
+            version: 1,
+            supersedes: input.supersedes ?? null,
+            updatedAt: Date.now(),
+            deletedAt: null,
+          }
+      return { ok: await commit(prev, next, by) }
+    })
+  },
+
+  async edit(ref, change, by) {
+    return rw(async () => {
+      const prev = await find(ref)
+      if (!prev) return missing(ref.path)
+      const { oldText = '', newText, expectedVersion } = change
+      const changesText = oldText !== '' || newText !== undefined
+      if (!changesText && change.tags === undefined && change.description === undefined) {
+        return refuse('Error: This edit changes nothing. Give old_text and new_text, or tags, or a description.')
+      }
+      if (changesText && prev.protected && by.writer !== 'you') return refuse(PROTECTED)
+      const description = change.description ?? prev.description
+      // The writer 'you' has only the version and description checks: those two apply to every edit.
+      const first = checkWrite(prev, { body: prev.body, description, expectedVersion }, 'you')
+      if (first) return refuse(first)
+
+      let body = prev.body
+      if (oldText !== '') {
+        const n = count(body, oldText)
+        if (n === 0) return refuse('Error: The old text was not found. Use notes_read to get the exact text, then edit again.')
+        if (n > 1) return refuse(`Error: The old text appears ${n} times. Add more of the text around it, so that it matches once.`)
+        const i = body.indexOf(oldText)
+        body = body.slice(0, i) + (newText ?? '') + body.slice(i + oldText.length)
+      } else if (newText !== undefined) {
+        body = body === '' || body.endsWith('\n') ? body + newText : `${body}\n${newText}`
+      }
+      if (changesText) {
+        // No shrink guard here. It catches a whole-note replace built from a part of a note. An edit
+        // must quote each letter that it removes, so a big cut can't be an accident.
+        const size = checkWrite(prev, { body, description, shrink: true }, by.writer)
+        if (size) return refuse(size)
+      }
+      return { ok: await commit(prev, bump(prev, { body, description: description.trim(), tags: change.tags ?? prev.tags }), by) }
+    })
+  },
+
+  async remove(ref, by) {
+    return rw(async () => {
+      const prev = await find(ref)
+      if (!prev) return missing(ref.path)
+      if (prev.protected && by.writer !== 'you') return refuse(PROTECTED)
+      return { ok: await commit(prev, bump(prev, { deletedAt: Date.now() }), by) }
+    })
+  },
+
+  async move(ref, newPath, by) {
+    const to = shelfOf(newPath, ref.conversationId)
+    if (!to) return badPath(newPath)
+    return rw(async () => {
+      const prev = await find(ref)
+      if (!prev) return missing(ref.path)
+      const holder = await locate(to.shelf, to.path, ref.conversationId)
+      if (holder && holder.id !== prev.id) return refuse(`Error: That path belongs to ${shown(holder)}. Pick another path.`)
+      if (prev.shelf === to.shelf && prev.path === to.path) return { ok: prev }
+      const here = lower(place(to))
+      const aliases = [...prev.aliases, place(prev)].filter((a) => lower(a) !== here)
+      return { ok: await commit(prev, bump(prev, { ...to, aliases }), by) }
+    })
+  },
+
+  async setProtected(id, on, by) {
+    return rw(async () => {
+      const prev = await db.notes.get(id)
+      if (!prev || prev.deletedAt !== null) return refuse('Error: This note is gone. Use notes_search to find it.')
+      if (!on && by.writer !== 'you') return refuse('Error: Only Mikael can clear protection. Move or tag this note, or write a new note that links to it.')
+      if (prev.protected === on) return { ok: prev }
+      return { ok: await commit(prev, bump(prev, { protected: on }), by) }
+    })
+  },
+
+  revisions: history,
+
+  async revert(revisionId, by) {
+    return rw(async () => {
+      const rev = await db.noteRevisions.get(revisionId)
+      if (!rev || !isLatest(await history(rev.noteId), rev)) return 'changed-later'
+      return (await undo(rev, by)) ? 'done' : 'changed-later'
+    })
+  },
+
+  async undoCalls(messageId, callIds) {
+    return rw(async () => {
+      const report: UndoReport = { undone: [], kept: [] }
+      const found: NoteRevision[] = []
+      for (const id of new Set(callIds)) {
+        const rev = await notes.byCall(id, messageId)
+        if (rev && chatOnly(rev)) found.push(rev)
+      }
+      // Newest first: a reply that wrote one note twice undoes back through both.
+      found.sort((a, b) => b.at - a.at || b.version - a.version)
+      for (const rev of found) {
+        const revs = await history(rev.noteId)
+        // Already undone: say nothing, or a redo would bring back what Mikael took out.
+        if (!standing(revs).some((r) => r.id === rev.id)) continue
+        const done = isLatest(revs, rev) && (await undo(rev, YOU))
+        ;(done ? report.undone : report.kept).push(rev.callId as string)
+      }
+      return report
+    })
+  },
+
+  async redoCalls(callIds, messageId) {
+    await rw(async () => {
+      const found: NoteRevision[] = []
+      for (const id of new Set(callIds)) {
+        const rev = await notes.byCall(id, messageId)
+        if (rev) found.push(rev)
+      }
+      found.sort((a, b) => a.at - b.at || a.version - b.version)
+      for (const rev of found) await redo(rev)
+    })
+  },
+
+  async byCall(callId, messageId) {
+    const rows = await db.noteRevisions.where('callId').equals(callId).toArray()
+    return rows
+      .filter((r) => r.undoes === undefined && (messageId === undefined || r.messageId === messageId))
+      .sort((a, b) => a.at - b.at || a.version - b.version)
+      .at(-1)
+  },
+
+  async trashShelf(shelf, deletedAt) {
+    await rw(async () => {
+      for (const n of await live(shelf)) await commit(n, bump(n, { deletedAt }), YOU)
+    })
+  },
+
+  async restoreShelf(shelf, deletedAt) {
+    await rw(async () => {
+      const rows = await db.notes
+        .where('shelf')
+        .equals(shelf)
+        .filter((n) => n.deletedAt === deletedAt)
+        .toArray()
+      for (const n of rows) {
+        const last = (await history(n.id)).at(-1)
+        if (last?.after === null) await undo(last, YOU)
+      }
+    })
+  },
+}

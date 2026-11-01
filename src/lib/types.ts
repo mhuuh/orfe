@@ -129,6 +129,7 @@ export interface Note {
   shelf: string
   /** Like 'lists/insects'. Unique per shelf, ignoring case. */
   path: string
+  /** Old places of a moved note, as '<shelf>/<path>'. Lookups follow them, ignoring case. */
   aliases: string[]
   /** One line. Required. Shown in the index. */
   description: string
@@ -158,6 +159,8 @@ export interface NoteRevision {
   callId: string | null
   /** Set for a tidy run. */
   runId: string | null
+  /** This row is an undo: the id of the revision it took back. */
+  undoes?: string
   at: number
 }
 

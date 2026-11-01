@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest'
 import type { Note } from '../types'
-import { MAX_BODY, checkWrite, nearMatch, normalisePath, shelfOf } from './rules'
+import { MAX_BODY, MAX_PATH, checkWrite, nearMatch, normalisePath, shelfOf } from './rules'
 
 function note(over: Partial<Note> = {}): Note {
   return {
@@ -20,6 +20,15 @@ describe('paths', () => {
     expect(shelfOf('shared/', 'c1')).toBeNull()
     expect(shelfOf('chat/../shared/a', 'c1')).toBeNull()
     expect(shelfOf('', 'c1')).toBeNull()
+  })
+
+  it('refuses control characters, brackets and very long paths', () => {
+    expect(shelfOf('shared/a\nb', 'c1')).toBeNull()
+    expect(shelfOf('shared/a\u0000b', 'c1')).toBeNull()
+    expect(shelfOf('shared/a[b', 'c1')).toBeNull()
+    expect(shelfOf('shared/a]b', 'c1')).toBeNull()
+    expect(shelfOf(`shared/${'a'.repeat(MAX_PATH)}`, 'c1')).toBeNull()
+    expect(shelfOf(`shared/${'a'.repeat(MAX_PATH - 'shared/'.length)}`, 'c1')).not.toBeNull()
   })
 
   it('allows Finnish characters in paths', () => {
@@ -44,6 +53,28 @@ describe('nearMatch', () => {
     expect(nearMatch('lists/bard', existing)).toBeNull()
     expect(nearMatch('other/insects', existing)).toBeNull()
     expect(nearMatch('recipes/week-2', existing)).toBeNull()
+  })
+
+  it('does not take different words for typos', () => {
+    const pairs = [
+      ['bread', 'break'],
+      ['spring', 'string'],
+      ['kirje', 'kirja'],
+      ['news', 'new'],
+      ['insights', 'insects'],
+      ['kurkku', 'kurpitsa'],
+      ['chapter-1', 'chapter-2'],
+    ]
+    for (const [a, b] of pairs) {
+      expect(nearMatch(`x/${a}`, [`x/${b}`])).toBeNull()
+      expect(nearMatch(`x/${b}`, [`x/${a}`])).toBeNull()
+    }
+  })
+
+  it('allows one typo from 8 letters up, and never two', () => {
+    expect(nearMatch('x/mushroom', ['x/mushrooo'])).toBe('x/mushrooo')
+    expect(nearMatch('x/mushroom', ['x/mushraam'])).toBeNull()
+    expect(nearMatch('x/pancake', ['x/pancakw'])).toBeNull()
   })
 })
 

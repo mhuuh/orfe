@@ -4,6 +4,10 @@ import type { Note } from '../types'
 export const MAX_BODY = 8000
 /** A replace may remove at most this share of the old body. */
 export const SHRINK_LIMIT = 0.5
+/** Longest path, with its shelf prefix. */
+export const MAX_PATH = 200
+/** Refusal for a text change to a protected note. */
+export const PROTECTED = 'Error: This note is protected. Move or tag it, or write a new note that links to it.'
 
 /**
  * Tidy a path: one slash between parts, none at the ends, NFC form.
@@ -21,10 +25,13 @@ export function normalisePath(p: string): string {
 
 /**
  * Map 'shared/x' or 'chat/x' to a shelf and the path without its prefix.
- * Returns null for any other prefix, an empty rest, or a '..' part.
+ * Returns null for any other prefix, an empty rest, a '..' part, a control character, a square
+ * bracket (it would break a [[link]]), or a path over MAX_PATH.
  */
 export function shelfOf(path: string, conversationId: string): { shelf: string; path: string } | null {
-  const parts = normalisePath(path).split('/')
+  const whole = normalisePath(path)
+  if (whole.length > MAX_PATH || /[\p{Cc}[\]]/u.test(whole)) return null
+  const parts = whole.split('/')
   const head = parts[0]?.toLowerCase()
   const rest = parts.slice(1)
   if (rest.length === 0 || rest.includes('..')) return null
@@ -33,9 +40,10 @@ export function shelfOf(path: string, conversationId: string): { shelf: string; 
   return null
 }
 
+/** Drops a plural 's'. Short words keep it: 'news' is not 'new'. */
 function stem(s: string): string {
   const k = s.toLowerCase()
-  return k.length > 3 && k.endsWith('s') && !k.endsWith('ss') ? k.slice(0, -1) : k
+  return k.length > 4 && k.endsWith('s') && !k.endsWith('ss') ? k.slice(0, -1) : k
 }
 
 function distance(a: string, b: string): number {
@@ -52,11 +60,15 @@ function distance(a: string, b: string): number {
 
 const digits = (s: string) => s.replace(/\D+/g, ' ').trim()
 
+const MIN_TYPO_LETTERS = 8
+
 /**
  * Find an existing path that is probably the same note: same folder, and a last part that
- * differs only by case, a final plural 's', or a small typo (none under 5 letters, one under 9,
- * else two). Paths that differ in their numbers ('week-1', 'week-2') never match.
- * A false hit costs the model a retry. A miss costs a duplicate note. So we lean strict.
+ * differs only by case, a final plural 's', or one typo (from MIN_TYPO_LETTERS up: shorter words
+ * one letter apart are usually different words, like 'bread' and 'break').
+ * Paths that differ in their numbers ('week-1', 'week-2') never match.
+ * A false hit costs the model a retry. A miss costs a duplicate note. Tidying can merge a
+ * duplicate later, so we lean towards a miss.
  */
 export function nearMatch(path: string, existing: string[]): string | null {
   const split = (p: string) => {
@@ -73,9 +85,7 @@ export function nearMatch(path: string, existing: string[]): string | null {
     const haveStem = stem(have.last)
     if (haveStem === wantStem) return e
     if (digits(haveStem) !== digits(wantStem)) continue
-    const n = Math.max(haveStem.length, wantStem.length)
-    const limit = n < 5 ? 0 : n < 9 ? 1 : 2
-    if (limit > 0 && distance(haveStem, wantStem) <= limit) return e
+    if (Math.max(haveStem.length, wantStem.length) >= MIN_TYPO_LETTERS && distance(haveStem, wantStem) <= 1) return e
   }
   return null
 }
@@ -96,7 +106,7 @@ export function checkWrite(
   writer: string,
 ): string | null {
   if (prev?.protected && writer !== 'you') {
-    return 'Error: This note is protected. Move or tag it, or write a new note that links to it.'
+    return PROTECTED
   }
   if (prev && next.isNew) {
     return `Error: A note already exists at ${prev.path}. Use notes_read to see it, then update it or pick another path.`
