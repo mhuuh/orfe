@@ -1,5 +1,5 @@
 import Dexie, { type EntityTable } from 'dexie'
-import type { Conversation, Message, Prompt } from './types'
+import type { Conversation, Message, Note, NoteRevision, Prompt, Summary } from './types'
 
 export interface KvRow {
   k: string
@@ -13,6 +13,9 @@ class OrfeDb extends Dexie {
   settings!: EntityTable<KvRow, 'k'>
   cache!: EntityTable<KvRow, 'k'>
   prompts!: EntityTable<Prompt, 'id'>
+  notes!: EntityTable<Note, 'id'>
+  noteRevisions!: EntityTable<NoteRevision, 'id'>
+  summaries!: EntityTable<Summary, 'id'>
 
   constructor() {
     super('orfe')
@@ -24,6 +27,11 @@ class OrfeDb extends Dexie {
     })
     // New fields on old rows get their defaults on read (storage.ts), so no upgrade function.
     this.version(2).stores({ prompts: 'id, parentId' })
+    this.version(3).stores({
+      notes: 'id, shelf, [shelf+path], deletedAt',
+      noteRevisions: 'id, noteId, callId, [noteId+version]',
+      summaries: 'id, conversationId, [conversationId+level]',
+    })
     // Another tab opened a newer schema. Dexie's own handler runs first: it closes this connection
     // (so the upgrade is not blocked) and keeps auto-open on, so the next query would reopen the db.
     // Our close() turns auto-open off: this tab runs code for the old schema, so it stops reading and

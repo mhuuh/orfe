@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import type { Message, Version } from './types'
+import type { Message, ToolPart, Version } from './types'
 import { editedVersion, settled, versionText, withActive, withNewVersion, withoutActiveVersion, withVersionAt } from './versions'
 
 const v = (id: string, text = id): Version => ({
@@ -74,5 +74,23 @@ describe('versions', () => {
     const s = settled(m)
     expect(s.versions.map((x) => x.status)).toEqual(['done', 'stopped'])
     expect(settled(msg([v('a')]))).toEqual(msg([v('a')]))
+  })
+
+  const tool: ToolPart = {
+    type: 'tool', callId: 'c1', round: 1, model: 'a/m', name: 'note_read', args: { path: 'x' }, result: 'ok', status: 'done',
+  }
+
+  it('editedVersion keeps ToolParts and puts the one text part after them', () => {
+    const src: Version = {
+      ...v('a'),
+      content: [{ type: 'text', text: 'one' }, tool, { type: 'media', blobId: 'b', mime: 'image/png' }, { type: 'text', text: 'two' }],
+    }
+    const e = editedVersion(src, 'new')
+    expect(e.content).toEqual([tool, { type: 'media', blobId: 'b', mime: 'image/png' }, { type: 'text', text: 'new' }])
+  })
+
+  it('versionText ignores ToolParts', () => {
+    const src: Version = { ...v('a'), content: [{ type: 'text', text: 'a' }, tool, { type: 'text', text: 'b' }] }
+    expect(versionText(src)).toBe('ab')
   })
 })

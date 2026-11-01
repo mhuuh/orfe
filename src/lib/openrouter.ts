@@ -34,6 +34,7 @@ export interface RawModel {
   pricing: { prompt: string; completion: string }
   architecture: { input_modalities: string[]; output_modalities: string[] }
   reasoning?: { supported_efforts?: string[]; default_effort?: string }
+  supported_parameters?: string[]
 }
 
 /** Attribution headers for every call. `json` adds Content-Type, for requests with a JSON body only. */

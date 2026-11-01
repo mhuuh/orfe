@@ -22,6 +22,7 @@ function model(id: string, extra: Partial<ModelInfo> = {}): ModelInfo {
     efforts: null,
     defaultEffort: null,
     free: false,
+    tools: false,
     ...extra,
   }
 }

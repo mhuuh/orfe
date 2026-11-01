@@ -13,6 +13,8 @@ export interface ModelInfo {
   efforts: string[] | null
   defaultEffort: string | null
   free: boolean
+  /** The model can take a tools list. */
+  tools: boolean
   /** True for a stand-in: the id is not in the catalog we have (not loaded yet, offline, retired). */
   unlisted?: boolean
 }
@@ -31,11 +33,15 @@ export function fallbackModelInfo(id: string): ModelInfo {
     efforts: null,
     defaultEffort: null,
     free: false,
+    tools: false,
     unlisted: true,
   }
 }
 
-const CACHE_KEY = 'catalog'
+// The key carries the row's shape. A row saved before `tools` sits under 'catalog' and is never read,
+// so it cannot pass as "no tools". Bump the suffix when ModelInfo changes.
+export const CATALOG_CACHE_KEY = 'catalog.v2'
+const CACHE_KEY = CATALOG_CACHE_KEY
 const MAX_AGE = 60 * 60 * 1000
 const NON_CHAT = new Set(['embeddings', 'rerank', 'decisions', 'transcription'])
 
@@ -66,6 +72,7 @@ export function toModelInfo(raw: RawModel): ModelInfo {
     defaultEffort: raw.reasoning?.default_effort ?? null,
     free:
       (isZeroPrice(raw.pricing?.prompt) && isZeroPrice(raw.pricing?.completion)) || raw.id.endsWith(':free'),
+    tools: raw.supported_parameters?.includes('tools') ?? false,
   }
 }
 

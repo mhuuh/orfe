@@ -26,6 +26,8 @@ function mapPart(part: ContentPart, opts: BuildOptions): OutPart | null {
   if (part.type === 'text') {
     return part.text.trim() === '' ? null : { type: 'text', text: part.text }
   }
+  // Tool steps are not sent yet. The tool loop (a later task) renders them.
+  if (part.type === 'tool') return null
   if (part.mime.startsWith('image/') && opts.inputModalities.includes('image')) {
     const url = opts.blobUrl(part.blobId)
     if (url) return { type: 'image_url', image_url: { url } }

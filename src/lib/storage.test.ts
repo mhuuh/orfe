@@ -85,7 +85,7 @@ describe('storage', () => {
     expect(await storage.listMessages(other.id)).toHaveLength(1)
   })
 
-  it('settings have defaults: streaming true, themeMode system, key null', async () => {
+  it('settings have defaults: tidying true, summary and tidy models, zero vault usage', async () => {
     expect(await storage.getSettings()).toEqual({
       key: null,
       streaming: true,
@@ -93,6 +93,10 @@ describe('storage', () => {
       context: { mode: 'tokens', limit: 32000, trimTo: 0.7 },
       anthropicCacheHour: false,
       lastBackupAt: null,
+      tidying: true,
+      summaryModel: 'google/gemini-3.1-flash-lite',
+      tidyModel: 'anthropic/claude-sonnet-5.5',
+      vaultUsage: { promptTokens: 0, completionTokens: 0, cachedTokens: 0, cacheWriteTokens: 0, reasoningTokens: 0, cost: 0 },
       defaultModel: 'anthropic/claude-sonnet-5.5',
     })
     await storage.setSettings({ streaming: false, key: 'k' })
@@ -214,6 +218,43 @@ describe('raising the context limit lets a trimmed window grow back', () => {
     expect(await windowOf(inherits.id)).toEqual(cleared)
     expect(await windowOf(v1.id)).toEqual(cleared)
     expect(await windowOf(custom.id)).toEqual(start)
+  })
+})
+
+describe('schema v3 and vault defaults', () => {
+  it('old rows read with abilities null, plain false, notesIndex null, summaryBlock null', async () => {
+    const c = await storage.createConversation()
+    const { abilities: _a, plain: _p, notesIndex: _n, summaryBlock: _s, ...old } = c
+    await db.conversations.put(old as typeof c)
+    for (const got of [await storage.getConversation(c.id), (await storage.listConversations())[0]]) {
+      expect(got?.abilities).toBeNull()
+      expect(got?.plain).toBe(false)
+      expect(got?.notesIndex).toBeNull()
+      expect(got?.summaryBlock).toBeNull()
+    }
+    const seen: unknown[] = []
+    await storage.mutateConversation(c.id, (x) => {
+      seen.push(x.abilities, x.plain, x.notesIndex, x.summaryBlock)
+      return {}
+    })
+    expect(seen).toEqual([null, false, null, null])
+  })
+
+  it('a new conversation has the vault fields', async () => {
+    const c = await storage.createConversation()
+    expect([c.abilities, c.plain, c.notesIndex, c.summaryBlock]).toEqual([null, false, null, null])
+  })
+
+  it('the new tables exist and take rows', async () => {
+    await db.notes.add({
+      id: 'n', shelf: 'shared', path: 'a/b', aliases: [], description: 'd', tags: [], body: '', protected: false,
+      bodyHash: 'h', version: 1, supersedes: null, updatedAt: 1, deletedAt: null,
+    })
+    await db.noteRevisions.add({ id: 'r', noteId: 'n', version: 1, before: null, after: null, writer: 'you', messageId: null, callId: null, runId: null, at: 1 })
+    await db.summaries.add({ id: 's', conversationId: 'c', level: 0, fromOrder: 1, toOrder: 2, sourceHash: 'h', text: 't', model: 'm', stale: false, editedByYou: false })
+    expect(await db.notes.where('[shelf+path]').equals(['shared', 'a/b']).count()).toBe(1)
+    expect(await db.noteRevisions.where('[noteId+version]').equals(['n', 1]).count()).toBe(1)
+    expect(await db.summaries.where('[conversationId+level]').equals(['c', 0]).count()).toBe(1)
   })
 })
 
