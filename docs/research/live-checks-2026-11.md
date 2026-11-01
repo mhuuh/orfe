@@ -24,8 +24,8 @@ These are the six tests from spec section 15 of the vault design. They ran with 
 | 1 | | gpt-5.6-luna | Passed. Prefix before the change: 5,016. After the strip, cached 5,013. Control 6,217 of 6,220. | Same. |
 | 1 | | gemini-3.1-flash-lite | Partly. Prefix 5,296. After the strip, cached 4,005 (4,005 again in a second run). Control 6,038 of 6,492. | Unclear. This provider caches in coarse steps. A normal repeat turn here only cached 4,025. The strip did no worse than that. |
 | 1 | | deepseek-v4-flash | Depends on the provider. On Relace (run 1, with an older padding) cached 6,400 of a 6,441 prefix. On Venice, cached 0 in two runs, while the control cached 6,400. | Unclear. Some DeepSeek hosts keep nothing after a mid-history change. The cost is small (see below). |
-| 2 | DeepSeek with tools: which field keeps reasoning valid | deepseek-v4-flash, deepseek-v3.2 | No variant failed. I tried: no reasoning, `reasoning`, `reasoning_details`, both, `reasoning_content`. Each was tried inside the tool turn and on the next user turn. All returned 200. | No field is required through OpenRouter on the hosts I reached. Send back `reasoning_details` unchanged during the tool turn, as the spec says. See the caveat below. |
-| 3 | Foreign reasoning (switch model, stored reasoning from another provider still attached) | all 12 pairs among the four models (reasoning kept on the steps) | All 200. All made a tool call when asked. | Not an error. But the prompt size was the same with and without the foreign reasoning. So OpenRouter drops it. Dropping it ourselves is safe and loses nothing. |
+| 2 | DeepSeek with tools: which field keeps reasoning valid | deepseek-v4-flash, deepseek-v3.2 | No variant failed. I tried: no reasoning, `reasoning`, `reasoning_details`, both, `reasoning_content`. Each was tried inside the tool turn and on the next user turn. All returned 200. | No field was needed on the hosts I reached. Send back `reasoning_details` unchanged during the tool turn, as the spec says. First-party DeepSeek was not reached, so this is not proven for it. See the caveat below. |
+| 3 | Foreign reasoning (switch model, stored reasoning from another provider still attached) | all 12 pairs among the four models (reasoning kept on the steps) | All 200. All made a tool call when asked. | No error. Prompt sizes with and without the foreign reasoning were equal in 11 of 12 pairs (one differed by 4 tokens; numbers below). That suggests OpenRouter drops it, but this is a guess. |
 | 4 | Tool messages after a switch: raw steps with foreign ids, plus `tools` | same 12 pairs | All 200. All made a tool call when asked. | Raw steps with foreign call ids work on all four. Flattening is a choice, not a need. |
 | 4 | Same, steps flattened to plain text, plus `tools` | same 12 pairs | All 200. All made a tool call when asked. | Flattening works everywhere, as the spec expects. |
 | 5 | One word changed in a tool description | haiku-5.5 | Cached 9,661 -> 0. | Tools are in the prefix. A changed description makes the whole prefix cold. |
@@ -34,8 +34,8 @@ These are the six tests from spec section 15 of the vault design. They ran with 
 | 5 | | deepseek-v4-flash | Three runs: 7,680 -> 0 (Relace), 6,400 -> 4,864 (Venice), 6,400 -> 0 (Venice). | Same, with one odd partial hit. Treat tools as part of the prefix. |
 | 6 | Dropped reasoning after a finished tool turn | haiku-5.5 | No error. The round had 226 reasoning tokens. Next turn without them: prompt 9,862, cached 9,695. Control repeat cached 9,858. | A small tail miss, as planned. Everything up to the end of the tool turn's first request stayed cached. About 167 tokens were paid again. |
 | 6 | | gpt-5.6-luna | No error. Prompt 6,333, cached 6,250. Repeat cached 6,330. | Tail miss of about 80 tokens. |
-| 6 | | gemini-3.1-flash-lite | No error. Prompt 6,576, cached 6,015, same as with reasoning kept (6,015). | No extra miss from dropping. |
-| 6 | | deepseek-v4-flash | No error. Prompt 6,737, cached 6,144, same as with reasoning kept (6,144). | No extra miss from dropping. |
+| 6 | | gemini-3.1-flash-lite | No error. Prompt 6,576, cached 6,015, same as with reasoning kept (6,015). The repeat never hit higher. | No error. Not distinguishable from kept at this step size. |
+| 6 | | deepseek-v4-flash | No error. Prompt 6,737, cached 6,144, same as with reasoning kept (6,144). The repeat never hit higher. | No error. Not distinguishable from kept at this step size. |
 
 ## Raw numbers
 
@@ -52,6 +52,8 @@ Format: `prompt / cached`. `through-u1` is the prompt size of the first request 
 | gpt-5.6-luna | 5,016 | 6,220 / 6,196 | 6,220 / 6,217 | 5,137 / 5,013 |
 | gemini-3.1-flash-lite | 5,296 | 6,492 / 4,025 | 6,492 / 6,038 | 5,373 / 4,005 |
 | gemini-3.1-flash-lite (run 4) | 5,298 | 6,496 / 4,025 | 6,496 / 6,038 | 5,377 / 4,005 |
+
+**Check 3 prompt tokens** (reasoning kept / reasoning dropped; source -> target): haiku->deepseek 6,510/6,510; haiku->gpt 6,249/6,249; haiku->gemini 6,517/6,517; deepseek->haiku 9,672/9,672; deepseek->gpt 6,240/6,240; deepseek->gemini 6,508/6,508; gpt->haiku 9,661/9,661; gpt->deepseek 6,494/6,494; gpt->gemini 6,501/6,501; gemini->haiku 9,666/9,666; gemini->deepseek 6,499/6,495; gemini->gpt 6,237/6,237.
 
 **Check 5** (control, then the changed description)
 
@@ -89,17 +91,17 @@ An earlier check 6 run (run 3) used a plainer prompt and haiku produced no reaso
 - **DeepSeek first-party.** DeepSeek's own API is said to require `reasoning_content` back after a tool turn. I could not reach it. The five hosts I did reach accepted every variant, including none. If a user pins a model to a host that is stricter, the fallback in spec section 15 applies: keep reasoning on that model until the next trim.
 - **Whether the model uses the reasoning it gets back.** The tests show only that there is no error, and what the cache does. They do not show answer quality.
 - **Gemini and DeepSeek strip results** vary by host and by moment. Three runs on Gemini agreed (4,005). Three runs on DeepSeek disagreed (6,400, 0, 0).
-- **Rule 4 below** rests on prompt sizes being equal. I read that as "OpenRouter dropped it". The response does not say so.
+- **Check 3 and rule 4** rest on "no error". The "OpenRouter drops it" reading comes from equal prompt sizes only. The response does not say so.
 
 ## Rules for modelRules.ts
 
 The interface is `ModelRule { keepReasoning?: true; noTools?: true; flattenAll?: true }`.
 
-1. **No model needs `keepReasoning`.** All four models, and `deepseek-v3.2`, accept a next turn without reasoning. Do not add a DeepSeek entry on this evidence. Add the entry later only if a real error shows up.
+1. **No `keepReasoning` entry is proven needed on the tested hosts.** Five DeepSeek hosts accepted a next turn with no reasoning. First-party DeepSeek was never reached, so it is untested. `keepReasoning` stays in the `ModelRule` interface, and the mechanism must ship, so an entry can be added in one line.
 2. **No model needs `noTools`.** All four models call the tool and handle tool results.
 3. **No model needs `flattenAll`.** Raw steps with foreign call ids work on all four, and flattened steps work on all four. Keep the spec's design: flatten steps made by other models. It is safe and it is not required.
-4. **Foreign reasoning can always be left out.** It was never an error, and it did not change the prompt size. So sending nothing is correct.
+4. **Foreign reasoning can always be left out.** It was never an error. That alone supports sending nothing.
 5. **Keep tools frozen.** A one-word change in a tool description made the cache go cold on every provider. This confirms spec section 7: one stored tools string, changed only at a toggle.
-6. **Strip soon stays on.** It passed on Anthropic and OpenAI. It did no worse than a normal turn on Gemini. On some DeepSeek hosts a strip costs the whole prompt, about 6,000 tokens. At DeepSeek's price that is a fraction of a cent. Spec section 15 says to strip only at trims "if not". I judge the cost too small to add a rule for it. If Mikael disagrees, the rule needs a new field, because `ModelRule` has none for this.
-7. **Dropping reasoning after a finished tool turn is safe on all four.** The cost is a tail miss of roughly 80 to 170 tokens on Anthropic and OpenAI, and nothing extra on Gemini and DeepSeek.
+6. **Strip soon stays on.** It passed on Anthropic and OpenAI. It did no worse than a normal turn on Gemini. On some DeepSeek hosts a strip costs the whole prompt, about 6,000 tokens. At deepseek-v4-flash prices ($0.091 per million input tokens uncached, $0.0182 cached), 6,400 missed tokens cost 6,400 x ($0.091 - $0.0182) / 1,000,000 = about $0.0005 extra per strip. Spec section 15 says to strip only at trims "if not". I judge the cost too small to add a rule for it. If Mikael disagrees, the rule needs a new field, because `ModelRule` has none for this.
+7. **Dropping reasoning after a finished tool turn is safe on all four.** The cost is a tail miss of roughly 80 to 170 tokens on Anthropic and OpenAI, and not distinguishable from keeping reasoning on Gemini and DeepSeek at their coarse cache step size (no error on any).
 8. **Treat HTTP 200 with `finish_reason: content_filter` and no content as a failure.** (Not a `ModelRule`; it belongs in the send loop.)
