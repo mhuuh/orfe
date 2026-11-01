@@ -1,13 +1,14 @@
 import { useEffect, useMemo, useRef, useState, type FormEvent, type MouseEvent } from 'react'
 import { useLiveQuery } from 'dexie-react-hooks'
 import { renderMarkdown } from '../lib/markdown'
-import { noteName, sameWords, shownPath } from '../lib/notes/rules'
-import { notes, refOf, YOU } from '../lib/notes/store'
+import { normalisePath, noteName, sameWords, shownPath } from '../lib/notes/rules'
+import { notes, refOf, YOU, type NoteRef } from '../lib/notes/store'
 import type { Note, NoteRevision } from '../lib/types'
 import { shortModel } from './Divider'
 import { Sheet } from './Sheet'
 import { openSheet } from './sheetHistory'
 import { useToast } from './Toast'
+import { useUnsavedGate } from './useUnsavedGate'
 import { AGE_UNITS, Lock, plainRefusal, shortAge } from './Vault'
 import css from './NoteSheet.module.css'
 
@@ -46,6 +47,14 @@ export function revisionWord(r: NoteRevision): string {
 /** Whether this revision has words to put back. */
 export const canRestore = (r: NoteRevision, note: Note): boolean =>
   note.deletedAt === null && r.after !== null && !sameWords(r.after, note)
+
+const isChatPath = (path: string): boolean => /^chat(\/|$)/i.test(normalisePath(path))
+
+/** What a link points at. A chat/ link from a shared note needs an open chat, or it points at nothing. */
+export function linkRef(path: string, note: Note, conversationId: string | null): NoteRef | null {
+  if (note.shelf === 'shared' && !conversationId && isChatPath(path)) return null
+  return { path, conversationId: refOf(note, conversationId ?? undefined).conversationId }
+}
 
 const LINK = /\[\[([^[\]\n]+)\]\]/
 
@@ -238,11 +247,17 @@ interface ReadProps {
 }
 
 function ReadView({ note, writer, more, conversationId, setView, onClose, onLink }: ReadProps) {
-  const [panel, setPanel] = useState<'move' | 'clear' | null>(null)
+  const [panel, setPanel] = useState<'move' | 'clear' | 'delete' | null>(null)
   const toast = useToast()
   const run = useRun()
   const html = useMemo(() => linkNotes(renderMarkdown(note.body), css.link), [note.body])
   const inTrash = note.deletedAt !== null
+  const asking = panel === 'clear' || panel === 'delete'
+
+  // A panel acts on a live note. A model can delete the note while one is open.
+  useEffect(() => {
+    if (inTrash) setPanel(null)
+  }, [inTrash])
 
   const restore = async () => {
     const r = await notes.restore(note.id, YOU)
@@ -262,7 +277,8 @@ function ReadView({ note, writer, more, conversationId, setView, onClose, onLink
 
   const setProtected = (on: boolean) =>
     run(async () => {
-      await notes.setProtected(note.id, on, YOU)
+      const r = await notes.setProtected(note.id, on, YOU)
+      if ('refused' in r) toast.show(plainRefusal(r.refused))
       setPanel(null)
     }, "Couldn't change the protection.")
 
@@ -270,7 +286,8 @@ function ReadView({ note, writer, more, conversationId, setView, onClose, onLink
     const path = (e.target as HTMLElement).closest<HTMLElement>('[data-note-link]')?.dataset.noteLink
     if (!path) return
     run(async () => {
-      const found = await notes.read({ path, conversationId: refOf(note, conversationId ?? undefined).conversationId })
+      const ref = linkRef(path, note, conversationId)
+      const found = ref && (await notes.read(ref))
       if (found) onLink(found.id)
       else toast.show('There is no note at that path.')
     }, "Couldn't open the link.")
@@ -310,7 +327,7 @@ function ReadView({ note, writer, more, conversationId, setView, onClose, onLink
               {note.protected ? 'Protected' : 'Protect'}
             </button>
             {more && (
-              <button className={css.chip} onClick={remove}>
+              <button className={css.chip} onClick={() => (note.protected ? setPanel('delete') : remove())}>
                 Delete
               </button>
             )}
@@ -318,7 +335,7 @@ function ReadView({ note, writer, more, conversationId, setView, onClose, onLink
         )}
       </div>
       {inTrash && <p className={css.notice}>This note is in Trash.</p>}
-      {note.protected && !inTrash && panel !== 'clear' && (
+      {note.protected && !inTrash && !asking && (
         <p className={css.notice}>Models can read, move and tag this note. Only you can change the words.</p>
       )}
       {panel === 'clear' && (
@@ -327,6 +344,19 @@ function ReadView({ note, writer, more, conversationId, setView, onClose, onLink
           <div className={css.buttons}>
             <button className={css.go} onClick={() => setProtected(false)}>
               Clear
+            </button>
+            <button className={css.btn} onClick={() => setPanel(null)}>
+              Keep
+            </button>
+          </div>
+        </div>
+      )}
+      {panel === 'delete' && (
+        <div className={css.notice}>
+          <p className={css.ask}>Delete this protected note? It goes to Trash.</p>
+          <div className={css.buttons}>
+            <button className={css.go} aria-label="Delete note" onClick={remove}>
+              Delete
             </button>
             <button className={css.btn} onClick={() => setPanel(null)}>
               Keep
@@ -354,7 +384,7 @@ function MovePanel({ note, conversationId, onDone }: MoveProps) {
   const submit = (e: FormEvent) => {
     e.preventDefault()
     const to = path.trim()
-    if (note.shelf === 'shared' && !conversationId && /^chat\//i.test(to)) {
+    if (note.shelf === 'shared' && !conversationId && isChatPath(to)) {
       setProblem('Open a chat first.')
       return
     }
@@ -419,6 +449,7 @@ function Editor({ note, onDone, guard }: EditorProps) {
   useEffect(() => {
     onDirty(dirty)
   }, [dirty, onDirty])
+  useUnsavedGate(`note:${base.id}`, dirty)
   const canSave = line.trim() !== '' && !working
 
   const act = async (work: () => Promise<void>) => {
@@ -551,7 +582,7 @@ function History({ note, revs, onDone }: HistoryProps) {
 
   const restore = (r: NoteRevision) =>
     run(async () => {
-      const done = await notes.restoreRevision(r.id, YOU)
+      const done = await notes.restoreRevision(r.id, note.version, YOU)
       if ('refused' in done) {
         toast.show(plainRefusal(done.refused))
         return

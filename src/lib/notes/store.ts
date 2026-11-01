@@ -75,7 +75,7 @@ export interface NoteStore {
   /** Brings a note out of Trash to its own place, as a later write. Refused while another note holds that place. */
   restore(id: string, by: Writer): Promise<Result>
   /** Puts back the words of an old revision as a new write. The path and the protection stay as they are. */
-  restoreRevision(revisionId: string, by: Writer): Promise<Result>
+  restoreRevision(revisionId: string, expectedVersion: number, by: Writer): Promise<Result>
   undoCalls(messageId: string, callIds: string[], shelves: 'chat'): Promise<UndoReport>
   /** Takes the message too, because a model can reuse an id across replies. */
   redoCalls(callIds: string[], messageId: string): Promise<RedoReport>
@@ -463,13 +463,16 @@ export const notes: NoteStore = {
     })
   },
 
-  async restoreRevision(revisionId, by) {
+  async restoreRevision(revisionId, expectedVersion, by) {
     return rw(async () => {
       const rev = await db.noteRevisions.get(revisionId)
       const cur = rev && (await db.notes.get(rev.noteId))
       if (!rev?.after || !cur) return refuse('Error: That version holds no text to restore.')
       if (cur.deletedAt !== null) return refuse('Error: This note is in Trash. Restore it first.')
       if (cur.protected && by.writer !== 'you') return refuse(PROTECTED)
+      if (cur.version !== expectedVersion) {
+        return refuse(`Error: The note is now at version ${cur.version}, not ${expectedVersion}. Look at its history, then restore again.`)
+      }
       if (sameWords(cur, rev.after)) return { ok: cur }
       const { body, description, tags } = rev.after
       return { ok: await commit(cur, bump(cur, { body, description, tags }), by) }

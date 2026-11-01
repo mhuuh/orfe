@@ -881,7 +881,7 @@ describe('reads and restores for the vault', () => {
     const n = okNote(await notes.write(shared('a'), body('first', { tags: ['one'] }), model()))
     okNote(await notes.write(shared('a'), { body: 'second', description: 'New line', tags: ['two'], expectedVersion: 1 }, model()))
     const [v1] = await notes.revisions(n.id)
-    const back = okNote(await notes.restoreRevision(v1.id, YOU))
+    const back = okNote(await notes.restoreRevision(v1.id, 2, YOU))
     expect(back).toMatchObject({ body: 'first', description: 'A line', tags: ['one'], version: 3 })
     expect((await last(n.id)).writer).toBe('you')
     expect((await last(n.id)).before?.body).toBe('second')
@@ -895,7 +895,7 @@ describe('reads and restores for the vault', () => {
     okNote(await notes.move(shared('a'), 'shared/b', model()))
     okNote(await notes.setProtected(n.id, true, YOU))
     const [v1] = await notes.revisions(n.id)
-    const back = okNote(await notes.restoreRevision(v1.id, YOU))
+    const back = okNote(await notes.restoreRevision(v1.id, 4, YOU))
     expect(back).toMatchObject({ path: 'b', protected: true, body: 'first' })
   })
 
@@ -904,14 +904,14 @@ describe('reads and restores for the vault', () => {
     okNote(await notes.write(shared('a'), body('second', { expectedVersion: 1 }), model()))
     okNote(await notes.setProtected(n.id, true, model()))
     const [v1] = await notes.revisions(n.id)
-    expect(refusal(await notes.restoreRevision(v1.id, model()))).toMatch(/protected/)
+    expect(refusal(await notes.restoreRevision(v1.id, 3, model()))).toMatch(/protected/)
   })
 
   it('restoreRevision of the words a note has now writes nothing', async () => {
     const n = await create(shared('a'))
     okNote(await notes.setProtected(n.id, true, YOU))
     const [v1] = await notes.revisions(n.id)
-    expect(okNote(await notes.restoreRevision(v1.id, YOU)).version).toBe(2)
+    expect(okNote(await notes.restoreRevision(v1.id, 2, YOU)).version).toBe(2)
     expect(await notes.revisions(n.id)).toHaveLength(2)
   })
 
@@ -919,9 +919,22 @@ describe('reads and restores for the vault', () => {
     const n = await create(shared('a'))
     await remove(shared('a'))
     const [v1, del] = await notes.revisions(n.id)
-    expect(refusal(await notes.restoreRevision(del.id, YOU))).toMatch(/^Error:/)
-    expect(refusal(await notes.restoreRevision(v1.id, YOU))).toMatch(/Trash/)
-    expect(refusal(await notes.restoreRevision('nobody', YOU))).toMatch(/^Error:/)
+    expect(refusal(await notes.restoreRevision(del.id, 2, YOU))).toMatch(/^Error:/)
+    expect(refusal(await notes.restoreRevision(v1.id, 2, YOU))).toMatch(/Trash/)
+    expect(refusal(await notes.restoreRevision('nobody', 2, YOU))).toMatch(/^Error:/)
+  })
+
+  it('restoreRevision refuses a stale version and writes nothing', async () => {
+    const n = await create(shared('a'), 'first')
+    okNote(await notes.write(shared('a'), body('second', { expectedVersion: 1 }), model()))
+    const [v1] = await notes.revisions(n.id)
+    okNote(await notes.write(shared('a'), body('third', { expectedVersion: 2 }), model()))
+
+    const r = refusal(await notes.restoreRevision(v1.id, 2, YOU))
+    expect(r).toMatch(/^Error:/)
+    expect(r).toMatch(/version 3/)
+    expect((await notes.read(shared('a')))?.body).toBe('third')
+    expect(await notes.revisions(n.id)).toHaveLength(3)
   })
 
   it('refOf finds a note on any shelf, a chat with no row included', async () => {

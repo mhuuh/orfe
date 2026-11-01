@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest'
 import type { Conversation, Note } from '../lib/types'
-import { otherShelves, plainRefusal, plainSnippet, shelfRows, shortAge } from './Vault'
+import { MAX_ROWS, flatLines, otherShelves, plainRefusal, plainSnippet, shelfRows, shortAge } from './Vault'
 
 const MIN = 60_000
 const DAY = 24 * 60 * MIN
@@ -45,6 +45,29 @@ describe('shelfRows', () => {
       ['note', 'Favourite insects'],
       ['note', 'Mira, voice'],
     ])
+  })
+})
+
+describe('flatLines', () => {
+  const rows = shelfRows([note('a/one', 4), note('a/two', 3), note('b', 2)])
+
+  it('lists the rows, with the notes of the open folder after it', () => {
+    expect(flatLines(rows, null).map((l) => [l.row.name, l.inner])).toEqual([
+      ['A', false],
+      ['B', false],
+    ])
+    expect(flatLines(rows, 'A').map((l) => [l.row.name, l.inner])).toEqual([
+      ['A', false],
+      ['One', true],
+      ['Two', true],
+      ['B', false],
+    ])
+  })
+
+  it('counts an open folder against the cap', () => {
+    const big = shelfRows(Array.from({ length: MAX_ROWS + 5 }, (_, i) => note(`a/n${i}`, i)))
+    expect(big).toHaveLength(1)
+    expect(flatLines(big, 'A')).toHaveLength(MAX_ROWS + 6)
   })
 })
 

@@ -6,6 +6,7 @@ import type { Prompt } from '../lib/types'
 import { Sheet } from './Sheet'
 import { openSheet } from './sheetHistory'
 import { useToast } from './Toast'
+import { useUnsavedGate } from './useUnsavedGate'
 import css from './PromptSheet.module.css'
 
 interface Props {
@@ -272,6 +273,7 @@ function Editor({ draft, prompts, conversationId, current, onDone, onOpen, toast
   useEffect(() => {
     onDirty(dirty)
   }, [dirty, onDirty])
+  useUnsavedGate(`prompt:${saved?.id ?? 'new'}`, dirty)
   const canSave = cleanName !== '' && text.trim() !== '' && !working
 
   const act = async (work: () => Promise<void>, fail: string) => {

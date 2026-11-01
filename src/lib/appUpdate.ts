@@ -3,14 +3,14 @@ import { isAnyGenerating, onGenerationEnd } from './send'
 /**
  * Applying an app update reloads the page. That loses an unsent draft (drafts live in
  * memory) and cuts off a reply. So a waiting update is applied only when the app is idle:
- * no draft text in any chat and nothing generating.
+ * no draft text in any chat, no unsaved edit in any editor, and nothing generating.
  */
 
-/** Chats whose composer holds non-blank text. */
+/** Chats whose composer holds non-blank text, and editors that hold unsaved edits. */
 const drafts = new Set<string>()
 let pending: (() => void) | null = null
 
-/** The composer reports its text on every change. */
+/** The composer reports its text on every change. Editors report through `useUnsavedGate`. */
 export function noteDraft(conversationId: string, text: string): void {
   if (text.trim() !== '') drafts.add(conversationId)
   else drafts.delete(conversationId)

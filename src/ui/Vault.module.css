@@ -179,7 +179,8 @@
   text-overflow: ellipsis;
 }
 
-.trash {
+.trash,
+.showAll {
   display: flex;
   align-items: center;
   gap: var(--s2);
@@ -197,6 +198,9 @@
 }
 .trash:disabled {
   cursor: default;
+}
+.showAll {
+  border-bottom: 0;
 }
 
 .restore {
@@ -222,6 +226,7 @@
 
 .row:focus-visible,
 .trash:focus-visible,
+.showAll:focus-visible,
 .chip:focus-visible,
 .restore:focus-visible {
   outline: 2px solid var(--ink);

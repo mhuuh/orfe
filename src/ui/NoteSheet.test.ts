@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest'
 import { renderMarkdown } from '../lib/markdown'
 import type { Note, NoteRevision } from '../lib/types'
-import { canRestore, crumb, linkNotes, longAge, revisionWord } from './NoteSheet'
+import { canRestore, crumb, linkNotes, linkRef, longAge, revisionWord } from './NoteSheet'
 
 function note(over: Partial<Note> = {}): Note {
   return {
@@ -65,6 +65,29 @@ describe('canRestore', () => {
   })
 })
 
+describe('linkRef', () => {
+  const chatNote = note({ shelf: 'c1' })
+
+  it('reads chat/ as the chat of a chat note, open chat or not', () => {
+    expect(linkRef('chat/x', chatNote, 'c2')).toEqual({ path: 'chat/x', conversationId: 'c1' })
+    expect(linkRef('chat/x', chatNote, null)).toEqual({ path: 'chat/x', conversationId: 'c1' })
+  })
+
+  it('reads chat/ as the open chat for a shared note', () => {
+    expect(linkRef('chat/x', note(), 'c2')).toEqual({ path: 'chat/x', conversationId: 'c2' })
+  })
+
+  it('finds nothing for chat/ from a shared note with no open chat, in any spelling', () => {
+    expect(linkRef('chat/x', note(), null)).toBeNull()
+    expect(linkRef('CHAT/x', note(), null)).toBeNull()
+    expect(linkRef('/chat/x', note(), null)).toBeNull()
+  })
+
+  it('a shared path needs no open chat', () => {
+    expect(linkRef('shared/x', note(), null)).toEqual({ path: 'shared/x', conversationId: 'shared' })
+  })
+})
+
 describe('linkNotes', () => {
   const links = (src: string) => dom(linkNotes(renderMarkdown(src), 'lnk')).querySelectorAll('button.lnk')
 
@@ -84,8 +107,12 @@ describe('linkNotes', () => {
   })
 
   it('a path can carry no markup into the page', () => {
-    const [a] = links('[[chat/<b>x</b>]]')
-    if (a) expect(a.querySelector('b')).toBeNull()
+    // Raw tags split the text, so the brackets never close in one text node.
+    expect(links('[[chat/<b>x</b>]]')).toHaveLength(0)
+    // Escaped tags stay in one text node. They must come out as text.
+    const [a] = links('[[chat/&lt;b&gt;x]]')
+    expect(a.querySelector('b')).toBeNull()
+    expect((a as HTMLElement).dataset.noteLink).toBe('chat/<b>x')
     const [c] = links('[[chat/x" onclick="y]]')
     expect(c.getAttribute('onclick')).toBeNull()
   })

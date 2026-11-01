@@ -1,4 +1,4 @@
-import { useState, type ReactNode } from 'react'
+import { useEffect, useState, type ReactNode } from 'react'
 import { useLiveQuery } from 'dexie-react-hooks'
 import { noteName } from '../lib/notes/rules'
 import { notes, YOU } from '../lib/notes/store'
@@ -13,6 +13,9 @@ interface Props {
 }
 
 const MAX_HITS = 50
+/** Most lines a shelf or Trash draws before a Show all row. Hundreds of rows stall the drawer on a phone. */
+export const MAX_ROWS = 100
+const SEARCH_DELAY_MS = 150
 
 const MINUTE = 60_000
 const DAY = 24 * 60 * MINUTE
@@ -51,7 +54,8 @@ export interface FolderRow {
 }
 export type Row = NoteRow | FolderRow
 
-const newestOf = (r: Row): number => (r.kind === 'note' ? r.note.updatedAt : Math.max(...r.rows.map((x) => x.note.updatedAt)))
+/** A folder's rows are newest first already. */
+const newestOf = (r: Row): number => (r.kind === 'note' ? r : r.rows[0]).note.updatedAt
 
 const newestFirst = <T extends Row>(rows: T[]): T[] => [...rows].sort((a, b) => newestOf(b) - newestOf(a))
 
@@ -61,8 +65,14 @@ export function shelfRows(list: Note[]): Row[] {
   const loose: NoteRow[] = []
   for (const note of list) {
     const cut = note.path.indexOf('/')
-    if (cut === -1) loose.push({ kind: 'note', name: noteName(note.path), note })
-    else byFolder.set(note.path.slice(0, cut), [...(byFolder.get(note.path.slice(0, cut)) ?? []), note])
+    if (cut === -1) {
+      loose.push({ kind: 'note', name: noteName(note.path), note })
+      continue
+    }
+    const folder = note.path.slice(0, cut)
+    const group = byFolder.get(folder)
+    if (group) group.push(note)
+    else byFolder.set(folder, [note])
   }
   const folded = [...byFolder].map(([folder, group]): Row => {
     if (group.length === 1) return { kind: 'note', name: noteName(group[0].path), note: group[0] }
@@ -70,6 +80,20 @@ export function shelfRows(list: Note[]): Row[] {
     return { kind: 'folder', name: noteName(folder), rows: newestFirst(rows) }
   })
   return newestFirst([...loose, ...folded])
+}
+
+export interface Line {
+  row: Row
+  /** A note inside the open folder. */
+  inner: boolean
+}
+
+/** What a shelf draws: its rows, with the notes of the open folder after that folder. */
+export function flatLines(rows: Row[], openFolder: string | null): Line[] {
+  return rows.flatMap((row): Line[] => {
+    const inner = row.kind === 'folder' && row.name === openFolder ? row.rows : []
+    return [{ row, inner: false }, ...inner.map((x) => ({ row: x, inner: true }))]
+  })
 }
 
 export interface OtherShelf {
@@ -130,19 +154,34 @@ interface RowsProps {
   onOpen: (id: string) => void
 }
 
-function Rows({ rows, now, onOpen }: RowsProps) {
-  const [openFolder, setOpenFolder] = useState<string | null>(null)
-  const line = (r: NoteRow, inner: boolean) => (
-    <li key={r.note.id} className={`${css.item} ${inner ? css.inner : ''}`}>
-      <NoteLine name={r.name} note={r.note} right={shortAge(r.note.updatedAt, now)} detail={r.note.description} onOpen={onOpen} />
+function ShowAll({ hidden, onShow }: { hidden: number; onShow: () => void }) {
+  return (
+    <li className={css.item}>
+      <button className={css.showAll} onClick={onShow}>
+        <span className={css.name}>Show all</span>
+        <span className={css.right}>{hidden} more</span>
+      </button>
     </li>
   )
+}
+
+function Rows({ rows, now, onOpen }: RowsProps) {
+  const [openFolder, setOpenFolder] = useState<string | null>(null)
+  const [showAll, setShowAll] = useState(false)
+  const lines = flatLines(rows, openFolder)
+  const shown = showAll ? lines : lines.slice(0, MAX_ROWS)
   return (
     <ul className={css.rows}>
-      {rows.map((r) => {
-        if (r.kind === 'note') return line(r, false)
+      {shown.map(({ row: r, inner }) => {
+        if (r.kind === 'note') {
+          return (
+            <li key={r.note.id} className={`${css.item} ${inner ? css.inner : ''}`}>
+              <NoteLine name={r.name} note={r.note} right={shortAge(r.note.updatedAt, now)} detail={r.note.description} onOpen={onOpen} />
+            </li>
+          )
+        }
         const opened = openFolder === r.name
-        return [
+        return (
           <li key={`folder:${r.name}`} className={css.item}>
             <button className={css.row} aria-expanded={opened} onClick={() => setOpenFolder(opened ? null : r.name)}>
               <span className={css.top}>
@@ -153,10 +192,10 @@ function Rows({ rows, now, onOpen }: RowsProps) {
               </span>
               <span className={css.detail}>Folder</span>
             </button>
-          </li>,
-          opened && r.rows.map((x) => line(x, true)),
-        ]
+          </li>
+        )
       })}
+      {shown.length < lines.length && <ShowAll hidden={lines.length - shown.length} onShow={() => setShowAll(true)} />}
     </ul>
   )
 }
@@ -180,8 +219,11 @@ function Shelf({ label, list, now, onOpen }: ShelfProps) {
 
 export function Vault({ conversationId, onOpen }: Props) {
   const [query, setQuery] = useState('')
+  /** The query that last sat still. */
+  const [settled, setSettled] = useState('')
   const [pickedShelf, setPickedShelf] = useState<string | null>(null)
   const [trashOpen, setTrashOpen] = useState(false)
+  const [allTrash, setAllTrash] = useState(false)
   const toast = useToast()
 
   const data = useLiveQuery(async () => {
@@ -189,12 +231,16 @@ export function Vault({ conversationId, onOpen }: Props) {
     return { all, chats, trash }
   }, [])
 
-  const q = query.trim()
-  const hits = useLiveQuery(async () => {
-    if (!q) return null
-    const shelves = new Set((await notes.all()).map((n) => n.shelf))
-    return notes.search([...shelves], q, MAX_HITS)
-  }, [q])
+  useEffect(() => {
+    const t = setTimeout(() => setSettled(query.trim()), SEARCH_DELAY_MS)
+    return () => clearTimeout(t)
+  }, [query])
+
+  // An empty box shows the shelves at once.
+  const q = query.trim() === '' ? '' : settled
+  // The list above has read every note, so a search scans once.
+  const shelves = [...new Set(data?.all.map((n) => n.shelf))]
+  const hits = useLiveQuery(() => (q ? notes.search(shelves, q, MAX_HITS) : null), [q, shelves.join('\n')])
 
   if (!data) return null
   const now = Date.now()
@@ -204,6 +250,7 @@ export function Vault({ conversationId, onOpen }: Props) {
   const shelfName = (shelf: string): string => (shelf === 'shared' ? 'Shared' : shelf === conversationId ? 'This chat' : (title(shelf) ?? 'No chat'))
   const others = otherShelves(all, chats, conversationId)
   const picked = others.find((s) => s.id === pickedShelf)
+  const trashShown = allTrash ? trash : trash.slice(0, MAX_ROWS)
 
   const restore = (note: Note) => {
     notes
@@ -274,7 +321,7 @@ export function Vault({ conversationId, onOpen }: Props) {
                   </button>
                 ))}
               </div>
-              {picked && <Rows rows={shelfRows(picked.notes)} now={now} onOpen={onOpen} />}
+              {picked && <Rows key={picked.id} rows={shelfRows(picked.notes)} now={now} onOpen={onOpen} />}
             </section>
           )}
           <section className={css.shelf} aria-label="Trash">
@@ -291,7 +338,7 @@ export function Vault({ conversationId, onOpen }: Props) {
             </button>
             {trashOpen && (
               <ul className={css.rows}>
-                {trash.map((note) => {
+                {trashShown.map((note) => {
                   const name = noteName(note.path)
                   return (
                     <li key={note.id} className={css.item}>
@@ -302,6 +349,7 @@ export function Vault({ conversationId, onOpen }: Props) {
                     </li>
                   )
                 })}
+                {trashShown.length < trash.length && <ShowAll hidden={trash.length - trashShown.length} onShow={() => setAllTrash(true)} />}
               </ul>
             )}
           </section>

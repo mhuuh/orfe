@@ -21,6 +21,13 @@ async function openNote(page: Page, vault: Locator, name: RegExp | string): Prom
   return page.getByRole('dialog', { name: 'Note' })
 }
 
+/** Whether a waiting app update may reload the page now. */
+const idle = (page: Page): Promise<boolean> =>
+  page.evaluate(async () => {
+    const url = '/orfe/src/lib/appUpdate.ts'
+    return ((await import(/* @vite-ignore */ url)) as typeof import('../src/lib/appUpdate')).isIdle()
+  })
+
 const thisChat = (vault: Locator) => vault.getByRole('region', { name: /^This chat/ })
 
 /** As a model, on the only note: replaces its words, deletes it, or tries to clear its protection. Runs in the page, through the dev server. */
@@ -331,4 +338,120 @@ test('a note body is sanitised', async ({ page }) => {
   await expect(note.getByText('Hi', { exact: true })).toBeVisible()
   await expect(note.locator('img, script')).toHaveCount(0)
   expect(await page.evaluate(() => 'pwned' in window)).toBe(false)
+})
+
+test('an unsaved note edit holds back an app update', async ({ page }) => {
+  await signIn(page)
+  await modelWrites(page)
+  const note = await openNote(page, await openVault(page), /^Harbour/)
+  await note.getByRole('button', { name: 'Edit' }).click()
+  expect(await idle(page)).toBe(true)
+
+  const text = note.getByLabel('Note text')
+  await text.fill('Half a thought')
+  await expect.poll(() => idle(page)).toBe(false)
+  // Back on the old words: nothing to lose.
+  await text.fill('Boats at dawn.')
+  await expect.poll(() => idle(page)).toBe(true)
+
+  // An emptied body or a new description is an edit too.
+  await text.fill('')
+  await expect.poll(() => idle(page)).toBe(false)
+  await text.fill('Boats at dawn.')
+  await note.getByLabel('Note description').fill('A new line')
+  await expect.poll(() => idle(page)).toBe(false)
+
+  await page.goBack()
+  await note.getByRole('button', { name: 'Discard' }).click()
+  await expect.poll(() => idle(page)).toBe(true)
+
+  await note.getByRole('button', { name: 'Edit' }).click()
+  await text.fill('Saved words')
+  await expect.poll(() => idle(page)).toBe(false)
+  await note.getByRole('button', { name: 'Save' }).click()
+  await expect(note.getByText('Saved words')).toBeVisible()
+  await expect.poll(() => idle(page)).toBe(true)
+})
+
+test('a long shelf stops at the cap, and Show all shows the rest', async ({ page }) => {
+  await signIn(page)
+  await page.evaluate(async () => {
+    const url = '/orfe/src/lib/notes/store.ts'
+    const { notes, YOU } = (await import(/* @vite-ignore */ url)) as typeof import('../src/lib/notes/store')
+    for (let i = 0; i < 105; i++) {
+      await notes.write({ path: `shared/n${i}x`, conversationId: 'shared' }, { body: 'x', description: 'x', isNew: true }, YOU)
+    }
+  })
+  const vault = await openVault(page)
+  const shelf = vault.getByRole('region', { name: 'Shared' })
+  await expect(shelf.getByText('105 notes')).toBeVisible()
+  await expect(shelf.getByRole('button', { name: /^N\d+x/ })).toHaveCount(100)
+  await shelf.getByRole('button', { name: /^Show all/ }).click()
+  await expect(shelf.getByRole('button', { name: /^N\d+x/ })).toHaveCount(105)
+  await expect(shelf.getByRole('button', { name: /^Show all/ })).toHaveCount(0)
+})
+
+test('a protected note asks once before it is deleted', async ({ page }) => {
+  await signIn(page)
+  await modelWrites(page)
+  const vault = await openVault(page)
+  const note = await openNote(page, vault, /^Harbour/)
+  await note.getByRole('button', { name: 'Protect' }).click()
+  await note.getByRole('button', { name: 'More' }).click()
+
+  await note.getByRole('button', { name: 'Delete', exact: true }).click()
+  await expect(note.getByText('Delete this protected note? It goes to Trash.')).toBeVisible()
+  await note.getByRole('button', { name: 'Keep' }).click()
+  await expect(note.getByRole('button', { name: 'Edit' })).toBeVisible()
+  await expect(note.getByText('Delete this protected note?')).toHaveCount(0)
+
+  await note.getByRole('button', { name: 'Delete', exact: true }).click()
+  await note.getByRole('button', { name: 'Delete note' }).click()
+  await expect(page.getByRole('dialog', { name: 'Note' })).toHaveCount(0)
+  await expect(thisChat(vault).getByRole('button', { name: /^Harbour/ })).toHaveCount(0)
+})
+
+test('an open panel closes when the note goes to Trash', async ({ page }) => {
+  await signIn(page)
+  await modelWrites(page)
+  const note = await openNote(page, await openVault(page), /^Harbour/)
+  await note.getByRole('button', { name: 'Move' }).click()
+  await expect(note.getByLabel('New path')).toBeVisible()
+  await asModel(page, 'remove')
+  await expect(note.getByText('This note is in Trash.')).toBeVisible()
+  await expect(note.getByLabel('New path')).toHaveCount(0)
+})
+
+test('the small marks in the note head have 44 px hit areas', async ({ page }) => {
+  await signIn(page)
+  await modelWrites(page)
+  const note = await openNote(page, await openVault(page), /^Harbour/)
+  for (const name of ['Back', 'More']) {
+    const [width, height] = await note.getByRole('button', { name }).evaluate((el) => {
+      const after = getComputedStyle(el, '::after')
+      return [parseFloat(after.width), parseFloat(after.height)]
+    })
+    expect(width).toBeGreaterThanOrEqual(44)
+    expect(height).toBeGreaterThanOrEqual(44)
+  }
+})
+
+test('search waits for a pause, and a query scans the notes once', async ({ page }) => {
+  await signIn(page)
+  await modelWrites(page)
+  const vault = await openVault(page)
+  await page.evaluate(async () => {
+    const url = '/orfe/src/lib/notes/store.ts'
+    const { notes } = (await import(/* @vite-ignore */ url)) as typeof import('../src/lib/notes/store')
+    const calls = { all: 0, search: 0 }
+    const { all, search } = notes
+    notes.all = () => (calls.all++, all())
+    notes.search = (...args) => (calls.search++, search(...args))
+    Object.assign(window, { calls })
+  })
+  const search = vault.getByLabel('Search notes')
+  await search.pressSequentially('dawn', { delay: 30 })
+  await expect(vault.getByRole('button', { name: /^Harbour/ })).toContainText('Boats at dawn.')
+  const calls = await page.evaluate(() => (window as unknown as { calls: { all: number; search: number } }).calls)
+  expect(calls).toEqual({ all: 0, search: 1 })
 })
