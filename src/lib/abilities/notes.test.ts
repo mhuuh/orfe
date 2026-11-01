@@ -123,8 +123,28 @@ describe('notes tools', () => {
       expect(await body()).toBe(BODY)
     })
 
-    it.each([[30], [null], [{ text: 'Age' }], [['Age']]])('old_text %j is refused, and nothing is added', async (old_text) => {
+    it.each([[30], [{ text: 'Age' }], [['Age']]])('old_text %j is refused, and nothing is added', async (old_text) => {
       expect(await edit({ old_text, new_text: '31' })).toMatch(/^Error: old_text must be text/)
+      expect(await body()).toBe(BODY)
+    })
+
+    it('null counts as left out on every optional field, as a strict-mode model sends it', async () => {
+      const nulls = { old_text: null, new_text: null, description: null, tags: null }
+      expect(await edit(nulls)).toMatch(/^Error: This edit changes nothing/)
+      expect(await edit({ ...nulls, new_text: ' More.' })).toBe('Edited chat/a. It is at version 2.')
+      expect(await body()).toBe(`${BODY}\n More.`)
+      expect((await call('notes_read', { path: 'chat/a', page: null })).length).toBeGreaterThan(0)
+      expect(await call('notes_read', { path: null })).toContain('chat/a — d')
+
+      const write = { tags: null, expected_version: null, new: null, shrink: null, protected: null, supersedes: null }
+      expect(await call('notes_write', { path: 'chat/b', description: 'd', body: 'b', ...write })).toBe('Wrote chat/b. It is at version 1.')
+      expect((await notes.read(ref('chat/b')))?.protected).toBe(false)
+
+      expect(await call('notes_delete', { path: 'chat/b', new_path: null })).toContain('Deleted chat/b.')
+    })
+
+    it('null can never delete text', async () => {
+      expect(await edit({ old_text: 'Age: 30', new_text: null })).toMatch(/^Error: new_text must be text/)
       expect(await body()).toBe(BODY)
     })
 
@@ -137,7 +157,7 @@ describe('notes tools', () => {
       expect(await edit({ new_text: 31, tags: ['a'] })).toMatch(/^Error: new_text must be text/)
     })
 
-    it.each([[{ path: 'chat/b' }], [7], [['chat/b']], [null]])('new_path %j is refused, and the note stays', async (new_path) => {
+    it.each([[{ path: 'chat/b' }], [7], [['chat/b']]])('new_path %j is refused, and the note stays', async (new_path) => {
       const out = await call('notes_delete', { path: 'chat/a', new_path })
       expect(out).toMatch(/^Error: new_path must be text/)
       expect(await body()).toBe(BODY)

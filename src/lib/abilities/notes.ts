@@ -104,8 +104,11 @@ const TOOLS: Ability['tools'] = [
   },
 ]
 
-/** There, but not text. Such a field must not pass as left out: that can pick another action. */
-const notText = (v: unknown): boolean => v !== undefined && typeof v !== 'string'
+/**
+ * There, but not text. Such a field must not pass as left out: that can pick another action.
+ * Null does count as left out: strict-mode models fill every optional field with it.
+ */
+const notText = (v: unknown): boolean => v !== undefined && v !== null && typeof v !== 'string'
 const asArgs = (a: unknown): Args => (typeof a === 'object' && a !== null && !Array.isArray(a) ? (a as Args) : {})
 
 /** A non-blank string. Text that may be empty, like a body, is read with `raw`. */
@@ -263,7 +266,8 @@ function run(name: string, a: Args, ctx: AbilityCtx): Promise<string> | string {
       if (notText(a.old_text)) return 'Error: old_text must be text. Send the exact text to replace, or leave old_text out.'
       // A weak model fills every field, so a blank field means left out. Only a replace can put in nothing.
       const oldText = raw(a.old_text) || undefined
-      if (notText(a.new_text) || (oldText && a.new_text === undefined)) {
+      // Null is no exception here, so it can never delete text.
+      if (notText(a.new_text) || (oldText && typeof a.new_text !== 'string')) {
         return 'Error: new_text must be text. To replace old_text, send the new words. To remove it, send new_text as an empty string.'
       }
       const newText = oldText ? raw(a.new_text) : raw(a.new_text) || undefined
