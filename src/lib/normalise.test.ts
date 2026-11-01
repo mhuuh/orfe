@@ -458,36 +458,46 @@ describe('tool steps', () => {
 
 describe('a plain chat', () => {
   const plain = { ...base, plain: true }
+  const LINE = '(Used find.)'
+  const find = (id: string) => step(id, { name: 'find' })
 
-  it('sends the text of a reply and none of its steps', () => {
-    const ms = [msg('m1', 'user', 'q'), msg('m2', 'assistant', [step('c1'), text('done'), step('c2')]), msg('m3', 'user', 'next')]
+  it('sends old steps as flat lines, in the order of the reply', () => {
+    const ms = [msg('m1', 'user', 'q'), msg('m2', 'assistant', [find('c1'), text('done'), find('c2')]), msg('m3', 'user', 'next')]
     expect(buildOutgoing(ms, plain)).toEqual([
       { role: 'user', content: 'q' },
-      { role: 'assistant', content: 'done' },
+      { role: 'assistant', content: `${LINE}\n\ndone\n\n${LINE}` },
       { role: 'user', content: 'next' },
     ])
   })
 
+  it('is the same as tools off, and no real call goes out', () => {
+    const ms = [msg('m1', 'user', 'q'), msg('m2', 'assistant', [find('c1'), text('done')]), msg('m3', 'user', 'next')]
+    expect(buildOutgoing(ms, plain)).toEqual(buildOutgoing(ms, base))
+  })
+
   it('wins over a stale tools flag, so a step never goes out as a real call', () => {
-    const ms = [msg('m1', 'user', 'q'), msg('m2', 'assistant', [step('c1')]), msg('m3', 'user', 'next')]
-    expect(JSON.stringify(buildOutgoing(ms, { ...plain, toolsEnabled: true }))).not.toContain('c1')
+    const ms = [msg('m1', 'user', 'q'), msg('m2', 'assistant', [find('c1')]), msg('m3', 'user', 'next')]
+    const out = buildOutgoing(ms, { ...plain, toolsEnabled: true })
+    expect(JSON.stringify(out)).not.toContain('c1')
+    expect(out[1]).toEqual({ role: 'assistant', content: LINE })
+    expect(out.some((m) => m.role === 'tool')).toBe(false)
   })
 
-  it('a tool-only reply leaves no empty message, and the turns around it join', () => {
-    const ms = [msg('m1', 'user', 'first'), msg('m2', 'assistant', [step('c1')]), msg('m3', 'user', 'second')]
-    expect(buildOutgoing(ms, plain)).toEqual([{ role: 'user', content: 'first\n\nsecond' }])
-  })
-
-  it('a window that starts on a tool-only reply starts with the next user turn', () => {
-    const ms = [msg('m1', 'user', 'first'), msg('m2', 'assistant', [step('c1')]), msg('m3', 'user', 'second')]
-    expect(buildOutgoing(ms, { ...plain, windowStartId: 'm2' })).toEqual([{ role: 'user', content: 'second' }])
-  })
-
-  it('a tool-only reply before a text reply leaves one assistant turn', () => {
-    const ms = [msg('m1', 'user', 'q'), msg('m2', 'assistant', [step('c1')]), msg('m3', 'assistant', 'said')]
+  it('a tool-only reply keeps its place in the history', () => {
+    const ms = [msg('m1', 'user', 'first'), msg('m2', 'assistant', [find('c1')]), msg('m3', 'user', 'second')]
     expect(buildOutgoing(ms, plain)).toEqual([
-      { role: 'user', content: 'q' },
-      { role: 'assistant', content: 'said' },
+      { role: 'user', content: 'first' },
+      { role: 'assistant', content: LINE },
+      { role: 'user', content: 'second' },
+    ])
+  })
+
+  it('a window that starts on a tool-only reply starts as any other reply does', () => {
+    const ms = [msg('m1', 'user', 'first'), msg('m2', 'assistant', [find('c1')]), msg('m3', 'user', 'second')]
+    expect(buildOutgoing(ms, { ...plain, windowStartId: 'm2' })).toEqual([
+      { role: 'user', content: '…' },
+      { role: 'assistant', content: LINE },
+      { role: 'user', content: 'second' },
     ])
   })
 })
@@ -503,7 +513,7 @@ describe('stepCounter', () => {
     expect(stepCounter(on)(part)).toBe(4 + 9 + 100)
     expect(stepCounter({ ...on, toolsEnabled: false })(part)).toBe(line)
     expect(stepCounter({ ...on, modelId: 'm/b' })(part)).toBe(line)
-    expect(stepCounter({ ...on, plain: true })(part)).toBe(0)
+    expect(stepCounter({ ...on, plain: true })(part)).toBe(line)
     // A name a provider would refuse flattens.
     expect(stepCounter(on)({ ...part, name: 'bad name' })).toBe('(Used bad name.)'.length)
   })

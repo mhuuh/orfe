@@ -227,7 +227,7 @@ test('a plain chat sends only the prompt and the messages', async ({ page, api }
   expect(api.chats[2].tools).toHaveLength(5)
 })
 
-test('Plain on drops old steps from the request, and off brings them back', async ({ page, api }) => {
+test('Plain on flattens old steps in the request, and off brings them back', async ({ page, api }) => {
   await signIn(page)
   await send(page, `${TOOLCALL}:notes_write:${harbour}`)
   await expect(page.getByText(/^Reply 2 /)).toBeVisible()
@@ -241,7 +241,7 @@ test('Plain on drops old steps from the request, and off brings them back', asyn
   await expect(page.getByText(/^Reply 3 /)).toBeVisible()
   const sent = api.chats[2].messages
   expect(sent.map((m) => m.role)).toEqual(['user', 'assistant', 'user'])
-  expect(sent[1].content).toBe(`Reply 2 from ${MODEL_A}`)
+  expect(sent[1].content).toBe(`(Wrote the note Harbour.)\n\nReply 2 from ${MODEL_A}`)
   // The chat still shows what happened.
   await expect(line).toBeVisible()
 

@@ -471,23 +471,23 @@ describe('tool text that is not sent', () => {
     expect(estimateTokens(turns(1), null, 1, 0, otherModel)).toBe(Math.ceil((80 + line) / 4))
   })
 
-  it('a plain chat counts no step at all', () => {
-    expect(estimateTokens(turns(1), null, 1, 0, plain)).toBe(20)
+  it('a plain chat counts the flat line, as with tools off', () => {
+    expect(estimateTokens(turns(1), null, 1, 0, plain)).toBe(estimateTokens(turns(1), null, 1, 0, flat))
   })
 
   it('viewWindow, which the header reads, counts steps the same way', () => {
     const view = { messages: turns(1), windowStartId: null, windowStartOrder: null, setting: tokens32k, system: null, ratio: 1, overheadChars: 0 }
     expect(viewWindow({ ...view, stepChars: flat }).size).toBe(estimateTokens(turns(1), null, 1, 0, flat))
-    expect(viewWindow({ ...view, stepChars: plain }).size).toBe(20)
+    expect(viewWindow({ ...view, stepChars: plain }).size).toBe(estimateTokens(turns(1), null, 1, 0, plain))
   })
 
-  it('a plain chat does not trim for text it does not send, and a tool chat does', () => {
+  it('a plain chat counts one line for a big step, so it does not trim, and a tool chat does', () => {
     const messages = [...turns(18), asked(37)]
     const plan = { ...base, messages, setting: tokens32k }
     expect(planWindow({ ...plan, stepChars }).trimmed).toBe(true)
     const r = planWindow({ ...plan, stepChars: plain })
     expect(r).toMatchObject({ trimmed: false, startId: null })
-    expect(r.size).toBe(Math.ceil(((18 * 2 + 1) * 40) / 4))
+    expect(r.size).toBe(Math.ceil(((18 * 2 + 1) * 40 + 18 * '(Used find.)'.length) / 4))
     expect(planWindow({ ...plan, stepChars: flat }).trimmed).toBe(false)
   })
 

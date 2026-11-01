@@ -2104,7 +2104,7 @@ describe('abilities in settings', () => {
     expect((await steps())[0].result).toContain('You have no tools in this chat.')
   })
 
-  it('turning plain on drops old steps from the request, and off brings them back', async () => {
+  it('turning plain on flattens old steps in the request, and off brings them back as calls', async () => {
     const f = stubFetch(() => sse(asks(['c1', 'one', '{}'])), () => sse(reply('Done')), () => sse(reply('Fine')))
     await go('first')
     const stored = (await steps()).map((p) => p.callId)
@@ -2113,7 +2113,7 @@ describe('abilities in settings', () => {
     await go('second')
     expect(bodyOf(f, 2).messages).toEqual([
       { role: 'user', content: 'first' },
-      { role: 'assistant', content: 'Done' },
+      { role: 'assistant', content: '(Used one.)\n\nDone' },
       { role: 'user', content: 'second' },
     ])
     expect((await storage.listMessages(convId)).at(1)!.versions[0].content.filter((p) => p.type === 'tool')).toHaveLength(stored.length)
@@ -2139,19 +2139,19 @@ describe('abilities in settings', () => {
     await go('first')
     await setPlain(convId, true)
     await go('second')
-    expect(bodyOf(f, 2).messages).toEqual([{ role: 'user', content: 'first\n\nsecond' }])
+    expect(bodyOf(f, 2).messages).toEqual([
+      { role: 'user', content: 'first' },
+      { role: 'assistant', content: '(Used one.)' },
+      { role: 'user', content: 'second' },
+    ])
     expect(await coldNow(T)).toBe(false)
 
     await go('third')
-    expect(bodyOf(f, 3).messages).toEqual([
-      { role: 'user', content: 'first\n\nsecond' },
-      { role: 'assistant', content: 'Fine' },
-      { role: 'user', content: 'third' },
-    ])
+    expect(bodyOf(f, 3).messages.map((m) => m.content)).toEqual(['first', '(Used one.)', 'second', 'Fine', 'third'])
     expect(await coldNow(T)).toBe(false)
   })
 
-  it('a plain chat with big old steps sends every message: nothing trims for text it does not send', async () => {
+  it('a plain chat with big old steps sends every message: a flat line is small, so nothing trims', async () => {
     const f = stubFetch(() => sse(reply('ok')))
     for (let i = 0; i < 18; i++) {
       await storage.appendMessage(convId, 'user', doneVersion(`question ${i}`))
@@ -2169,7 +2169,7 @@ describe('abilities in settings', () => {
     expect((await storage.getConversation(convId))!.windowStartMessageId).toBeNull()
   })
 
-  it('Continue in a plain chat sends no old steps, and a call made up in this run still gets its answer', async () => {
+  it('Continue in a plain chat sends old steps flat, and a call made up in this run still gets its answer', async () => {
     const f = stubFetch(() => sse(asks(['c2', 'made_up', '{}'])), () => sse(reply('Fine')))
     await storage.appendMessage(convId, 'user', doneVersion('go'))
     const m = await storage.appendMessage(convId, 'assistant', {
@@ -2183,10 +2183,10 @@ describe('abilities in settings', () => {
     await generate(convId, { kind: 'continue', messageId: m.id }, T)
     expect(bodyOf(f, 0).messages).toEqual([
       { role: 'user', content: 'go' },
-      { role: 'assistant', content: 'So far' },
+      { role: 'assistant', content: '(Used one.)\n\nSo far' },
     ])
     const second = JSON.stringify(bodyOf(f, 1).messages)
-    expect(second).not.toContain('(Used one.)')
+    expect(second).toContain('(Used one.)')
     expect(second).toContain('(Tried made_up. It failed.)')
   })
 

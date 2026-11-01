@@ -16,7 +16,7 @@ export interface StepContext {
   modelId: string
   /** False: every step flattens to text. */
   toolsEnabled: boolean
-  /** A plain chat sends no steps at all. They stay stored, so turning Plain off brings them back. */
+  /** A plain chat sends every step as a flat line, as with tools off. Off brings the real calls back. */
   plain: boolean
 }
 
@@ -138,11 +138,10 @@ function render(content: ContentPart[], o: RoundOptions, media: MediaOptions): O
 
 /**
  * The characters a stored step adds to a request, for the window count. Follows the same test as
- * `buildOutgoing`: a real call sends its name, arguments and result, any other step sends one flat
- * line, and a plain chat sends nothing.
+ * `buildOutgoing`: a real call sends its name, arguments and result, and any other step sends one
+ * flat line.
  */
 export function stepCounter(s: StepContext): (part: ToolPart) => number {
-  if (s.plain) return () => 0
   const o = storedRounds(s)
   return (part) => {
     if (!isCall(part, o)) return describeStep(part).past.length
@@ -188,7 +187,6 @@ export function buildOutgoing(messages: Message[], opts: BuildOptions): OutMessa
     }
     const parts: OutPart[] = []
     for (const p of version.content) {
-      if (opts.plain && p.type === 'tool') continue
       const mapped = mapPart(p, opts)
       if (mapped) parts.push(mapped)
     }

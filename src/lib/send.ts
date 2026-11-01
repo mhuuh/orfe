@@ -785,16 +785,13 @@ async function run(a: RunArgs): Promise<void> {
     else content = [...content, { type: 'text', text }]
   }
 
-  /** A plain chat sends no old steps. A call made up in this run stays, so the model reads that it failed. */
-  const sentParts = (): ContentPart[] => (conversation.plain ? content.filter((p) => !isTool(p) || p.round >= firstRound) : content)
-
   /** One request and its stream. `first`: the first request of this run. */
   const streamRound = async (first: boolean): Promise<RoundEnd> => {
     const end: RoundEnd = { finished: false, calls: [], replied: false, errored: null, aborted: false }
     const outgoing =
       first && a.prefill
         ? a.prefill
-        : withTurn(a.base, renderRounds(sentParts(), { modelId: a.model.id, toolsEnabled: a.tools !== null, reasoning: roundReasoning }))
+        : withTurn(a.base, renderRounds(content, { modelId: a.model.id, toolsEnabled: a.tools !== null, reasoning: roundReasoning }))
     let counted: Usage | null = null
     let accepted = false
 
