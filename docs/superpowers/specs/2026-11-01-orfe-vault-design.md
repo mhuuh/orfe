@@ -323,7 +323,7 @@ A per-model rule table in `buildOutgoing` carries these. (my call)
 
 The phone test of the term index at around 100k messages runs before step 5 ships. A 20-case tool eval across Mikael's main models comes after step 3 ships, and blocks nothing. (my call)
 
-**Who runs them (Mikael):** Claude runs them from a script, with an OpenRouter key Mikael creates for this. The key lives in a git-ignored local file, never in chat, code or a commit, and the script never prints it. A spend limit of about $2 on the key is the guard. (limit: my call)
+**Who runs them (Mikael):** Claude runs them from a script, with an OpenRouter key Mikael creates for this. The key lives in `C:/Users/MSI/.orfe-test-key`, outside the public repo, so it can't be committed by accident. It never goes in chat or code, and the script never prints it. A spend limit of about $2 on the key is the guard. (limit: my call)
 
 ## 16. Build order
 
