@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest'
 import { canonical, estimateTokens, fingerprint, isCold, planWindow, raisesLimit, ttlFor, viewWindow } from './context'
 import { hashText } from './hash'
-import { buildOutgoing } from './normalise'
+import { buildOutgoing, stepCounter } from './normalise'
 import type { OutMessage } from './openrouter'
 import type { ContentPart, ContextSetting, LastRequest, Message, Role, ToolPart } from './types'
 
@@ -26,7 +26,10 @@ function transcript(count: number, chars = 40): Message[] {
 }
 
 const tokens100: ContextSetting = { mode: 'tokens', limit: 100, trimTo: 0.7 }
+/** Every step by 'm/a' goes out as a real call. */
+const stepChars = stepCounter({ modelId: 'm/a', toolsEnabled: true, plain: false })
 const base = {
+  stepChars,
   windowStartId: null,
   windowStartOrder: null,
   setting: tokens100,
@@ -55,18 +58,18 @@ describe('estimateTokens', () => {
       msg(3, 'divider', [], { dividerLabel: 'Context starts here' }),
     ]
     // 8 + 12 + system 4 = 24 chars → 6 → × 1.5 = 9
-    expect(estimateTokens(messages, 'sys!', 1.5, 0)).toBe(9)
-    expect(estimateTokens(messages, null, 1, 0)).toBe(5)
+    expect(estimateTokens(messages, 'sys!', 1.5, 0, stepChars)).toBe(9)
+    expect(estimateTokens(messages, null, 1, 0, stepChars)).toBe(5)
     // rounds up: 5 chars → 1.25 → 2
-    expect(estimateTokens([msg(1, 'user', 'abcde')], null, 1, 0)).toBe(2)
-    expect(estimateTokens([], null, 1, 0)).toBe(0)
+    expect(estimateTokens([msg(1, 'user', 'abcde')], null, 1, 0, stepChars)).toBe(2)
+    expect(estimateTokens([], null, 1, 0, stepChars)).toBe(0)
   })
 
   it('counts tool text and adds overheadChars', () => {
     // name 4 + args {"q":"a"} 9 + result 11 = 24 chars → 6. With 16 of overhead: 40 → 10.
     const messages = [msg(1, 'assistant', [step('c1', 'find', { q: 'a' }, 'x'.repeat(11))])]
-    expect(estimateTokens(messages, null, 1, 0)).toBe(6)
-    expect(estimateTokens(messages, null, 1, 16)).toBe(10)
+    expect(estimateTokens(messages, null, 1, 0, stepChars)).toBe(6)
+    expect(estimateTokens(messages, null, 1, 16, stepChars)).toBe(10)
   })
 })
 
@@ -325,6 +328,7 @@ describe('planWindow', () => {
       blobUrl: () => undefined,
       modelId: 'm/a',
       toolsEnabled: false,
+      plain: false,
     })
     // pinned m3 (user) + m7 (user) merge into one turn, then m8..m12
     expect(out).toHaveLength(6)
@@ -392,7 +396,7 @@ describe('planWindow', () => {
 })
 
 describe('viewWindow', () => {
-  const view = { windowStartId: null, windowStartOrder: null, setting: tokens100, system: null, ratio: 1, overheadChars: 0 }
+  const view = { stepChars, windowStartId: null, windowStartOrder: null, setting: tokens100, system: null, ratio: 1, overheadChars: 0 }
 
   it('shows the stored start and never trims, even over the limit', () => {
     // 10 × 40 chars = 100 tokens from m3 on (8 messages = 80) plus pinned m1 (10) = 90; limit 50.
@@ -440,5 +444,63 @@ describe('raisesLimit', () => {
   it('a mode switch is not a raise: the two limits do not compare', () => {
     expect(raisesLimit(t(32000), { mode: 'messages', limit: 40, trimTo: 0.7 })).toBe(false)
     expect(raisesLimit({ mode: 'messages', limit: 4, trimTo: 0.7 }, t(1000))).toBe(false)
+  })
+})
+
+describe('tool text that is not sent', () => {
+  const RESULT = 8000
+  /** `n` turns: a short question, then a reply with one big step by 'm/a' and a short text. */
+  const turns = (n: number): Message[] =>
+    Array.from({ length: n }, (_, i) => [
+      msg(2 * i + 1, 'user', 'x'.repeat(40)),
+      msg(2 * i + 2, 'assistant', [step(`c${i}`, 'find', { q: 'a' }, 'r'.repeat(RESULT)), { type: 'text', text: 'y'.repeat(40) }]),
+    ]).flat()
+  const asked = (order: number) => msg(order, 'user', 'x'.repeat(40))
+  const tokens32k: ContextSetting = { mode: 'tokens', limit: 32000, trimTo: 0.7 }
+  const plain = stepCounter({ modelId: 'm/a', toolsEnabled: false, plain: true })
+  const flat = stepCounter({ modelId: 'm/a', toolsEnabled: false, plain: false })
+  const otherModel = stepCounter({ modelId: 'm/b', toolsEnabled: true, plain: false })
+
+  it('a real call counts name, arguments and result', () => {
+    expect(estimateTokens(turns(1), null, 1, 0, stepChars)).toBe(Math.ceil((40 + 40 + 4 + 9 + RESULT) / 4))
+  })
+
+  it('a flattened step counts its one line, with tools off or by another model', () => {
+    const line = '(Used find.)'.length
+    expect(estimateTokens(turns(1), null, 1, 0, flat)).toBe(Math.ceil((80 + line) / 4))
+    expect(estimateTokens(turns(1), null, 1, 0, otherModel)).toBe(Math.ceil((80 + line) / 4))
+  })
+
+  it('a plain chat counts no step at all', () => {
+    expect(estimateTokens(turns(1), null, 1, 0, plain)).toBe(20)
+  })
+
+  it('viewWindow, which the header reads, counts steps the same way', () => {
+    const view = { messages: turns(1), windowStartId: null, windowStartOrder: null, setting: tokens32k, system: null, ratio: 1, overheadChars: 0 }
+    expect(viewWindow({ ...view, stepChars: flat }).size).toBe(estimateTokens(turns(1), null, 1, 0, flat))
+    expect(viewWindow({ ...view, stepChars: plain }).size).toBe(20)
+  })
+
+  it('a plain chat does not trim for text it does not send, and a tool chat does', () => {
+    const messages = [...turns(18), asked(37)]
+    const plan = { ...base, messages, setting: tokens32k }
+    expect(planWindow({ ...plan, stepChars }).trimmed).toBe(true)
+    const r = planWindow({ ...plan, stepChars: plain })
+    expect(r).toMatchObject({ trimmed: false, startId: null })
+    expect(r.size).toBe(Math.ceil(((18 * 2 + 1) * 40) / 4))
+    expect(planWindow({ ...plan, stepChars: flat }).trimmed).toBe(false)
+  })
+
+  it('the count stays near what goes out', () => {
+    const messages = [...turns(10), asked(21)]
+    for (const [s, options] of [
+      [flat, { toolsEnabled: false, plain: false }],
+      [plain, { toolsEnabled: false, plain: true }],
+    ] as const) {
+      const out = buildOutgoing(messages, { system: null, windowStartId: null, inputModalities: ['text'], blobUrl: () => undefined, modelId: 'm/a', ...options })
+      const sent = out.reduce((n, m) => n + (typeof m.content === 'string' ? m.content.length : 0), 0)
+      expect(estimateTokens(messages, null, 1, 0, s) * 4).toBeGreaterThanOrEqual(sent - 40)
+      expect(estimateTokens(messages, null, 1, 0, s) * 4).toBeLessThanOrEqual(sent + 40)
+    }
   })
 })

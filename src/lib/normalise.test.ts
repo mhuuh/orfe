@@ -1,7 +1,7 @@
 import { afterEach, describe, expect, it } from 'vitest'
 import { setAbilitiesForTest, type Ability } from './abilities/registry'
 import { setModelRulesForTest } from './modelRules'
-import { buildOutgoing, renderRounds } from './normalise'
+import { buildOutgoing, renderRounds, stepCounter } from './normalise'
 import type { OutMessage } from './openrouter'
 import type { ContentPart, Message, Role, ToolPart, Version } from './types'
 
@@ -35,6 +35,7 @@ const base = {
   blobUrl: () => undefined,
   modelId: 'm/a',
   toolsEnabled: false,
+  plain: false,
 }
 
 describe('buildOutgoing', () => {
@@ -452,5 +453,69 @@ describe('tool steps', () => {
       const ms = [msg('m1', 'user', 'q'), msg('m2', 'assistant', [step('c1', { model: modelId })])]
       expect(buildOutgoing(ms, { ...withTools, modelId })[1]).toEqual({ role: 'assistant', content: '(Used lookup.)' })
     }
+  })
+})
+
+describe('a plain chat', () => {
+  const plain = { ...base, plain: true }
+
+  it('sends the text of a reply and none of its steps', () => {
+    const ms = [msg('m1', 'user', 'q'), msg('m2', 'assistant', [step('c1'), text('done'), step('c2')]), msg('m3', 'user', 'next')]
+    expect(buildOutgoing(ms, plain)).toEqual([
+      { role: 'user', content: 'q' },
+      { role: 'assistant', content: 'done' },
+      { role: 'user', content: 'next' },
+    ])
+  })
+
+  it('wins over a stale tools flag, so a step never goes out as a real call', () => {
+    const ms = [msg('m1', 'user', 'q'), msg('m2', 'assistant', [step('c1')]), msg('m3', 'user', 'next')]
+    expect(JSON.stringify(buildOutgoing(ms, { ...plain, toolsEnabled: true }))).not.toContain('c1')
+  })
+
+  it('a tool-only reply leaves no empty message, and the turns around it join', () => {
+    const ms = [msg('m1', 'user', 'first'), msg('m2', 'assistant', [step('c1')]), msg('m3', 'user', 'second')]
+    expect(buildOutgoing(ms, plain)).toEqual([{ role: 'user', content: 'first\n\nsecond' }])
+  })
+
+  it('a window that starts on a tool-only reply starts with the next user turn', () => {
+    const ms = [msg('m1', 'user', 'first'), msg('m2', 'assistant', [step('c1')]), msg('m3', 'user', 'second')]
+    expect(buildOutgoing(ms, { ...plain, windowStartId: 'm2' })).toEqual([{ role: 'user', content: 'second' }])
+  })
+
+  it('a tool-only reply before a text reply leaves one assistant turn', () => {
+    const ms = [msg('m1', 'user', 'q'), msg('m2', 'assistant', [step('c1')]), msg('m3', 'assistant', 'said')]
+    expect(buildOutgoing(ms, plain)).toEqual([
+      { role: 'user', content: 'q' },
+      { role: 'assistant', content: 'said' },
+    ])
+  })
+})
+
+describe('stepCounter', () => {
+  const part = step('c1', { name: 'find', args: { q: 'a' }, result: 'x'.repeat(100) })
+  const line = '(Used find.)'.length
+
+  afterEach(() => setModelRulesForTest())
+
+  it('agrees with buildOutgoing on real calls and flattened steps', () => {
+    const on = { modelId: 'm/a', toolsEnabled: true, plain: false }
+    expect(stepCounter(on)(part)).toBe(4 + 9 + 100)
+    expect(stepCounter({ ...on, toolsEnabled: false })(part)).toBe(line)
+    expect(stepCounter({ ...on, modelId: 'm/b' })(part)).toBe(line)
+    expect(stepCounter({ ...on, plain: true })(part)).toBe(0)
+    // A name a provider would refuse flattens.
+    expect(stepCounter(on)({ ...part, name: 'bad name' })).toBe('(Used bad name.)'.length)
+  })
+
+  it('counts bad arguments as what goes out: an empty object', () => {
+    const on = { modelId: 'm/a', toolsEnabled: true, plain: false }
+    expect(stepCounter(on)({ ...part, args: undefined })).toBe(4 + 2 + 100)
+    expect(stepCounter(on)({ ...part, args: 'not json' })).toBe(4 + 2 + 100)
+  })
+
+  it('follows the model rules', () => {
+    setModelRulesForTest([{ pattern: /^m\/a/, rule: { flattenAll: true } }])
+    expect(stepCounter({ modelId: 'm/a', toolsEnabled: true, plain: false })(part)).toBe(line)
   })
 })

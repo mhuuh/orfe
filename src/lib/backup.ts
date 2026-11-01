@@ -1,4 +1,5 @@
 import { db } from './db'
+import { isAnyGenerating } from './send'
 import { storage } from './storage'
 import type { Settings } from './types'
 
@@ -59,8 +60,10 @@ async function parse(file: Blob): Promise<BackupFile> {
 /**
  * Merge adds the file's rows by id and keeps the rest; settings on the phone stay as they are.
  * Replace makes each table in the file match it; tables the file lacks stay. Both keep this phone's key. `added` counts rows that were new here.
+ * Refused while a reply runs: a Replace would take its message away, and a reply that waits for an OK would then hang.
  */
 export async function importBackup(file: Blob, mode: 'merge' | 'replace'): Promise<{ added: number }> {
+  if (isAnyGenerating()) throw new Error('Wait for the reply to finish, then restore.')
   const data = await parse(file)
   const tables = kept()
   return db.transaction('rw', tables, async () => {

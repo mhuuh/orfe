@@ -78,6 +78,15 @@ button.line:focus-visible {
   cursor: pointer;
   -webkit-tap-highlight-color: transparent;
 }
+/* The one tap a waiting reply needs: a full 44 px target. */
+.ok {
+  display: block;
+  min-width: 44px;
+  min-height: 44px;
+  margin-top: 0;
+  padding: 0;
+  text-align: left;
+}
 .action:focus-visible {
   text-decoration-color: currentColor;
   outline: none;

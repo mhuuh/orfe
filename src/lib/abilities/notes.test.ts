@@ -747,7 +747,7 @@ describe('step words', () => {
           ],
         },
       ],
-      { system: null, windowStartId: null, inputModalities: [], blobUrl: () => undefined, modelId: 'm', toolsEnabled: true },
+      { system: null, windowStartId: null, inputModalities: [], blobUrl: () => undefined, modelId: 'm', toolsEnabled: true, plain: false },
     )
     expect(JSON.stringify(out)).toContain('Tried to write the note Harbour')
   })

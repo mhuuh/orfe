@@ -2,7 +2,7 @@ import { UNCHECKED } from './abilities/outcome'
 import { activeAbilities, needsOk, runTool, toolsFor, wantsIndex, type Ability } from './abilities/registry'
 import { fallbackModelInfo, type ModelInfo } from './catalog'
 import { estimateTokens, fingerprint, isCold, planWindow, ttlFor } from './context'
-import { buildOutgoing, renderRounds } from './normalise'
+import { buildOutgoing, renderRounds, stepCounter } from './normalise'
 import { buildIndex } from './notes/index'
 import { notes, writeResult, type UndoReport } from './notes/store'
 import { mergeReasoning, streamChat, type ChatRequest, type OutMessage, type StreamEvent } from './openrouter'
@@ -417,6 +417,7 @@ function outgoingFor(
   windowStartId: string | null,
   model: ModelInfo,
   toolsEnabled: boolean,
+  plain: boolean,
 ): OutMessage[] {
   return buildOutgoing(messages, {
     system,
@@ -425,6 +426,7 @@ function outgoingFor(
     blobUrl: () => undefined,
     modelId: model.id,
     toolsEnabled,
+    plain,
   })
 }
 
@@ -450,6 +452,7 @@ export interface ColdInput {
   model: ModelInfo
   /** Hash of the tools JSON that goes out. Null: no tools. */
   toolsHash: string | null
+  plain: boolean
   anthropicCacheHour: boolean
   now: number
 }
@@ -464,7 +467,7 @@ export function computeCold(a: ColdInput): boolean {
     model: a.model.id,
     provider: PROVIDER_PREFERENCE,
     toolsHash: a.toolsHash,
-    outgoing: outgoingFor(a.messages, a.system, a.windowStartId, a.model, a.toolsHash !== null),
+    outgoing: outgoingFor(a.messages, a.system, a.windowStartId, a.model, a.toolsHash !== null, a.plain),
     now: a.now,
     ttlMs: ttlFor(a.model.id, a.anthropicCacheHour),
   })
@@ -509,6 +512,7 @@ async function startReply(
   const setting = conversation.context ?? settings.context
   const tools = toolsFor(conversation, prompt, model)
   const overheadChars = tools?.json.length ?? 0
+  const stepChars = stepCounter({ modelId: model.id, toolsEnabled: tools !== null, plain: conversation.plain })
   // With no abilities, a call that a model makes up finds nothing to run.
   const enabled = activeAbilities(conversation, prompt, model)
 
@@ -542,6 +546,7 @@ async function startReply(
     windowStartId: storedId,
     model,
     toolsHash: tools?.hash ?? null,
+    plain: conversation.plain,
     anthropicCacheHour: settings.anthropicCacheHour,
     now: Date.now(),
   })
@@ -556,6 +561,7 @@ async function startReply(
     cold,
     soft: SOFT_THRESHOLD,
     overheadChars,
+    stepChars,
   })
   // A warm send can still trim. The plan used the old index: a larger new one shows at the next send.
   if (wantsIndex(enabled) && plan.trimmed && !indexFresh) await refreshIndex()
@@ -578,9 +584,9 @@ async function startReply(
   const effort =
     conversation.nextEffort !== null && (model.efforts !== null || model.unlisted === true) ? conversation.nextEffort : undefined
   // Built before the new version exists, so a continue prefills with the old text.
-  const outgoing = outgoingFor(messages, system, plan.startId, model, tools !== null)
+  const outgoing = outgoingFor(messages, system, plan.startId, model, tools !== null, conversation.plain)
   // Ratio 1: tokenRatio is the correction to this raw estimate, not a correction of a correction.
-  const estimate = estimateTokens(windowOf(messages, plan.startId), system, 1, overheadChars)
+  const estimate = estimateTokens(windowOf(messages, plan.startId), system, 1, overheadChars, stepChars)
   const cacheControl: ChatRequest['cacheControl'] = model.id.startsWith('anthropic/')
     ? { type: 'ephemeral', ...(settings.anthropicCacheHour ? { ttl: '1h' as const } : {}) }
     : undefined
@@ -595,7 +601,7 @@ async function startReply(
   }
   // A continued reply goes out from its own parts, each round. If the base held it too, each call
   // would go out twice. A text reply keeps its old first request: `outgoing` with the old text as prefill.
-  const base = target.kind === 'continue' ? outgoingFor(sendable(messages, target.messageId), system, plan.startId, model, tools !== null) : outgoing
+  const base = target.kind === 'continue' ? outgoingFor(sendable(messages, target.messageId), system, plan.startId, model, tools !== null, conversation.plain) : outgoing
   const prefill = target.kind === 'continue' && !initial.some(isTool) ? outgoing : null
   const version: Version = {
     id: versionId,
@@ -749,6 +755,7 @@ async function run(a: RunArgs): Promise<void> {
   let content: ContentPart[] = a.initial
   let roundReasoning = a.roundReasoning
   let round = nextRound(content)
+  const firstRound = round
   let reasoningText = ''
   let reasoned = false
   // Finished rounds, then this round. Reasoning never merges across rounds: indexes start over in each.
@@ -778,13 +785,16 @@ async function run(a: RunArgs): Promise<void> {
     else content = [...content, { type: 'text', text }]
   }
 
+  /** A plain chat sends no old steps. A call made up in this run stays, so the model reads that it failed. */
+  const sentParts = (): ContentPart[] => (conversation.plain ? content.filter((p) => !isTool(p) || p.round >= firstRound) : content)
+
   /** One request and its stream. `first`: the first request of this run. */
   const streamRound = async (first: boolean): Promise<RoundEnd> => {
     const end: RoundEnd = { finished: false, calls: [], replied: false, errored: null, aborted: false }
     const outgoing =
       first && a.prefill
         ? a.prefill
-        : withTurn(a.base, renderRounds(content, { modelId: a.model.id, toolsEnabled: a.tools !== null, reasoning: roundReasoning }))
+        : withTurn(a.base, renderRounds(sentParts(), { modelId: a.model.id, toolsEnabled: a.tools !== null, reasoning: roundReasoning }))
     let counted: Usage | null = null
     let accepted = false
 
@@ -962,7 +972,7 @@ async function run(a: RunArgs): Promise<void> {
   }
 
   const runPart = async (part: ToolPart): Promise<void> => {
-    if (needsOk(part.name, content.filter(isTool))) {
+    if (needsOk(part.name, a.enabled, content.filter(isTool))) {
       await waitForOk(part.callId)
       // Stop: the end of the run closes this part with the other open ones.
       if (controller.signal.aborted) return

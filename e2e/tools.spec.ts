@@ -1,4 +1,4 @@
-import { MODEL_A, MODEL_B, MODEL_B_NAME, TOOLCALL, TWOCALLS, expect, send, signIn, test } from './fixtures'
+import { MODEL_A, MODEL_B, MODEL_B_NAME, SLOW, TOOLCALL, TWOCALLS, expect, send, signIn, test } from './fixtures'
 import type { Page } from '@playwright/test'
 import type { Ability } from '../src/lib/abilities/registry'
 
@@ -227,6 +227,32 @@ test('a plain chat sends only the prompt and the messages', async ({ page, api }
   expect(api.chats[2].tools).toHaveLength(5)
 })
 
+test('Plain on drops old steps from the request, and off brings them back', async ({ page, api }) => {
+  await signIn(page)
+  await send(page, `${TOOLCALL}:notes_write:${harbour}`)
+  await expect(page.getByText(/^Reply 2 /)).toBeVisible()
+  const line = page.getByRole('button', { name: /^wrote Harbour/ })
+  await expect(line).toBeVisible()
+
+  const sheet = await chatSettings(page)
+  await sheet.getByRole('switch', { name: 'Plain chat' }).click()
+  await sheet.getByRole('button', { name: 'Close' }).click()
+  await send(page, 'plain now')
+  await expect(page.getByText(/^Reply 3 /)).toBeVisible()
+  const sent = api.chats[2].messages
+  expect(sent.map((m) => m.role)).toEqual(['user', 'assistant', 'user'])
+  expect(sent[1].content).toBe(`Reply 2 from ${MODEL_A}`)
+  // The chat still shows what happened.
+  await expect(line).toBeVisible()
+
+  await chatSettings(page)
+  await sheet.getByRole('switch', { name: 'Plain chat' }).click()
+  await sheet.getByRole('button', { name: 'Close' }).click()
+  await send(page, 'tools again')
+  await expect(page.getByText(/^Reply 4 /)).toBeVisible()
+  expect(api.chats[3].messages.some((m) => m.role === 'tool')).toBe(true)
+})
+
 test("a prompt's Abilities row sets what its chats follow", async ({ page, api }) => {
   await signIn(page)
   await page.getByRole('button', { name: /^Prompt:/ }).click()
@@ -269,9 +295,19 @@ test('a no-tools model shows the notice and still replies', async ({ page, api }
   await expect(page.getByRole('button', { name: /^Model:/ })).toBeVisible()
   await expect(notice).toHaveCount(0)
 
-  await page.getByRole('button', { name: /^Model:/ }).click()
-  await page.getByRole('button', { name: new RegExp(MODEL_B_NAME) }).click()
+  const pick = async (name: string) => {
+    await page.getByRole('button', { name: /^Model:/ }).click()
+    await page.getByRole('button', { name: new RegExp(name) }).click()
+    await expect(page.getByRole('button', { name: `Model: ${name}. Change` })).toBeVisible()
+  }
+  await pick(MODEL_B_NAME)
   await expect(notice).toBeVisible()
+
+  // Away and back before a send: it does not show twice.
+  await pick('Anthropic: Claude Sonnet 5.5')
+  await expect(notice).toHaveCount(0)
+  await pick(MODEL_B_NAME)
+  await expect(notice).toHaveCount(0)
 
   await send(page, 'hi')
   await expect(page.getByText(/^Reply 1 /)).toBeVisible()
@@ -308,6 +344,9 @@ test('after untrusted content a write waits for a visible OK', async ({ page, ap
   const ok = page.getByRole('button', { name: 'OK', exact: true })
   await expect(ok).toBeVisible()
   await expect(page.getByText(/waits for your OK/)).toBeVisible()
+  const box = await ok.boundingBox()
+  expect(box?.width).toBeGreaterThanOrEqual(44)
+  expect(box?.height).toBeGreaterThanOrEqual(44)
   await expect(page.getByRole('button', { name: 'Stop' })).toBeVisible()
   expect(api.chats).toHaveLength(1)
 
@@ -335,6 +374,21 @@ test('a lock during the wait leaves Continue, and Continue asks again', async ({
   expect(api.chats).toHaveLength(1)
   await ok.click()
   await expect(page.getByText(/^Reply 2 /)).toBeVisible()
+})
+
+test('a restore during a reply is refused with a reason', async ({ page }) => {
+  await signIn(page)
+  await send(page, `${SLOW} go`)
+  await expect(page.getByRole('button', { name: 'Stop' })).toBeVisible()
+  const message = await page.evaluate(async () => {
+    const url = '/orfe/src/lib/backup.ts'
+    const backup = (await import(/* @vite-ignore */ url)) as typeof import('../src/lib/backup')
+    return backup.importBackup(new Blob(['{}']), 'replace').then(
+      () => 'restored',
+      (e: Error) => e.message,
+    )
+  })
+  expect(message).toBe('Wait for the reply to finish, then restore.')
 })
 
 test('Stop ends a reply that waits for an OK', async ({ page }) => {

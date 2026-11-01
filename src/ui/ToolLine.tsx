@@ -112,7 +112,7 @@ export function ToolLine({ part, messageId, locked = false, waitingIn }: Props) 
         {waitingIn !== undefined && (
           <div className={css.detail} onClick={(e) => e.stopPropagation()}>
             <div className={css.note}>This reply read outside text, so this step waits for your OK. Stop ends the reply.</div>
-            <button className={css.action} onClick={() => okStep(waitingIn, part.callId)}>
+            <button className={`${css.action} ${css.ok}`} onClick={() => okStep(waitingIn, part.callId)}>
               OK
             </button>
           </div>

@@ -138,9 +138,14 @@ export const writesNotes = (toolName: string): boolean => abilityOf(toolName)?.w
 /**
  * The trust gate (spec §13). After an `untrusted` result in this reply, a note write or an `outward`
  * tool waits for a visible OK. A stopped call gave the model nothing, and an open one nothing yet.
- * Nothing that ships is `untrusted`, so today nothing waits.
+ * A tool that is not in `enabled` has nothing to hold: `runTool` refuses it. Nothing that ships is
+ * `untrusted`, so today nothing waits.
+ *
+ * The gate covers one reply. The first `untrusted` ability must extend it to the steps in the sent
+ * window, or a model that read such text in one reply can write freely in the next.
  */
-export function needsOk(toolName: string, reply: ToolPart[]): boolean {
+export function needsOk(toolName: string, enabled: Ability[], reply: ToolPart[]): boolean {
+  if (!enabled.some((a) => a.tools.some((t) => t.name === toolName))) return false
   if (!writesNotes(toolName) && !abilityOf(toolName)?.traits.outward) return false
   return reply.some((p) => (p.status === 'done' || p.status === 'error') && abilityOf(p.name)?.traits.untrusted)
 }

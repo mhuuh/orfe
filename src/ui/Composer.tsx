@@ -100,7 +100,7 @@ export function Composer({ conversationId: id }: { conversationId: string }) {
   const [promptSheet, setPromptSheet] = useState(false)
   // A model picked in the sheet may come from a fresher catalog than ours.
   const [picked, setPicked] = useState<ModelInfo | null>(null)
-  /** The model whose no-tools notice shows now. It goes at the next send. */
+  /** The model whose no-tools notice shows now. It goes at the next send or model change. */
   const [notice, setNotice] = useState<string | null>(null)
 
   const root = useRef<HTMLElement>(null)
@@ -287,6 +287,7 @@ export function Composer({ conversationId: id }: { conversationId: string }) {
   const pick = (m: ModelInfo) => {
     setPicked(m)
     setSheet(false)
+    if (m.id !== modelId) setNotice(null)
     const patch: Partial<Conversation> = { nextModel: m.id }
     // An effort the new model does not offer would not be sent; drop it so the chip tells the truth.
     if (conv?.nextEffort && !m.efforts?.includes(conv.nextEffort)) patch.nextEffort = null

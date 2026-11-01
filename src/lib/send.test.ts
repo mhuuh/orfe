@@ -486,6 +486,7 @@ async function coldNow(m: ModelInfo = A): Promise<boolean> {
     windowStartId: c.windowStartMessageId,
     model: m,
     toolsHash: toolsFor(c, prompt, m)?.hash ?? null,
+    plain: c.plain,
     anthropicCacheHour: s.anthropicCacheHour,
     now: Date.now(),
   })
@@ -1949,7 +1950,7 @@ describe('rerolls, deletes and edits', () => {
     const lastRequest = { model: T.id, provider: null, toolsHash, ...fingerprint(sent), at: Date.now() }
     await storage.updateConversation(convId, { lastRequest })
     const cut = (await storage.listMessages(convId)).filter((x) => x.order < m.order)
-    expect(computeCold({ lastRequest, messages: cut, system, windowStartId: null, model: T, toolsHash, anthropicCacheHour: false, now: Date.now() })).toBe(false)
+    expect(computeCold({ lastRequest, messages: cut, system, windowStartId: null, model: T, toolsHash, plain: false, anthropicCacheHour: false, now: Date.now() })).toBe(false)
 
     const f = stubFetch(() => sse(reply('New')))
     await generate(convId, { kind: 'reroll', messageId: m.id }, T)
@@ -2103,15 +2104,90 @@ describe('abilities in settings', () => {
     expect((await steps())[0].result).toContain('You have no tools in this chat.')
   })
 
-  it('old steps go out as plain text in a plain chat, so no tool message is left without its tools', async () => {
+  it('turning plain on drops old steps from the request, and off brings them back', async () => {
     const f = stubFetch(() => sse(asks(['c1', 'one', '{}'])), () => sse(reply('Done')), () => sse(reply('Fine')))
+    await go('first')
+    const stored = (await steps()).map((p) => p.callId)
+
+    await setPlain(convId, true)
+    await go('second')
+    expect(bodyOf(f, 2).messages).toEqual([
+      { role: 'user', content: 'first' },
+      { role: 'assistant', content: 'Done' },
+      { role: 'user', content: 'second' },
+    ])
+    expect((await storage.listMessages(convId)).at(1)!.versions[0].content.filter((p) => p.type === 'tool')).toHaveLength(stored.length)
+    // The next plain request extends this one.
+    expect(await coldNow(T)).toBe(false)
+
+    await setPlain(convId, false)
+    expect(await coldNow(T)).toBe(true)
+    await go('third')
+    const back = bodyOf(f, 3).messages
+    expect(back.find((m) => m.tool_calls)?.tool_calls?.[0].id).toBe('c1')
+    expect(back.find((m) => m.role === 'tool')?.tool_call_id).toBe('c1')
+    expectValid(back)
+  })
+
+  it('a tool-only reply in a plain chat leaves a valid request, and the fingerprint holds', async () => {
+    const f = stubFetch(
+      () => sse(asks(['c1', 'one', '{}'])),
+      () => sse([finish('stop'), usageChunk(), DONE]),
+      () => sse(reply('Fine')),
+      () => sse(reply('Good')),
+    )
     await go('first')
     await setPlain(convId, true)
     await go('second')
-    const { messages } = bodyOf(f, 2)
-    expect(messages.map((m) => m.role)).toEqual(['user', 'assistant', 'user'])
-    expect(messages[1].content).toContain('(Used one.)')
-    expect(messages[1].tool_calls).toBeUndefined()
+    expect(bodyOf(f, 2).messages).toEqual([{ role: 'user', content: 'first\n\nsecond' }])
+    expect(await coldNow(T)).toBe(false)
+
+    await go('third')
+    expect(bodyOf(f, 3).messages).toEqual([
+      { role: 'user', content: 'first\n\nsecond' },
+      { role: 'assistant', content: 'Fine' },
+      { role: 'user', content: 'third' },
+    ])
+    expect(await coldNow(T)).toBe(false)
+  })
+
+  it('a plain chat with big old steps sends every message: nothing trims for text it does not send', async () => {
+    const f = stubFetch(() => sse(reply('ok')))
+    for (let i = 0; i < 18; i++) {
+      await storage.appendMessage(convId, 'user', doneVersion(`question ${i}`))
+      await storage.appendMessage(convId, 'assistant', {
+        id: newId(),
+        content: [step(`c${i}`, 0, { name: 'one', result: 'r'.repeat(8000) }), { type: 'text', text: `answer ${i}` }],
+        status: 'done',
+        model: T.id,
+        createdAt: 1,
+      })
+    }
+    await setPlain(convId, true)
+    await go('last')
+    expect(bodyOf(f, 0).messages[0]).toEqual({ role: 'user', content: 'question 0' })
+    expect((await storage.getConversation(convId))!.windowStartMessageId).toBeNull()
+  })
+
+  it('Continue in a plain chat sends no old steps, and a call made up in this run still gets its answer', async () => {
+    const f = stubFetch(() => sse(asks(['c2', 'made_up', '{}'])), () => sse(reply('Fine')))
+    await storage.appendMessage(convId, 'user', doneVersion('go'))
+    const m = await storage.appendMessage(convId, 'assistant', {
+      id: newId(),
+      content: [step('c1', 0, { name: 'one' }), { type: 'text', text: 'So far' }],
+      status: 'interrupted',
+      model: T.id,
+      createdAt: 1,
+    })
+    await setPlain(convId, true)
+    await generate(convId, { kind: 'continue', messageId: m.id }, T)
+    expect(bodyOf(f, 0).messages).toEqual([
+      { role: 'user', content: 'go' },
+      { role: 'assistant', content: 'So far' },
+    ])
+    const second = JSON.stringify(bodyOf(f, 1).messages)
+    expect(second).not.toContain('(Used one.)')
+    expect(second).toContain('(Tried made_up. It failed.)')
   })
 
   it('turning plain off brings back the switches as they were, and the next request reads cold', async () => {
@@ -2194,6 +2270,17 @@ describe('trust gate', () => {
     okStep(convId, 'c3')
     await running
     expect(ran).toEqual(['web', 'look', 'post'])
+  })
+
+  it('a write whose ability is switched off does not ask: it fails at once', async () => {
+    const f = stubFetch(() => sse(reply('Fine')))
+    await setAbility(convId, 'save', false)
+    const m = await leftBehind(webThenOpenSave())
+    await generate(convId, { kind: 'continue', messageId: m.id }, T)
+    expect(ran).toEqual([])
+    expect((await steps())[1]).toMatchObject({ status: 'error' })
+    expect((await steps())[1].result).toContain('no tool called "save"')
+    expect(f).toHaveBeenCalledTimes(1)
   })
 
   it('a write before the untrusted content does not wait, and a new reply starts clean', async () => {

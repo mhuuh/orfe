@@ -1,5 +1,7 @@
-import { beforeEach, describe, expect, it } from 'vitest'
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { backupDue, exportBackup, importBackup } from './backup'
+import { fallbackModelInfo } from './catalog'
+import { generate, isGenerating, stop } from './send'
 import { db, storage } from './storage'
 
 const DAY = 86_400_000
@@ -137,5 +139,31 @@ describe('backupDue', () => {
     expect(backupDue(s(now - 3 * DAY), now - 1 * DAY, now)).toBe(false) // too soon
     expect(backupDue(s(null), now - 1 * DAY, now)).toBe(true) // never backed up
     expect(backupDue(s(null), 0, now)).toBe(false) // no content at all
+  })
+})
+
+describe('restore during a reply', () => {
+  afterEach(() => vi.unstubAllGlobals())
+
+  it('is refused, on both modes, and changes nothing', async () => {
+    const chat = await seed()
+    const file = await exportBackup()
+    await storage.updateConversation(chat.id, { title: 'Changed' })
+    await storage.appendMessage(chat.id, 'user', { id: 'v', content: [{ type: 'text', text: 'hi' }], status: 'done', createdAt: 1 })
+    // A request that hangs until Stop, like a reply that waits.
+    vi.stubGlobal('fetch', (_url: string, init: RequestInit) =>
+      new Promise((_, reject) => init.signal?.addEventListener('abort', () => reject(new DOMException('aborted', 'AbortError')))),
+    )
+    const running = generate(chat.id, { kind: 'new' }, fallbackModelInfo('a/b'))
+    expect(isGenerating(chat.id)).toBe(true)
+
+    await expect(importBackup(file, 'replace')).rejects.toThrow('Wait for the reply to finish, then restore.')
+    await expect(importBackup(file, 'merge')).rejects.toThrow('Wait for the reply to finish, then restore.')
+    expect((await storage.getConversation(chat.id))?.title).toBe('Changed')
+
+    stop(chat.id)
+    await running
+    await expect(importBackup(file, 'replace')).resolves.toBeDefined()
+    expect((await storage.getConversation(chat.id))?.title).toBe('Hello')
   })
 })

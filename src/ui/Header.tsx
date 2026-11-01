@@ -2,6 +2,7 @@ import { useState } from 'react'
 import { useLiveQuery } from 'dexie-react-hooks'
 import { toolsFor } from '../lib/abilities/registry'
 import { viewWindow } from '../lib/context'
+import { stepCounter } from '../lib/normalise'
 import { storage } from '../lib/storage'
 import { systemFor } from '../lib/system'
 import type { Message } from '../lib/types'
@@ -58,6 +59,7 @@ export function Header({ conversationId, onMenu, onNotes }: Props) {
     const model = findModel(models, conv.nextModel)
     const { system, prompt } = await systemFor(conv, model)
     const setting = conv.context ?? settings.context
+    const tools = toolsFor(conv, prompt, model)
     // Display only: the stored window, never trimmed here. Sending decides trims.
     const view = viewWindow({
       messages,
@@ -66,7 +68,8 @@ export function Header({ conversationId, onMenu, onNotes }: Props) {
       setting,
       system,
       ratio: conv.tokenRatio,
-      overheadChars: toolsFor(conv, prompt, model)?.json.length ?? 0,
+      overheadChars: tools?.json.length ?? 0,
+      stepChars: stepCounter({ modelId: model.id, toolsEnabled: tools !== null, plain: conv.plain }),
     })
     const meta = headerMeta({
       turns: messages.filter((m) => m.role === 'user').length,

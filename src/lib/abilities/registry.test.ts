@@ -179,20 +179,24 @@ describe('switches and the trust gate', () => {
       { ...fake('note', ['save', 'read']), writes: ['save'] },
     ])
     const read = [step('web')]
-    expect(needsOk('save', read)).toBe(true)
-    expect(needsOk('out', read)).toBe(true)
-    expect(needsOk('read', read)).toBe(false)
-    expect(needsOk('web', read)).toBe(false)
-    expect(needsOk('save', [])).toBe(false)
-    expect(needsOk('save', [step('read')])).toBe(false)
+    expect(needsOk('save', ABILITIES, read)).toBe(true)
+    expect(needsOk('out', ABILITIES, read)).toBe(true)
+    expect(needsOk('read', ABILITIES, read)).toBe(false)
+    expect(needsOk('web', ABILITIES, read)).toBe(false)
+    expect(needsOk('save', ABILITIES, [])).toBe(false)
+    expect(needsOk('save', ABILITIES, [step('read')])).toBe(false)
     // An error can still quote what it read. A stopped or open call gave nothing.
-    expect(needsOk('save', [step('web', 'error')])).toBe(true)
-    expect(needsOk('save', [step('web', 'stopped')])).toBe(false)
-    expect(needsOk('save', [step('web', 'running')])).toBe(false)
+    expect(needsOk('save', ABILITIES, [step('web', 'error')])).toBe(true)
+    expect(needsOk('save', ABILITIES, [step('web', 'stopped')])).toBe(false)
+    expect(needsOk('save', ABILITIES, [step('web', 'running')])).toBe(false)
+    // A tool that is switched off has nothing to hold: `runTool` refuses it.
+    expect(needsOk('save', ABILITIES.filter((a) => a.id !== 'note'), read)).toBe(false)
+    // An untrusted result still counts after its own ability went off.
+    expect(needsOk('save', ABILITIES.filter((a) => a.id !== 'web'), read)).toBe(true)
   })
 
   it('nothing shipped is untrusted, so the gate stays closed', () => {
     expect(ABILITIES.filter((a) => a.traits.untrusted)).toEqual([])
-    expect(needsOk('notes_write', [step('notes_read')])).toBe(false)
+    expect(needsOk('notes_write', ABILITIES, [step('notes_read')])).toBe(false)
   })
 })
