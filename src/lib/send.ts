@@ -177,12 +177,15 @@ function sendable(messages: Message[], upToId: string | undefined): Message[] {
   return cut >= 0 ? sorted.slice(0, cut) : sorted
 }
 
+/** No tools go out yet. The tool loop (a later task) sets `toolsEnabled`, `toolsHash` and `overheadChars`. */
 function outgoingFor(messages: Message[], system: string | null, windowStartId: string | null, model: ModelInfo): OutMessage[] {
   return buildOutgoing(messages, {
     system,
     windowStartId,
     inputModalities: model.inputModalities,
     blobUrl: () => undefined,
+    modelId: model.id,
+    toolsEnabled: false,
   })
 }
 
@@ -213,6 +216,7 @@ export function computeCold(a: ColdInput): boolean {
   return isCold(a.lastRequest, {
     model: a.model.id,
     provider: PROVIDER_PREFERENCE,
+    toolsHash: null,
     outgoing: outgoingFor(a.messages, a.system, a.windowStartId, a.model),
     now: a.now,
     ttlMs: ttlFor(a.model.id, a.anthropicCacheHour),
@@ -267,6 +271,7 @@ async function generateInner(
     ratio: conversation.tokenRatio,
     cold,
     soft: SOFT_THRESHOLD,
+    overheadChars: 0,
   })
 
   // Store the start whenever it moved (a trim, or a deleted start snapped to the next message),
@@ -450,6 +455,7 @@ async function run(a: RunArgs): Promise<void> {
       const lastRequest: LastRequest = {
         model: a.model.id,
         provider: PROVIDER_PREFERENCE,
+        toolsHash: null,
         ...fingerprint(a.outgoing),
         at: Date.now(),
       }

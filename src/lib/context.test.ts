@@ -1,8 +1,9 @@
 import { describe, expect, it } from 'vitest'
-import { estimateTokens, fingerprint, isCold, planWindow, raisesLimit, ttlFor, viewWindow } from './context'
+import { canonical, estimateTokens, fingerprint, isCold, planWindow, raisesLimit, ttlFor, viewWindow } from './context'
+import { hashText } from './hash'
 import { buildOutgoing } from './normalise'
 import type { OutMessage } from './openrouter'
-import type { ContentPart, ContextSetting, LastRequest, Message, Role } from './types'
+import type { ContentPart, ContextSetting, LastRequest, Message, Role, ToolPart } from './types'
 
 function msg(order: number, role: Role, text: string | ContentPart[], extra: Partial<Message> = {}): Message {
   const content: ContentPart[] = typeof text === 'string' ? [{ type: 'text', text }] : text
@@ -33,6 +34,11 @@ const base = {
   ratio: 1,
   cold: false,
   soft: 0.85,
+  overheadChars: 0,
+}
+
+function step(callId: string, name: string, args: unknown, result: string): ToolPart {
+  return { type: 'tool', callId, round: 0, model: 'm/a', name, args, result, status: 'done' }
 }
 
 describe('estimateTokens', () => {
@@ -54,6 +60,13 @@ describe('estimateTokens', () => {
     // rounds up: 5 chars → 1.25 → 2
     expect(estimateTokens([msg(1, 'user', 'abcde')], null, 1)).toBe(2)
     expect(estimateTokens([], null, 1)).toBe(0)
+  })
+
+  it('counts tool text and adds overheadChars', () => {
+    // name 4 + args {"q":"a"} 9 + result 11 = 24 chars → 6. With 16 of overhead: 40 → 10.
+    const messages = [msg(1, 'assistant', [step('c1', 'find', { q: 'a' }, 'x'.repeat(11))])]
+    expect(estimateTokens(messages, null, 1)).toBe(6)
+    expect(estimateTokens(messages, null, 1, 16)).toBe(10)
   })
 })
 
@@ -81,9 +94,9 @@ describe('isCold', () => {
     { role: 'assistant', content: 'world' },
     { role: 'user', content: 'next' },
   ]
-  const last: LastRequest = { model: 'm/a', provider: 'P', ...fingerprint(old), at: 1_000 }
+  const last: LastRequest = { model: 'm/a', provider: 'P', toolsHash: null, ...fingerprint(old), at: 1_000 }
   const extended: OutMessage[] = [...old, { role: 'assistant', content: 'reply' }, { role: 'user', content: 'more' }]
-  const next = { model: 'm/a', provider: 'P', outgoing: extended, now: 2_000, ttlMs: 300_000 }
+  const next = { model: 'm/a', provider: 'P', toolsHash: null, outgoing: extended, now: 2_000, ttlMs: 300_000 }
 
   it('fingerprint hashes the JSON of the outgoing array and counts it', () => {
     const fp = fingerprint(old)
@@ -123,6 +136,61 @@ describe('isCold', () => {
     expect(isCold(last, next)).toBe(false)
     // same request again (e.g. reroll of an identical prefix) is also warm
     expect(isCold(last, { ...next, outgoing: old })).toBe(false)
+  })
+
+  describe('with tools', () => {
+    const toolTurn = (result: string, reasoning?: unknown[]): OutMessage[] => [
+      { role: 'user', content: 'q' },
+      {
+        role: 'assistant',
+        content: null,
+        tool_calls: [{ id: 'c1', type: 'function', function: { name: 'find', arguments: '{}' } }],
+        ...(reasoning ? { reasoning_details: reasoning } : {}),
+      },
+      { role: 'tool', tool_call_id: 'c1', content: result },
+    ]
+
+    it('a changed tool result does not change the canonical hash', () => {
+      expect(fingerprint(toolTurn('short pointer')).prefixHash).toBe(fingerprint(toolTurn('a long result')).prefixHash)
+      const stored = { ...last, ...fingerprint(toolTurn('a long result')) }
+      const after: OutMessage[] = [...toolTurn('short pointer'), { role: 'user', content: 'more' }]
+      expect(isCold(stored, { ...next, outgoing: after })).toBe(false)
+    })
+
+    it('dropped reasoning does not change the canonical hash', () => {
+      expect(fingerprint(toolTurn('r', [{ id: 'r0' }])).prefixHash).toBe(fingerprint(toolTurn('r')).prefixHash)
+    })
+
+    it('a changed call id still changes the hash', () => {
+      const changed = toolTurn('r').map((m) => (m.role === 'tool' ? { ...m, tool_call_id: 'c2' } : m))
+      expect(fingerprint(changed).prefixHash).not.toBe(fingerprint(toolTurn('r')).prefixHash)
+    })
+
+    it('canonical leaves plain messages as they are, so hashes stored before this stay warm', () => {
+      expect(canonical(old)).toEqual(old)
+      expect(fingerprint(old).prefixHash).toBe(hashText(JSON.stringify(old)))
+    })
+
+    it('canonical does not change the request that goes out', () => {
+      const out = toolTurn('r', [{ id: 'r0' }])
+      canonical(out)
+      expect(out).toEqual(toolTurn('r', [{ id: 'r0' }]))
+    })
+
+    it('a different toolsHash reads cold', () => {
+      expect(isCold({ ...last, toolsHash: 'aaaa' }, { ...next, toolsHash: 'bbbb' })).toBe(true)
+      expect(isCold({ ...last, toolsHash: 'aaaa' }, { ...next, toolsHash: null })).toBe(true)
+      expect(isCold({ ...last, toolsHash: null }, { ...next, toolsHash: 'bbbb' })).toBe(true)
+      expect(isCold({ ...last, toolsHash: 'aaaa' }, { ...next, toolsHash: 'aaaa' })).toBe(false)
+    })
+
+    it('a null toolsHash on an old lastRequest reads warm when tools are absent', () => {
+      expect(isCold(last, next)).toBe(false)
+      // A row stored before this field existed has no toolsHash at all.
+      const { toolsHash: _gone, ...oldRow } = last
+      expect(isCold(oldRow as LastRequest, next)).toBe(false)
+      expect(isCold(oldRow as LastRequest, { ...next, toolsHash: 'aaaa' })).toBe(true)
+    })
   })
 })
 
@@ -255,6 +323,8 @@ describe('planWindow', () => {
       windowStartId: r.startId,
       inputModalities: ['text'],
       blobUrl: () => undefined,
+      modelId: 'm/a',
+      toolsEnabled: false,
     })
     // pinned m3 (user) + m7 (user) merge into one turn, then m8..m12
     expect(out).toHaveLength(6)
@@ -262,6 +332,26 @@ describe('planWindow', () => {
     // 7 messages × 40 chars, plus the one "\n\n" join of m3 and m7
     expect(sentChars).toBe(7 * 40 + 2)
     expect(r.size).toBe(70)
+  })
+
+  it('messageChars counts tool text, so planWindow trims on it', () => {
+    // 4 messages = 40 tokens. The reply is 4 + 9 + 387 = 400 chars = 100 tokens. The last user turn is 10.
+    const reply = msg(5, 'assistant', [step('c1', 'find', { q: 'a' }, 'x'.repeat(387))])
+    const messages = [...transcript(4), reply, msg(6, 'user', 'x'.repeat(40))]
+    expect(planWindow({ ...base, messages })).toEqual({ startId: 'm6', startOrder: 6, trimmed: true, size: 10, limit: 100 })
+    // With the same reply as a short text, nothing trims.
+    const short = [...transcript(4), msg(5, 'assistant', 'x'.repeat(40)), msg(6, 'user', 'x'.repeat(40))]
+    expect(planWindow({ ...base, messages: short }).trimmed).toBe(false)
+  })
+
+  it('overheadChars counts toward the limit', () => {
+    // 9 × 10 = 90, under the limit. 80 chars of overhead add 20: over, so a hard trim down to 70.
+    expect(planWindow({ ...base, messages: transcript(9) }).trimmed).toBe(false)
+    const r = planWindow({ ...base, messages: transcript(9), overheadChars: 80 })
+    expect(r).toMatchObject({ startId: 'm5', trimmed: true, size: 70 })
+    // Messages mode counts messages, so overhead does not apply.
+    const setting: ContextSetting = { mode: 'messages', limit: 10, trimTo: 0.7 }
+    expect(planWindow({ ...base, messages: transcript(9), setting, overheadChars: 800 })).toMatchObject({ size: 9, trimmed: false })
   })
 
   it('bad settings are clamped', () => {
@@ -313,6 +403,12 @@ describe('viewWindow', () => {
     expect(v.trimmed).toBe(false)
     expect(v.size).toBe(90)
     expect(v.limit).toBe(50)
+  })
+
+  it('counts overheadChars when given, and needs none', () => {
+    const messages = transcript(4)
+    expect(viewWindow({ ...view, messages }).size).toBe(40)
+    expect(viewWindow({ ...view, messages, overheadChars: 40 }).size).toBe(50)
   })
 
   it('no stored start: no start to show', () => {

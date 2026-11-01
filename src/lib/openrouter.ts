@@ -4,7 +4,15 @@ import type { Usage } from './types'
 export const API = 'https://openrouter.ai/api/v1'
 
 export type OutPart = { type: 'text'; text: string } | { type: 'image_url'; image_url: { url: string } }
-export type OutMessage = { role: 'system' | 'user' | 'assistant'; content: string | OutPart[] }
+export interface OutToolCall {
+  id: string
+  type: 'function'
+  function: { name: string; arguments: string }
+}
+export type OutMessage =
+  | { role: 'system' | 'user'; content: string | OutPart[] }
+  | { role: 'assistant'; content: string | OutPart[] | null; tool_calls?: OutToolCall[]; reasoning_details?: unknown[] }
+  | { role: 'tool'; tool_call_id: string; content: string }
 
 export interface ChatRequest {
   model: string

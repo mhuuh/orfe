@@ -2,13 +2,20 @@ import { hashText } from './hash'
 import type { OutMessage } from './openrouter'
 import type { ContextSetting, LastRequest, Message } from './types'
 
-/** Characters of a message's active version that count towards the estimate. Media and dividers count 0. */
+/**
+ * Characters of a message's active version that count towards the estimate. A tool step counts its
+ * name, JSON arguments and result. Media and dividers count 0.
+ */
 function messageChars(m: Message): number {
   if (m.role === 'divider') return 0
   const version = m.versions[m.activeVersion]
   if (!version) return 0
   let chars = 0
-  for (const p of version.content) if (p.type === 'text') chars += p.text.length
+  for (const p of version.content) {
+    if (p.type === 'text') chars += p.text.length
+    // JSON.stringify gives undefined when the arguments are missing.
+    if (p.type === 'tool') chars += p.name.length + (JSON.stringify(p.args)?.length ?? 0) + p.result.length
+  }
   return chars
 }
 
@@ -17,11 +24,12 @@ function charsToTokens(chars: number, ratio: number): number {
 }
 
 /**
- * Token estimate: active-version text characters ÷ 4, plus the system text, times `ratio`
- * (the correction from the last real `usage.prompt_tokens`), rounded up.
+ * Token estimate: active-version text characters ÷ 4, plus the system text and `overheadChars`
+ * (the tools JSON), times `ratio` (the correction from the last real `usage.prompt_tokens`),
+ * rounded up.
  */
-export function estimateTokens(messages: Message[], system: string | null, ratio: number): number {
-  let chars = system?.length ?? 0
+export function estimateTokens(messages: Message[], system: string | null, ratio: number, overheadChars = 0): number {
+  let chars = (system?.length ?? 0) + overheadChars
   for (const m of messages) chars += messageChars(m)
   return charsToTokens(chars, ratio)
 }
@@ -41,19 +49,37 @@ export function ttlFor(modelId: string, anthropicCacheHour: boolean): number {
 }
 
 /**
+ * The request as the cold check sees it. Tool content becomes the call id, so a result that shrinks
+ * at render time does not read as cold. reasoning_details go, because a turn in flight sends them
+ * and the same turn sends none once it is finished. Both cost only the tail, never the whole prefix.
+ * Other messages stay as they are, so a hash stored before tools existed still matches.
+ */
+export function canonical(outgoing: OutMessage[]): OutMessage[] {
+  return outgoing.map((m) => {
+    if (m.role === 'tool') return { ...m, content: m.tool_call_id }
+    if (m.role === 'assistant' && m.reasoning_details !== undefined) {
+      const { reasoning_details: _dropped, ...rest } = m
+      return rest
+    }
+    return m
+  })
+}
+
+/**
  * Fingerprint of a request's messages, stored as `conversation.lastRequest`.
  *
  * JSON.stringify is a safe byte-level comparison here because `buildOutgoing` always builds
  * objects with the same shape and key order (`{ role, content }`, parts `{ type, text }` or
- * `{ type, image_url: { url } }`), so equal content always gives equal JSON.
+ * `{ type, image_url: { url } }`, and `tool_calls` and `tool` messages from one renderer), so
+ * equal content always gives equal JSON.
  */
 export function fingerprint(outgoing: OutMessage[]): { prefixHash: string; prefixCount: number } {
-  return { prefixHash: hashText(JSON.stringify(outgoing)), prefixCount: outgoing.length }
+  return { prefixHash: hashText(JSON.stringify(canonical(outgoing))), prefixCount: outgoing.length }
 }
 
 /**
- * True when the provider's prompt cache is surely gone: no last request, another model or
- * provider, the TTL ran out, or the old request is no longer an exact prefix of the new one
+ * True when the provider's prompt cache is surely gone: no last request, another model, provider
+ * or tools JSON, the TTL ran out, or the old request is no longer an exact prefix of the new one
  * (an edit, delete, trim, or system prompt change).
  *
  * `provider` on both sides is the user's provider preference (null until Plan 4), never the
@@ -65,13 +91,14 @@ export function fingerprint(outgoing: OutMessage[]): { prefixHash: string; prefi
  */
 export function isCold(
   last: LastRequest | null,
-  next: { model: string; provider: string | null; outgoing: OutMessage[]; now: number; ttlMs: number },
+  next: { model: string; provider: string | null; toolsHash: string | null; outgoing: OutMessage[]; now: number; ttlMs: number },
 ): boolean {
   if (!last) return true
   if (last.model !== next.model || last.provider !== next.provider) return true
+  if ((last.toolsHash ?? null) !== next.toolsHash) return true
   if (next.now - last.at > next.ttlMs) return true
   if (next.outgoing.length < last.prefixCount) return true
-  return hashText(JSON.stringify(next.outgoing.slice(0, last.prefixCount))) !== last.prefixHash
+  return fingerprint(next.outgoing.slice(0, last.prefixCount)).prefixHash !== last.prefixHash
 }
 
 /**
@@ -93,6 +120,8 @@ export interface PlanInput {
   cold: boolean
   /** Share of the limit above which a cold cache triggers a trim (default 0.85). */
   soft: number
+  /** Characters sent with every request outside the messages: the tools JSON. */
+  overheadChars: number
 }
 
 export interface Plan {
@@ -161,7 +190,7 @@ export function planWindow(input: PlanInput): Plan {
   // Size as a running sum over window + pinned-before-window.
   const weight = (m: Message): number =>
     m.role === 'divider' ? 0 : setting.mode === 'tokens' ? messageChars(m) : 1
-  let sum = setting.mode === 'tokens' ? (input.system?.length ?? 0) : 0
+  let sum = setting.mode === 'tokens' ? (input.system?.length ?? 0) + input.overheadChars : 0
   for (let i = 0; i < n; i++) if (i >= idx || sorted[i].pinned) sum += weight(sorted[i])
   const sizeOf = (s: number): number => (setting.mode === 'tokens' ? charsToTokens(s, ratio) : s)
 
@@ -191,10 +220,11 @@ export function planWindow(input: PlanInput): Plan {
  * start exactly as `planWindow` does (deleted start → next by order, dividers skipped, never past
  * the last user message) but never trims: only a send moves the start.
  */
-export function viewWindow(input: Omit<PlanInput, 'cold' | 'soft'>): Plan {
+export function viewWindow(input: Omit<PlanInput, 'cold' | 'soft' | 'overheadChars'> & { overheadChars?: number }): Plan {
   const limit = Math.max(1, fin(input.setting.limit, 32000))
   const plan = planWindow({
     ...input,
+    overheadChars: input.overheadChars ?? 0,
     setting: { ...input.setting, limit: Number.MAX_SAFE_INTEGER },
     cold: false,
     soft: 1,

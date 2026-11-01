@@ -89,6 +89,8 @@ export interface ContextSetting {
 export interface LastRequest {
   model: string
   provider: string | null
+  /** Hash of the tools JSON. Null: no tools. Rows stored before this field have none. */
+  toolsHash: string | null
   prefixHash: string
   prefixCount: number
   at: number
