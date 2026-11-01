@@ -689,6 +689,15 @@ describe('undoCalls and redoCalls', () => {
     expect((await notes.read(chat('a')))?.body).toBe('one')
   })
 
+  it('redoCalls reports what it redid and what stayed', async () => {
+    await create(chat('a'), 'one', model('c1'))
+    await create(chat('b'), 'two', model('c2'))
+    await notes.undoCalls('m1', ['c1', 'c2'], 'chat')
+    okNote(await notes.write(chat('b'), body('Mikael wrote this'), YOU))
+    expect(await notes.redoCalls(['c1', 'c2', 'nope'], 'm1')).toEqual({ redone: ['c1'], kept: ['nope', 'c2'] })
+    expect(await notes.redoCalls(['c1'], 'm1')).toEqual({ redone: [], kept: ['c1'] })
+  })
+
   it('redoCalls leaves a note that changed after the undo', async () => {
     await create(chat('a'), 'one', model('c1'))
     okNote(await notes.write(chat('a'), body('two', { expectedVersion: 1 }), model('c2')))

@@ -109,17 +109,15 @@ export function AssistantMessage({ message, isLast, busy, selected, editing, aft
   const streaming = version.status === 'streaming'
   // While the model is only thinking, the open Thinking block shows activity instead of a caret.
   const caret = streaming && !(text === '' && version.reasoning)
-  // The caret trails the last text only. A running tool line is the activity then.
-  const toolRunning = version.content.some((p) => p.type === 'tool' && p.status === 'running')
+  // The caret trails the last text, and only when text is last. Between rounds a finished tool line is.
   const parts = useMemo(() => {
     const segs = segments(version.content)
-    const lastText = segs.map((x) => x.kind).lastIndexOf('text')
     return segs.map((x, i) => {
       if (x.kind === 'tool') return x
       const out = renderMarkdown(x.text)
-      return { ...x, html: caret && !toolRunning && i === lastText ? withCaret(out) : out }
+      return { ...x, html: caret && i === segs.length - 1 ? withCaret(out) : out, afterTool: segs[i - 1]?.kind === 'tool' }
     })
-  }, [version.content, caret, toolRunning])
+  }, [version.content, caret])
   const firstText = parts.findIndex((x) => x.kind === 'text')
 
   return (
@@ -139,13 +137,19 @@ export function AssistantMessage({ message, isLast, busy, selected, editing, aft
       </div>
       {version.reasoning && <Thinking key={version.id} reasoning={version.reasoning} thinking={streaming && text === ''} />}
       {parts.map((x, i) => {
-        if (x.kind === 'tool') return <ToolLine key={i} part={x.part} messageId={message.id} versionId={version.id} />
+        if (x.kind === 'tool') return <ToolLine
+            key={`${x.part.round}:${x.part.callId}`}
+            part={x.part}
+            messageId={message.id}
+            versionId={version.id}
+            locked={streaming}
+          />
         if (editing) {
           return i === firstText ? (
             <EditBox key="edit" initial={text} prose onSave={(t) => ops.saveEdit(message.id, t)} onCancel={ops.cancelEdit} />
           ) : null
         }
-        return <div key={i} className={css.prose} dangerouslySetInnerHTML={{ __html: x.html }} />
+        return <div key={i} className={`${css.prose} ${x.afterTool ? css.afterTool : ''}`} dangerouslySetInnerHTML={{ __html: x.html }} />
       })}
       {editing && firstText < 0 && (
         <EditBox initial={text} prose onSave={(t) => ops.saveEdit(message.id, t)} onCancel={ops.cancelEdit} />

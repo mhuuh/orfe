@@ -46,6 +46,12 @@ export interface UndoReport {
   kept: string[]
 }
 
+/** Call ids. `kept` means the redo did not apply: the note changed later, or it was not undone. */
+export interface RedoReport {
+  redone: string[]
+  kept: string[]
+}
+
 export interface NoteStore {
   /** Follows aliases, skips deleted. */
   read(ref: NoteRef): Promise<Note | undefined>
@@ -62,7 +68,7 @@ export interface NoteStore {
   revert(revisionId: string, by: Writer): Promise<'done' | 'changed-later'>
   undoCalls(messageId: string, callIds: string[], shelves: 'chat'): Promise<UndoReport>
   /** Takes the message too, because a model can reuse an id across replies. */
-  redoCalls(callIds: string[], messageId: string): Promise<void>
+  redoCalls(callIds: string[], messageId: string): Promise<RedoReport>
   /** The write a call made, never an undo or a redo of it. */
   byCall(callId: string, messageId?: string): Promise<NoteRevision | undefined>
   /** Sends a chat's live notes to Trash, all stamped `deletedAt`. */
@@ -225,9 +231,9 @@ async function undo(rev: NoteRevision, by: Writer): Promise<boolean> {
  * Applies `rev` again by taking back its undo. That runs only when the undo is the note's last
  * change. So a write that was never undone stays out, and nothing later can be overwritten.
  */
-async function redo(rev: NoteRevision): Promise<void> {
+async function redo(rev: NoteRevision): Promise<boolean> {
   const last = lastChange(await history(rev.noteId))
-  if (last?.undoes === rev.id) await undo(last, { ...YOU, messageId: rev.messageId, callId: rev.callId })
+  return last?.undoes === rev.id && (await undo(last, { ...YOU, messageId: rev.messageId, callId: rev.callId }))
 }
 
 /** A write that goes near the shared shelf stays when a reply is rerolled. */
@@ -438,14 +444,17 @@ export const notes: NoteStore = {
   },
 
   async redoCalls(callIds, messageId) {
-    await rw(async () => {
+    return rw(async () => {
+      const report: RedoReport = { redone: [], kept: [] }
       const found: NoteRevision[] = []
       for (const id of new Set(callIds)) {
         const rev = await notes.byCall(id, messageId)
         if (rev) found.push(rev)
+        else report.kept.push(id)
       }
       found.sort((a, b) => a.at - b.at || a.version - b.version)
-      for (const rev of found) await redo(rev)
+      for (const rev of found) (await redo(rev) ? report.redone : report.kept).push(rev.callId as string)
+      return report
     })
   },
 

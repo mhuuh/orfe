@@ -78,10 +78,14 @@ button.line:focus-visible {
   cursor: pointer;
   -webkit-tap-highlight-color: transparent;
 }
-.action:hover:not(:disabled),
 .action:focus-visible {
   text-decoration-color: currentColor;
   outline: none;
+}
+@media (hover: hover) {
+  .action:hover:not(:disabled) {
+    text-decoration-color: currentColor;
+  }
 }
 .action:disabled {
   color: var(--faint);

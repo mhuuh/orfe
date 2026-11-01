@@ -21,10 +21,11 @@ export interface LineView {
 }
 
 /** What a line shows. The words come from `describeStep`; this adds no words of its own. */
-export function lineView(part: ToolPart): LineView {
+export function lineView(part: ToolPart, locked = false): LineView {
   const words = describeStep(part)
   const live = part.status === 'running'
-  const write = WRITES.has(part.name) && part.status === 'done'
+  // While the reply streams, its writer also saves the steps. A flag set now would be overwritten.
+  const write = WRITES.has(part.name) && part.status === 'done' && !locked
   const undone = part.undone === true
   const lines = part.result.split('\n')
   return {
@@ -38,38 +39,51 @@ export function lineView(part: ToolPart): LineView {
   }
 }
 
+/** Undoes one write. Returns a line for Mikael when it did not apply, or null when it did. */
+export async function undoStep(part: ToolPart, messageId: string, versionId: string): Promise<string | null> {
+  try {
+    const rev = await notes.byCall(part.callId, messageId)
+    if (!rev) return 'Nothing to undo.'
+    if ((await notes.revert(rev.id, YOU)) === 'changed-later') return 'The note changed since. This write stays.'
+    await setToolUndone(messageId, versionId, part.callId, true)
+    return null
+  } catch {
+    return 'Could not undo.'
+  }
+}
+
+/** Puts one write back. The line stays undone when the note changed since. */
+export async function redoStep(part: ToolPart, messageId: string, versionId: string): Promise<string | null> {
+  try {
+    const { redone } = await notes.redoCalls([part.callId], messageId)
+    if (!redone.includes(part.callId)) return 'The note changed since. It stays undone.'
+    await setToolUndone(messageId, versionId, part.callId, false)
+    return null
+  } catch {
+    return 'Could not redo.'
+  }
+}
+
 interface Props {
   part: ToolPart
   messageId: string
   versionId: string
+  /** The reply is still streaming. Undo and Redo are off. */
+  locked?: boolean
 }
 
 /** One step of the reply, in mono. Tap to see what it read or changed. */
-export function ToolLine({ part, messageId, versionId }: Props) {
+export function ToolLine({ part, messageId, versionId, locked = false }: Props) {
   const [open, setOpen] = useState(false)
   const [note, setNote] = useState<string | null>(null)
   const [working, setWorking] = useState(false)
-  const v = lineView(part)
+  const v = lineView(part, locked)
 
-  async function undo() {
+  async function run(step: typeof undoStep) {
     setWorking(true)
     setNote(null)
     try {
-      const rev = await notes.byCall(part.callId, messageId)
-      if (!rev) return setNote('Nothing to undo.')
-      if ((await notes.revert(rev.id, YOU)) === 'changed-later') return setNote('The note changed since. This write stays.')
-      await setToolUndone(messageId, versionId, part.callId, true)
-    } finally {
-      setWorking(false)
-    }
-  }
-
-  async function redo() {
-    setWorking(true)
-    setNote(null)
-    try {
-      await notes.redoCalls([part.callId], messageId)
-      await setToolUndone(messageId, versionId, part.callId, false)
+      setNote(await step(part, messageId, versionId))
     } finally {
       setWorking(false)
     }
@@ -91,7 +105,7 @@ export function ToolLine({ part, messageId, versionId }: Props) {
     )
   }
   return (
-    <div className={css.step}>
+    <div>
       <button className={css.line} aria-expanded={open} onClick={() => setOpen((o) => !o)}>
         {label}
         <span className={css.chev} aria-hidden="true">
@@ -105,7 +119,7 @@ export function ToolLine({ part, messageId, versionId }: Props) {
             {v.more && '\n…'}
           </div>
           {(v.canUndo || v.canRedo) && (
-            <button className={css.action} onClick={v.canUndo ? undo : redo} disabled={working}>
+            <button className={css.action} onClick={() => run(v.canUndo ? undoStep : redoStep)} disabled={working}>
               {v.canUndo ? 'Undo' : 'Redo'}
             </button>
           )}
