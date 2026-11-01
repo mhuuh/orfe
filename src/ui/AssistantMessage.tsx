@@ -42,6 +42,21 @@ export function tapHandlers(onToggle: () => void) {
   }
 }
 
+/** What the status line says and offers. Null when the reply needs no line. */
+export function statusNote(version: Version, isLast: boolean): { text: string; retry: boolean; more: boolean } | null {
+  switch (version.status) {
+    case 'stopped':
+      return { text: 'Stopped', retry: true, more: isLast }
+    case 'interrupted':
+      return { text: 'Interrupted', retry: true, more: isLast }
+    case 'error':
+      // Retry runs the tools again and keeps shared-shelf writes. Continue goes on from the steps.
+      return { text: version.error || 'Something went wrong', retry: true, more: isLast && version.content.some((p) => p.type === 'tool') }
+    default:
+      return version.finishReason === 'length' ? { text: 'Hit the length limit', retry: false, more: isLast } : null
+  }
+}
+
 interface NoteProps {
   version: Version
   isLast: boolean
@@ -52,25 +67,9 @@ interface NoteProps {
 
 /** One mono line for stopped / interrupted / error / cut-off replies, with the fitting actions. */
 function StatusNote({ version, isLast, busy, onRetry, onContinue }: NoteProps) {
-  let text: string
-  let retry = true
-  let more = isLast
-  switch (version.status) {
-    case 'stopped':
-      text = 'Stopped'
-      break
-    case 'interrupted':
-      text = 'Interrupted'
-      break
-    case 'error':
-      text = version.error || 'Something went wrong'
-      more = false
-      break
-    default:
-      if (version.finishReason !== 'length') return null
-      text = 'Hit the length limit'
-      retry = false
-  }
+  const note = statusNote(version, isLast)
+  if (!note) return null
+  const { text, retry, more } = note
   return (
     <div className={css.note} role={version.status === 'error' ? 'alert' : undefined}>
       <span className={css.noteText}>{text}</span>
@@ -107,6 +106,8 @@ export function AssistantMessage({ message, isLast, busy, selected, editing, aft
   const version = message.versions[message.activeVersion] ?? message.versions[0]
   const text = versionText(version)
   const streaming = version.status === 'streaming'
+  // A reroll in flight owns the writes of the old versions too, so a flip back does not unlock them.
+  const writing = message.versions.some((v) => v.status === 'streaming')
   // While the model is only thinking, the open Thinking block shows activity instead of a caret.
   const caret = streaming && !(text === '' && version.reasoning)
   // The caret trails the last text, and only when text is last. Between rounds a finished tool line is.
@@ -142,7 +143,7 @@ export function AssistantMessage({ message, isLast, busy, selected, editing, aft
             part={x.part}
             messageId={message.id}
             versionId={version.id}
-            locked={streaming}
+            locked={writing}
           />
         if (editing) {
           return i === firstText ? (

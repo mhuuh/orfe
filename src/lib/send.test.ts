@@ -3,11 +3,12 @@ import { fallbackModelInfo, type ModelInfo } from './catalog'
 import { db, newId, storage } from './storage'
 import { setAbilitiesForTest, toolsFor, type Ability } from './abilities/registry'
 import { setModelRulesForTest } from './modelRules'
-import { computeCold, deleteChat, errorText, generate, MAX_ROUNDS, patchVersion, isGenerating, recoverInterrupted, replacePromptRef, restoreChat, sendUserMessage, setAlreadyDoneForTest, setPrompt, stop } from './send'
+import { computeCold, deleteChat, deleteMessage, deleteVersion, errorText, generate, MAX_ROUNDS, patchVersion, isGenerating, recoverInterrupted, replacePromptRef, restoreChat, restoreMessage, restoreVersion, sendUserMessage, setAlreadyDoneForTest, setPrompt, setToolUndone, stop, undoReplyWrites } from './send'
 import { notes, YOU } from './notes/store'
 import { CAPABILITY_NOTE, systemFor } from './system'
 import { fingerprint } from './context'
 import type { ToolPart, Version } from './types'
+import { editedVersion, withActive, withNewVersion } from './versions'
 
 const enc = new TextEncoder()
 const ev = (o: unknown) => `data: ${JSON.stringify(o)}\n\n`
@@ -1530,6 +1531,311 @@ describe('tool loop: Continue', () => {
     const m = await storage.appendMessage(convId, 'assistant', { id: newId(), content: [step('c1', 0)], status: 'interrupted', model: T.id, createdAt: 1 })
     await generate(convId, { kind: 'continue', messageId: m.id }, T)
     expect(bodyOf(f, 0).messages.map((x) => x.role)).toEqual(['system', 'user', 'assistant', 'tool'])
+  })
+})
+
+describe('rerolls, deletes and edits', () => {
+  const ref = (path: string) => ({ path, conversationId: convId })
+  const noteArgs = (path: string) => JSON.stringify({ path, description: 'The harbour', body: 'Boats' })
+  const answer = (id: string, ...paths: string[]) => asks(...paths.map((p, i): [string, string, string] => [`${id}${i}`, 'notes_write', noteArgs(p)]))
+  const rejected = () => new Response('{"error":{"message":"busy"}}', { status: 429 })
+  const stepsOf = (v: Version) => v.content.filter((p): p is ToolPart => p.type === 'tool')
+  /** The steps of the first version of the last message. */
+  const firstSteps = async () => stepsOf((await lastMsg()).versions[0])
+
+  /** A finished reply that wrote these paths, with call ids w0, w1… */
+  async function written(...paths: string[]) {
+    stubFetch(() => sse(answer('w', ...paths)), () => sse(reply('Done')))
+    await sendUserMessage(convId, 'go', { reply: true, model: T })
+    return lastMsg()
+  }
+
+  /** Requests hang until Stop. */
+  function hangingFetch() {
+    vi.stubGlobal(
+      'fetch',
+      (_u: string, init: RequestInit) =>
+        new Promise((_res, rej) => init.signal!.addEventListener('abort', () => rej(new DOMException('aborted', 'AbortError')))),
+    )
+  }
+
+  it('a reroll undoes chat-shelf writes before the request goes out', async () => {
+    const m = await written('chat/harbour')
+    expect(await notes.read(ref('chat/harbour'))).toBeDefined()
+    let atRequest: unknown = 'not asked'
+    const f = vi.fn(async () => {
+      atRequest = await notes.read(ref('chat/harbour'))
+      return sse(reply('New'))
+    })
+    vi.stubGlobal('fetch', f)
+    await generate(convId, { kind: 'reroll', messageId: m.id }, T)
+    expect(atRequest).toBeUndefined()
+    // The index in the system text was rebuilt after the undo.
+    expect(JSON.stringify(bodyOf(f as never, 0).messages)).not.toContain('harbour')
+    expect(await firstSteps()).toMatchObject([{ callId: 'w0', undone: true }])
+    expect((await activeVersion()).content).toEqual([{ type: 'text', text: 'New' }])
+  })
+
+  it('a reroll keeps shared-shelf writes', async () => {
+    const m = await written('shared/harbour', 'chat/tide')
+    stubFetch(() => sse(reply('New')))
+    await generate(convId, { kind: 'reroll', messageId: m.id }, T)
+    expect(await notes.read(ref('shared/harbour'))).toBeDefined()
+    expect(await notes.read(ref('chat/tide'))).toBeUndefined()
+    const [shared, chat] = await firstSteps()
+    expect(shared.undone).toBeUndefined()
+    expect(chat.undone).toBe(true)
+  })
+
+  it('a failed reroll puts the writes back', async () => {
+    const m = await written('chat/harbour')
+    stubFetch(rejected)
+    await generate(convId, { kind: 'reroll', messageId: m.id }, T)
+    expect((await activeVersion()).status).toBe('error')
+    expect(await notes.read(ref('chat/harbour'))).toBeDefined()
+    expect((await firstSteps())[0].undone).toBe(false)
+  })
+
+  it('a reroll stopped with no output puts the writes back', async () => {
+    const m = await written('chat/harbour')
+    hangingFetch()
+    const p = generate(convId, { kind: 'reroll', messageId: m.id }, T)
+    await vi.waitFor(async () => expect((await lastMsg()).versions).toHaveLength(2))
+    stop(convId)
+    await p
+    expect((await activeVersion()).status).toBe('stopped')
+    expect(await notes.read(ref('chat/harbour'))).toBeDefined()
+  })
+
+  it('a reroll stopped with output keeps the undo', async () => {
+    const m = await written('chat/harbour')
+    vi.stubGlobal('fetch', async () => {
+      let sent = false
+      return new Response(
+        new ReadableStream<Uint8Array>({
+          pull(c) {
+            if (!sent) {
+              sent = true
+              c.enqueue(enc.encode(ev({ choices: [{ delta: { content: 'part' } }] })))
+              return
+            }
+            stop(convId)
+            throw new DOMException('aborted', 'AbortError')
+          },
+        }),
+        { status: 200 },
+      )
+    })
+    await generate(convId, { kind: 'reroll', messageId: m.id }, T)
+    expect((await activeVersion()).status).toBe('stopped')
+    expect(await notes.read(ref('chat/harbour'))).toBeUndefined()
+  })
+
+  it('Retry after a failed reroll undoes the writes that came back', async () => {
+    const m = await written('chat/harbour')
+    stubFetch(rejected)
+    await generate(convId, { kind: 'reroll', messageId: m.id }, T)
+    stubFetch(() => sse(reply('New')))
+    await generate(convId, { kind: 'reroll', messageId: m.id }, T)
+    expect(await notes.read(ref('chat/harbour'))).toBeUndefined()
+    expect((await firstSteps())[0].undone).toBe(true)
+  })
+
+  it('a failed reroll puts back only what it undid', async () => {
+    const m = await written('chat/harbour')
+    const rev = await notes.byCall('w0', m.id)
+    await notes.revert(rev!.id, YOU)
+    await setToolUndone(m.id, m.versions[0].id, 'w0', true)
+    stubFetch(rejected)
+    await generate(convId, { kind: 'reroll', messageId: m.id }, T)
+    expect(await notes.read(ref('chat/harbour'))).toBeUndefined()
+    expect((await firstSteps())[0].undone).toBe(true)
+  })
+
+  it('a failed reroll does not bring back a version deleted meanwhile', async () => {
+    const m = await written('chat/harbour')
+    hangingFetch()
+    const p = generate(convId, { kind: 'reroll', messageId: m.id }, T)
+    await vi.waitFor(async () => expect((await lastMsg()).versions).toHaveLength(2))
+    await storage.mutateMessage(m.id, (x) => withActive(x, 0))
+    await deleteVersion(m.id)
+    stop(convId)
+    await p
+    expect(await notes.read(ref('chat/harbour'))).toBeUndefined()
+  })
+
+  it('a note changed later stays, and the part says so', async () => {
+    const m = await written('chat/harbour')
+    await notes.write(ref('chat/harbour'), { body: 'Mine now', description: 'The harbour', expectedVersion: 1 }, YOU)
+    stubFetch(() => sse(reply('New')))
+    await generate(convId, { kind: 'reroll', messageId: m.id }, T)
+    expect((await notes.read(ref('chat/harbour')))?.body).toBe('Mine now')
+    expect(await firstSteps()).toMatchObject([{ callId: 'w0', kept: true }])
+    expect((await firstSteps())[0].undone).toBeUndefined()
+  })
+
+  it('a failed reroll takes the kept mark away again', async () => {
+    const m = await written('chat/harbour')
+    await notes.write(ref('chat/harbour'), { body: 'Mine now', description: 'The harbour', expectedVersion: 1 }, YOU)
+    stubFetch(rejected)
+    await generate(convId, { kind: 'reroll', messageId: m.id }, T)
+    expect((await firstSteps())[0].kept).toBe(false)
+  })
+
+  it('undoReplyWrites reports the calls and marks each version that holds them', async () => {
+    const m = await written('chat/harbour', 'shared/tide')
+    await storage.mutateMessage(m.id, (x) => withNewVersion(x, editedVersion(x.versions[0], 'Edited')))
+    expect(await undoReplyWrites(m.id, [m.versions[0]])).toEqual({ undone: ['w0'], kept: [] })
+    const after = await lastMsg()
+    expect(after.versions.map((v) => stepsOf(v)[0].undone)).toEqual([true, true])
+  })
+
+  it('deleting a message undoes its writes; toast Undo restores them', async () => {
+    const m = await written('chat/harbour', 'shared/tide')
+    const snapshot = await deleteMessage(m.id)
+    expect((await storage.listMessages(convId)).some((x) => x.id === m.id)).toBe(false)
+    expect(await notes.read(ref('chat/harbour'))).toBeUndefined()
+    expect(await notes.read(ref('shared/tide'))).toBeDefined()
+
+    await restoreMessage(snapshot!)
+    expect((await lastMsg()).id).toBe(m.id)
+    expect(await notes.read(ref('chat/harbour'))).toBeDefined()
+    expect((await firstSteps())[0].undone).toBe(false)
+  })
+
+  it('a delete of a message that is gone does nothing', async () => {
+    expect(await deleteMessage('nope')).toBeNull()
+  })
+
+  it('Undo leaves a write undone when the note changed in between', async () => {
+    const m = await written('chat/harbour')
+    const snapshot = await deleteMessage(m.id)
+    await notes.write(ref('chat/harbour'), { body: 'A new one', description: 'The harbour', isNew: true }, YOU)
+    await restoreMessage(snapshot!)
+    expect((await firstSteps())[0].undone).toBe(true)
+    expect((await notes.read(ref('chat/harbour')))?.body).toBe('A new one')
+  })
+
+  it('deleting a message mid-stream waits, so a late write does not stay', async () => {
+    let started = false
+    setAbilitiesForTest([
+      ability(async (_n, _a, ctx) => {
+        started = true
+        await new Promise((res) => ctx.signal.addEventListener('abort', res))
+        await notes.write(ref('chat/late'), { body: 'x', description: 'A line' }, { writer: ctx.model, messageId: ctx.messageId, callId: ctx.callId })
+        return 'written now'
+      }),
+    ])
+    stubFetch(() => sse(asks(['c1', 'echo', '{}'])))
+    await sendUserMessage(convId, 'go', { reply: false })
+    const p = generate(convId, { kind: 'new' }, T)
+    await vi.waitFor(() => expect(started).toBe(true))
+    const m = await lastMsg()
+    await deleteMessage(m.id)
+    await p
+    expect(isGenerating(convId)).toBe(false)
+    expect(await notes.read(ref('chat/late'))).toBeUndefined()
+  })
+
+  it('a chat brought back after a delete does not run a stopped call on Continue', async () => {
+    const ran: string[] = []
+    let started = false
+    setAbilitiesForTest([
+      ability(async (...args) => {
+        ran.push(args[2].callId)
+        return hangs(() => (started = true))(...args)
+      }),
+    ])
+    stubFetch(() => sse(asks(['c1', 'echo', '{}'])), () => sse(reply('Finished')))
+    await sendUserMessage(convId, 'go', { reply: false })
+    const p = generate(convId, { kind: 'new' }, T)
+    await vi.waitFor(() => expect(started).toBe(true))
+    const snapshot = await deleteChat(convId)
+    await p
+    await restoreChat(snapshot!)
+    expect(await steps()).toMatchObject([{ callId: 'c1', status: 'stopped', result: 'Stopped by the user.' }])
+    await generate(convId, { kind: 'continue', messageId: (await lastMsg()).id }, T)
+    expect(ran).toEqual(['c1'])
+  })
+
+  it('deleting one version undoes only that version', async () => {
+    const m = await written('chat/one')
+    stubFetch(() => sse(answer('x', 'chat/two')), () => sse(reply('New')))
+    await generate(convId, { kind: 'reroll', messageId: m.id }, T)
+    await notes.redoCalls(['w0'], m.id)
+    await setToolUndone(m.id, m.versions[0].id, 'w0', false)
+    expect(await notes.read(ref('chat/one'))).toBeDefined()
+
+    const snapshot = await deleteVersion(m.id)
+    expect((await lastMsg()).versions).toHaveLength(1)
+    expect(await notes.read(ref('chat/two'))).toBeUndefined()
+    expect(await notes.read(ref('chat/one'))).toBeDefined()
+
+    await restoreVersion(snapshot!)
+    const after = await lastMsg()
+    expect(after.versions).toHaveLength(2)
+    expect(after.activeVersion).toBe(1)
+    expect(await notes.read(ref('chat/two'))).toBeDefined()
+    expect((await steps())[0].undone).toBe(false)
+  })
+
+  it('deleting a version keeps a write that another version holds', async () => {
+    const m = await written('chat/harbour')
+    await storage.mutateMessage(m.id, (x) => withNewVersion(x, editedVersion(x.versions[0], 'Edited')))
+    await deleteVersion(m.id)
+    expect(await notes.read(ref('chat/harbour'))).toBeDefined()
+    expect((await firstSteps())[0].undone).toBeUndefined()
+  })
+
+  it('deleting the only version does nothing', async () => {
+    const m = await written('chat/harbour')
+    expect(await deleteVersion(m.id)).toBeNull()
+    expect(await notes.read(ref('chat/harbour'))).toBeDefined()
+  })
+
+  it('Edit leaves ToolParts and revisions alone', async () => {
+    const m = await written('chat/harbour')
+    const note = await notes.read(ref('chat/harbour'))
+    const before = await notes.revisions(note!.id)
+    await storage.mutateMessage(m.id, (x) => withNewVersion(x, editedVersion(x.versions[0], 'Edited')))
+    const after = await lastMsg()
+    expect(stepsOf(after.versions[1])).toEqual(stepsOf(after.versions[0]))
+    expect(await notes.revisions(note!.id)).toEqual(before)
+    expect(await notes.read(ref('chat/harbour'))).toEqual(note)
+  })
+
+  it('a reroll of an edited reply undoes the writes it kept', async () => {
+    const m = await written('chat/harbour')
+    await storage.mutateMessage(m.id, (x) => withNewVersion(x, editedVersion(x.versions[0], 'Edited')))
+    stubFetch(() => sse(reply('New')))
+    await generate(convId, { kind: 'reroll', messageId: m.id }, T)
+    expect(await notes.read(ref('chat/harbour'))).toBeUndefined()
+    expect((await firstSteps())[0].undone).toBe(true)
+  })
+
+  it('flipping to an old version shows its writes as undone', async () => {
+    const m = await written('chat/harbour')
+    stubFetch(() => sse(reply('New')))
+    await generate(convId, { kind: 'reroll', messageId: m.id }, T)
+    await storage.mutateMessage(m.id, (x) => withActive(x, 0))
+    expect(await steps()).toMatchObject([{ callId: 'w0', undone: true }])
+    // A flip alone redoes nothing. A tap on the line does.
+    expect(await notes.read(ref('chat/harbour'))).toBeUndefined()
+    expect(await notes.redoCalls(['w0'], m.id)).toEqual({ redone: ['w0'], kept: [] })
+    expect(await notes.read(ref('chat/harbour'))).toBeDefined()
+  })
+
+  it("a Continue that changes model keeps each part's own model", async () => {
+    const m = await written('chat/harbour')
+    const U = model('u/tools', { tools: true })
+    stubFetch(() => sse(answer('y', 'chat/tide')), () => sse(reply('More')))
+    await generate(convId, { kind: 'continue', messageId: m.id }, U)
+    const after = await lastMsg()
+    expect(after.versions[after.activeVersion].model).toBe(U.id)
+    expect(await steps()).toMatchObject([
+      { callId: 'w0', model: T.id },
+      { callId: 'y0', model: U.id },
+    ])
   })
 })
 

@@ -98,6 +98,11 @@ describe('lineView', () => {
     expect(v.undone).toBe(true)
   })
 
+  it('a write that an undo left in place says so', () => {
+    expect(lineView(tool({ kept: true })).kept).toBe(true)
+    expect(lineView(tool()).kept).toBe(false)
+  })
+
   it('the detail is the first lines of the result', () => {
     const v = lineView(tool({ result: 'a\nb\nc\nd\ne' }))
     expect(v.detail).toEqual(['a', 'b', 'c'])
@@ -139,6 +144,15 @@ describe('undoStep and redoStep', () => {
     await notes.write({ path: 'shared/harbour', conversationId: conv.id }, { ...body('Mikael'), expectedVersion: 1 }, YOU)
     expect(await undoStep(part, messageId, versionId)).toBe('The note changed since. This write stays.')
     expect(await flag()).toBeUndefined()
+  })
+
+  it('a tap that undoes a kept line takes the mark away', async () => {
+    await storage.mutateMessage(messageId, (m) => ({
+      ...m,
+      versions: m.versions.map((v) => ({ ...v, content: v.content.map((p) => ({ ...p, kept: true })) })),
+    }))
+    expect(await undoStep(part, messageId, versionId)).toBeNull()
+    expect((await db.messages.get(messageId))?.versions[0].content[0]).toMatchObject({ undone: true, kept: false })
   })
 
   it('redo that did not apply leaves the flag set', async () => {

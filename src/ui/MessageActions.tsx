@@ -1,9 +1,9 @@
 import { useCallback, useLayoutEffect, useMemo, useRef, useState } from 'react'
 import type { ModelInfo } from '../lib/catalog'
-import { generate, stop } from '../lib/send'
+import { deleteMessage, deleteVersion, generate, restoreMessage, restoreVersion } from '../lib/send'
 import { storage } from '../lib/storage'
 import type { Conversation, Message } from '../lib/types'
-import { editedVersion, settled, versionText, withActive, withNewVersion, withoutActiveVersion, withVersionAt } from '../lib/versions'
+import { editedVersion, versionText, withActive, withNewVersion } from '../lib/versions'
 import { useToast } from './Toast'
 import { findModel } from './useCatalog'
 import css from './MessageActions.module.css'
@@ -68,34 +68,15 @@ export function useMessageOps(
       },
       remove(message) {
         deselect()
-        // A hidden version may still be streaming: stop it, or it keeps running with nowhere to write.
-        if (message.versions.some((v) => v.status === 'streaming')) stop(message.conversationId)
-        void storage.deleteMessage(message.id).then((removed) => {
-          if (!removed) return
-          // Never restore a version stuck in 'streaming'; it would block Reroll/Continue until reload.
-          const snapshot = settled(removed)
-          toast.show('Message deleted', { label: 'Undo', run: () => void storage.restoreMessage(snapshot) })
+        void deleteMessage(message.id).then((snapshot) => {
+          if (snapshot) toast.show('Message deleted', { label: 'Undo', run: () => void restoreMessage(snapshot) })
         })
       },
       removeVersion(id) {
         deselect()
-        const undo: { r: ReturnType<typeof withoutActiveVersion> } = { r: null }
-        void storage
-          .mutateMessage(id, (m) => {
-            undo.r = withoutActiveVersion(m)
-            return undo.r ? undo.r.message : m
-          })
-          .then(() => {
-            const u = undo.r
-            if (!u) return
-            toast.show('Version deleted', {
-              label: 'Undo',
-              run: () => {
-                const v = u.removed.status === 'streaming' ? { ...u.removed, status: 'stopped' as const } : u.removed
-                void storage.mutateMessage(id, (m) => withVersionAt(m, v, u.index))
-              },
-            })
-          })
+        void deleteVersion(id).then((snapshot) => {
+          if (snapshot) toast.show('Version deleted', { label: 'Undo', run: () => void restoreVersion(snapshot) })
+        })
       },
       setActive(id, index) {
         void storage.mutateMessage(id, (m) => withActive(m, index))

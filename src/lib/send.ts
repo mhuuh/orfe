@@ -4,17 +4,16 @@ import { fallbackModelInfo, type ModelInfo } from './catalog'
 import { estimateTokens, fingerprint, isCold, planWindow, ttlFor } from './context'
 import { buildOutgoing, renderRounds } from './normalise'
 import { buildIndex } from './notes/index'
-import { notes, writeResult } from './notes/store'
+import { notes, writeResult, type UndoReport } from './notes/store'
 import { mergeReasoning, streamChat, type ChatRequest, type OutMessage, type StreamEvent } from './openrouter'
 import { db, newId, storage } from './storage'
 import { systemFor, systemText } from './system'
 import type { ContentPart, Conversation, LastRequest, Message, Reasoning, ToolPart, Usage, Version } from './types'
-import { settled } from './versions'
+import { settled, settledVersion, STOPPED, withoutActiveVersion, withVersionAt } from './versions'
 
 /** Tool rounds in one reply. The last one gets ROUND_LIMIT instead of running, so the model answers. */
 export const MAX_ROUNDS = 8
 const ROUND_LIMIT = 'Round limit reached. Answer now.'
-const STOPPED = 'Stopped by the user.'
 const REFUSED = 'The provider refused this reply. Try again, or pick another model.'
 const WRITE_INTERVAL_MS = 200
 /** Share of the context limit above which a cold cache triggers a trim (spec §6). */
@@ -225,10 +224,148 @@ export async function setToolUndone(messageId: string, versionId: string, callId
     ...m,
     versions: m.versions.map((v) =>
       v.id === versionId
-        ? { ...v, content: v.content.map((p) => (p.type === 'tool' && p.callId === callId ? { ...p, undone } : p)) }
+        ? { ...v, content: v.content.map((p) => (p.type === 'tool' && p.callId === callId ? { ...p, undone, kept: false } : p)) }
         : v,
     ),
   }))
+}
+
+/** One transaction over a reply and its notes. */
+const withNotes = <T>(fn: () => Promise<T>): Promise<T> => db.transaction('rw', db.messages, db.notes, db.noteRevisions, fn)
+
+const callIds = (versions: Version[]): string[] => versions.flatMap((v) => v.content.filter(isTool).map((p) => p.callId))
+
+/** Changes steps on each version of a reply. A Continue or an Edit copies a step, so one call can show on two versions. */
+async function mapSteps(messageId: string, fn: (p: ToolPart) => ToolPart): Promise<void> {
+  await storage.mutateMessage(messageId, (m) => ({
+    ...m,
+    versions: m.versions.map((v) => ({ ...v, content: v.content.map((p) => (isTool(p) ? fn(p) : p)) })),
+  }))
+}
+
+/**
+ * Undoes the chat-shelf writes of these versions and marks their steps. Shared-shelf writes stay.
+ * A write on a note that changed later stays too, and its step gets `kept`.
+ */
+export async function undoReplyWrites(messageId: string, versions: Version[]): Promise<UndoReport> {
+  const ids = callIds(versions)
+  if (ids.length === 0) return { undone: [], kept: [] }
+  return withNotes(async () => {
+    const report = await notes.undoCalls(messageId, ids, 'chat')
+    await mapSteps(messageId, (p) => {
+      if (report.undone.includes(p.callId)) return { ...p, undone: true, kept: false }
+      return report.kept.includes(p.callId) ? { ...p, kept: true } : p
+    })
+    return report
+  })
+}
+
+/**
+ * Takes back an undo. Only calls that the reply still holds come back. A write whose note changed
+ * since stays out, and its step stays marked undone.
+ */
+async function redoReplyWrites(messageId: string, report: UndoReport): Promise<void> {
+  await withNotes(async () => {
+    const m = await db.messages.get(messageId)
+    if (!m) return
+    const held = new Set(callIds(m.versions))
+    const { redone } = await notes.redoCalls(report.undone.filter((id) => held.has(id)), messageId)
+    await mapSteps(messageId, (p) => {
+      if (redone.includes(p.callId)) return { ...p, undone: false }
+      return report.kept.includes(p.callId) ? { ...p, kept: false } : p
+    })
+  })
+}
+
+/** The version a reroll replaces. A try with no output has no writes: they stay with the version before it. */
+const replacedBy = (m: Message): Version | undefined =>
+  m.versions.slice(0, m.activeVersion + 1).reverse().find((v) => hasOutput(v.content))
+
+/** The start of a reroll. Null when there is nothing to take back. */
+async function undoReplaced(messageId: string): Promise<UndoReport | null> {
+  const m = await db.messages.get(messageId)
+  const v = m && replacedBy(m)
+  return v ? undoReplyWrites(messageId, [v]) : null
+}
+
+/** A reroll with no output replaced nothing, so the writes it undid come back. */
+async function putBackIfEmpty(messageId: string, versionId: string, report: UndoReport): Promise<void> {
+  const v = (await db.messages.get(messageId))?.versions.find((x) => x.id === versionId)
+  if (v && !hasOutput(v.content)) await redoReplyWrites(messageId, report)
+}
+
+/** Stops the chat's stream and waits for its end, so that no write can land after this. */
+function streamEnded(conversationId: string): Promise<void> {
+  if (!controllers.has(conversationId)) return Promise.resolve()
+  return new Promise((resolve) => {
+    const off = onGenerationEnd(() => {
+      if (controllers.has(conversationId)) return
+      off()
+      resolve()
+    })
+    stop(conversationId)
+  })
+}
+
+export interface MessageSnapshot {
+  message: Message
+  report: UndoReport
+}
+
+/**
+ * Deletes a message and undoes its writes. A hidden version may still stream: that one stops first.
+ * Returns what Undo puts back.
+ */
+export async function deleteMessage(id: string): Promise<MessageSnapshot | null> {
+  const m = await db.messages.get(id)
+  if (m?.versions.some((v) => v.status === 'streaming')) await streamEnded(m.conversationId)
+  return withNotes(async () => {
+    const found = await db.messages.get(id)
+    if (!found) return null
+    const report = await undoReplyWrites(id, found.versions)
+    const removed = await storage.deleteMessage(id)
+    return removed ? { message: settled(removed), report } : null
+  })
+}
+
+export async function restoreMessage(s: MessageSnapshot): Promise<void> {
+  await withNotes(async () => {
+    await storage.restoreMessage(s.message)
+    await redoReplyWrites(s.message.id, s.report)
+  })
+}
+
+export interface VersionSnapshot {
+  messageId: string
+  removed: Version
+  index: number
+  report: UndoReport
+}
+
+/**
+ * Deletes the active version and undoes its writes. Returns what Undo puts back, or null when it
+ * is the only version. A step that another version also holds is not this version's to undo.
+ */
+export async function deleteVersion(id: string): Promise<VersionSnapshot | null> {
+  return withNotes(async () => {
+    const m = await db.messages.get(id)
+    const cut = m && withoutActiveVersion(m)
+    if (!cut) return null
+    const held = new Set(callIds(cut.message.versions))
+    const own = cut.removed.content.filter((p) => !isTool(p) || !held.has(p.callId))
+    const report = await undoReplyWrites(id, [{ ...cut.removed, content: own }])
+    // The undo marked steps on this version only, so `cut.message` is still right.
+    const removed = (await db.messages.get(id))?.versions[cut.index] ?? cut.removed
+    await db.messages.put(cut.message)
+    return { messageId: id, removed: settledVersion(removed), index: cut.index, report }
+  })
+}
+
+export async function restoreVersion(s: VersionSnapshot): Promise<void> {
+  await withNotes(async () => {
+    await storage.mutateMessage(s.messageId, (m) => withVersionAt(m, s.removed, s.index))
+    await redoReplyWrites(s.messageId, s.report)
+  })
 }
 
 export async function generate(conversationId: string, target: GenerateTarget, model: ModelInfo): Promise<void> {
@@ -325,6 +462,8 @@ async function generateInner(
 ): Promise<void> {
   const conversation = await storage.getConversation(conversationId)
   if (!conversation) return
+  // First of all, so the new reply can't read the old writes and the index can't list them.
+  const undid = target.kind === 'reroll' ? await undoReplaced(target.messageId) : null
   const settings = await storage.getSettings()
   // A reroll plans and sends only what comes before its target, so the window can never
   // point past the cut (buildOutgoing would then fall back to the whole transcript).
@@ -468,6 +607,7 @@ async function generateInner(
     roundReasoning,
     controller,
   })
+  if (undid) await putBackIfEmpty(messageId, version.id, undid)
 }
 
 /**

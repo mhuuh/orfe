@@ -3,6 +3,9 @@ import type { ContentPart, Message, ToolPart, Version } from './types'
 
 /** Pure edits on a Message's versions. Apply them through `storage.mutateMessage`. */
 
+/** The result of a call that a stop cut off. */
+export const STOPPED = 'Stopped by the user.'
+
 export const versionText = (v: Version | undefined): string =>
   (v?.content ?? []).map((p) => (p.type === 'text' ? p.text : '')).join('')
 
@@ -49,10 +52,19 @@ export function withVersionAt(m: Message, v: Version, index: number): Message {
   return { ...m, versions, activeVersion: at }
 }
 
-/** For an undo snapshot: a version still marked streaming would block Reroll/Continue forever. */
+/**
+ * For an undo snapshot. A version still marked streaming would block Reroll/Continue forever,
+ * and a step left open would run on Continue, though the user stopped it.
+ */
+export function settledVersion(v: Version): Version {
+  if (v.status !== 'streaming') return v
+  const content = v.content.map((p) => (p.type === 'tool' && p.status === 'running' ? { ...p, status: 'stopped' as const, result: STOPPED } : p))
+  return { ...v, status: 'stopped', content }
+}
+
 export function settled(m: Message): Message {
   if (!m.versions.some((v) => v.status === 'streaming')) return m
-  return { ...m, versions: m.versions.map((v) => (v.status === 'streaming' ? { ...v, status: 'stopped' as const } : v)) }
+  return { ...m, versions: m.versions.map(settledVersion) }
 }
 
 /** A new version holding edited text. Media and tool parts stay, in order. Text parts become one, after them. */

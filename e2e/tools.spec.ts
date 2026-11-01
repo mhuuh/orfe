@@ -100,6 +100,54 @@ test('tool line shows, opens, and Undo restores the note', async ({ page }) => {
   expect(await body()).toBe('Boats at dusk.')
 })
 
+/** The paths of the live notes on the chat's shelf. */
+const chatNotes = (page: Page) =>
+  page.evaluate(async () => {
+    const storeUrl = '/orfe/src/lib/notes/store.ts'
+    const storageUrl = '/orfe/src/lib/storage.ts'
+    const { notes } = (await import(/* @vite-ignore */ storeUrl)) as { notes: { list(shelf: string): Promise<{ path: string }[]> } }
+    const { storage } = (await import(/* @vite-ignore */ storageUrl)) as { storage: { listConversations(): Promise<{ id: string }[]> } }
+    const [chat] = await storage.listConversations()
+    return (await notes.list(chat.id)).map((n) => n.path)
+  })
+
+const harbour = JSON.stringify({ path: 'chat/harbour', description: 'The harbour', body: 'Boats at dawn.' })
+
+test('a reroll leaves no ghost note, and the old version shows its write as undone', async ({ page, api }) => {
+  await signIn(page)
+  await send(page, `${TOOLCALL}:notes_write:${harbour}`)
+  await page.getByText(/^Reply 2 /).click()
+  await page.getByRole('button', { name: 'Reroll' }).click()
+  await expect(page.getByText(/^Reply 4 /)).toBeVisible()
+
+  // The mock asks for the same write again. That is a new note, so the old one is gone by then.
+  expect(JSON.stringify(api.chats[2].messages[0])).not.toContain('harbour')
+  expect(await chatNotes(page)).toEqual(['harbour'])
+
+  await page.getByRole('button', { name: 'Previous version' }).click()
+  const line = page.getByRole('button', { name: /^wrote Harbour undone/ })
+  await expect(line).toBeVisible()
+  await line.click()
+  await page.getByRole('button', { name: 'Redo', exact: true }).click()
+  await expect(page.getByText('The note changed since. It stays undone.')).toBeVisible()
+  expect(await chatNotes(page)).toEqual(['harbour'])
+})
+
+test('deleting a reply takes its note away, and toast Undo brings both back', async ({ page }) => {
+  await signIn(page)
+  await send(page, `${TOOLCALL}:notes_write:${harbour}`)
+  await page.getByText(/^Reply 2 /).click()
+  await page.getByRole('button', { name: 'Delete', exact: true }).click()
+  await expect(page.getByText(/^Reply 2 /)).toHaveCount(0)
+  expect(await chatNotes(page)).toEqual([])
+
+  await page.getByRole('button', { name: 'Undo', exact: true }).click()
+  await expect(page.getByText(/^Reply 2 /)).toBeVisible()
+  await expect(page.getByRole('button', { name: /^wrote Harbour/ })).toHaveCount(1)
+  await expect(page.getByRole('button', { name: /^wrote Harbour undone/ })).toHaveCount(0)
+  expect(await chatNotes(page)).toEqual(['harbour'])
+})
+
 test('a tap on the reply text still opens the message actions', async ({ page }) => {
   await signIn(page)
   await send(page, 'hi')

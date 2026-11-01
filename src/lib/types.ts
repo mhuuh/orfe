@@ -19,6 +19,8 @@ export interface ToolPart {
   status: 'running' | 'done' | 'error' | 'stopped'
   /** A write that was undone. */
   undone?: boolean
+  /** A reroll or a delete tried to undo this write, but the note changed later, so it stays. */
+  kept?: boolean
 }
 
 export type VersionStatus = 'streaming' | 'done' | 'stopped' | 'interrupted' | 'error'

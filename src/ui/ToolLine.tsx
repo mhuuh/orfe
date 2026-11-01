@@ -8,11 +8,14 @@ import css from './ToolLine.module.css'
 /** Tools that change a note. Only a finished one can be undone. */
 const WRITES = new Set(['notes_write', 'notes_edit', 'notes_delete'])
 const DETAIL_LINES = 3
+const STAYS = 'The note changed since. This write stays.'
 
 export interface LineView {
   text: string
   live: boolean
   undone: boolean
+  /** A reroll or a delete left this write in place. */
+  kept: boolean
   canUndo: boolean
   canRedo: boolean
   /** The first lines of the result. */
@@ -32,6 +35,7 @@ export function lineView(part: ToolPart, locked = false): LineView {
     text: live ? words.running : words.done,
     live,
     undone,
+    kept: part.kept === true,
     canUndo: write && !undone,
     canRedo: write && undone,
     detail: lines.slice(0, DETAIL_LINES),
@@ -44,7 +48,7 @@ export async function undoStep(part: ToolPart, messageId: string, versionId: str
   try {
     const rev = await notes.byCall(part.callId, messageId)
     if (!rev) return 'Nothing to undo.'
-    if ((await notes.revert(rev.id, YOU)) === 'changed-later') return 'The note changed since. This write stays.'
+    if ((await notes.revert(rev.id, YOU)) === 'changed-later') return STAYS
     await setToolUndone(messageId, versionId, part.callId, true)
     return null
   } catch {
@@ -78,6 +82,7 @@ export function ToolLine({ part, messageId, versionId, locked = false }: Props) 
   const [note, setNote] = useState<string | null>(null)
   const [working, setWorking] = useState(false)
   const v = lineView(part, locked)
+  const said = note ?? (v.kept ? STAYS : null)
 
   async function run(step: typeof undoStep) {
     setWorking(true)
@@ -94,6 +99,7 @@ export function ToolLine({ part, messageId, versionId, locked = false }: Props) 
       <span className={css.dot} aria-hidden="true" />
       <span className={css.text}>{v.text}</span>
       {v.undone && <span className={css.undone}>undone</span>}
+      {v.kept && <span className={css.undone}>kept</span>}
     </>
   )
 
@@ -123,9 +129,9 @@ export function ToolLine({ part, messageId, versionId, locked = false }: Props) 
               {v.canUndo ? 'Undo' : 'Redo'}
             </button>
           )}
-          {note && (
+          {said && (
             <div className={css.note} role="status">
-              {note}
+              {said}
             </div>
           )}
         </div>
