@@ -91,6 +91,14 @@ describe('checkWrite', () => {
     expect(r).toMatch(/link/i)
   })
 
+  it('lets "you" edit a protected note and shrink it, but still checks version and description', () => {
+    const prev = note({ protected: true })
+    expect(checkWrite(prev, { ...ok, body: 'x'.repeat(10) }, 'you')).toBeNull()
+    expect(checkWrite(prev, { ...ok, expectedVersion: 1 }, 'you')).toMatch(/^Error:/)
+    expect(checkWrite(prev, { ...ok, description: '' }, 'you')).toMatch(/description/)
+    expect(checkWrite(prev, ok, 'tidy')).toMatch(/protected/)
+  })
+
   it('refuses a new-note write onto an existing note', () => {
     expect(checkWrite(note(), { ...ok, isNew: true }, 'm')).toMatch(/^Error:.*already exists/)
     expect(checkWrite(null, { ...ok, isNew: true }, 'm')).toBeNull()

@@ -86,15 +86,16 @@ export function nearMatch(path: string, existing: string[]): string | null {
  * Returns the refusal text, or null when the write may go ahead.
  * Refusals start with "Error:" so the tool loop shows them as errors.
  *
- * Every check but the size cap applies to every writer, 'you' too: the UI clears
- * `protected` before an edit, and it sends a version and a description with each save.
+ * Mikael ('you') skips the size cap, the shrink guard and protection: he may edit his own
+ * protected notes. Models and tidy get every check. The version and description checks
+ * apply to all writers.
  */
 export function checkWrite(
   prev: Note | null,
   next: { body: string; description: string; expectedVersion?: number; isNew?: boolean; shrink?: boolean },
   writer: string,
 ): string | null {
-  if (prev?.protected) {
+  if (prev?.protected && writer !== 'you') {
     return 'Error: This note is protected. Move or tag it, or write a new note that links to it.'
   }
   if (prev && next.isNew) {
@@ -113,7 +114,7 @@ export function checkWrite(
   if (prev && next.expectedVersion !== undefined && next.expectedVersion !== prev.version) {
     return `Error: The note is now at version ${prev.version}, not ${next.expectedVersion}. Use notes_read to get the current text, then write again with expected_version ${prev.version}.`
   }
-  if (prev && !next.shrink && next.body.length < prev.body.length * (1 - SHRINK_LIMIT)) {
+  if (writer !== 'you' && prev && !next.shrink && next.body.length < prev.body.length * (1 - SHRINK_LIMIT)) {
     return `Error: This write removes more than half of the note (${prev.body.length} to ${next.body.length} characters). If you mean it, write again with shrink: true. If not, use notes_read and keep the parts that are still true.`
   }
   return null
