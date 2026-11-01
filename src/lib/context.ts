@@ -84,9 +84,8 @@ export function fingerprint(outgoing: OutMessage[]): { prefixHash: string; prefi
  * `provider` on both sides is the user's provider preference (null until Plan 4), never the
  * provider that served the reply.
  *
- * Known trade-off: a continue sends the partial reply as an assistant prefill. The next request
- * carries the finished reply in that slot instead, so it does not extend the old one and reads as
- * cold. Accepted: continues are rare, and a cold reading at worst allows an early trim.
+ * A Continue that adds its line (see `CONTINUE_TURN`) records only the history before the reply,
+ * because the next request repeats no more than that. So that request reads warm.
  */
 export function isCold(
   last: LastRequest | null,

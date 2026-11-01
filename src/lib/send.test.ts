@@ -80,6 +80,10 @@ const bodyOf = (f: ReturnType<typeof stubFetch>, i: number) =>
     tool_choice?: string
   }
 
+/** The line a Continue adds. Spelled out, so a change to it shows here. */
+const LINE = 'Continue exactly where you stopped. Do not repeat what you already wrote. Do not repeat a tool call that already ran.'
+const USER_LINE = { role: 'user', content: LINE }
+
 let convId: string
 async function setup() {
   await storage.setSettings({ key: 'sk-test' })
@@ -147,13 +151,13 @@ describe('generate', () => {
     ])
   })
 
-  it('continue: new version starts with old text and request ends with assistant prefill', async () => {
+  it('continue: new version starts with old text and the request ends on a user line', async () => {
     const f = stubFetch(() => sse(reply('Once upon')), () => sse(reply(' a time')))
     await sendUserMessage(convId, 'story', { reply: true, model: A })
     const target = await lastMsg()
     await generate(convId, { kind: 'continue', messageId: target.id }, A)
     const body = bodyOf(f, 1)
-    expect(body.messages.at(-1)).toEqual({ role: 'assistant', content: 'Once upon' })
+    expect(body.messages.slice(-2)).toEqual([{ role: 'assistant', content: 'Once upon' }, USER_LINE])
     const after = (await storage.listMessages(convId)).find((m) => m.id === target.id)!
     expect(after.versions).toHaveLength(2)
     expect(after.versions[0].content).toEqual([{ type: 'text', text: 'Once upon' }])
@@ -1555,11 +1559,11 @@ describe('tool loop: Continue', () => {
     expect(sent.some((x) => x.reasoning_details)).toBe(false)
   })
 
-  it('a partial text after the steps goes out as a prefill, and the new text joins it', async () => {
+  it('a partial text after the steps goes out with the line after it, and the new text joins it', async () => {
     const f = stubFetch(() => sse(reply(' more')))
     const m = await cutOff([step('c1', 0), { type: 'text', text: 'partial' }])
     await generate(convId, { kind: 'continue', messageId: m.id }, T)
-    expect(bodyOf(f, 0).messages.at(-1)).toEqual({ role: 'assistant', content: 'partial' })
+    expect(bodyOf(f, 0).messages.slice(-2)).toEqual([{ role: 'assistant', content: 'partial' }, USER_LINE])
     expect((await activeVersion()).content.at(-1)).toEqual({ type: 'text', text: 'partial more' })
   })
 
@@ -1583,7 +1587,8 @@ describe('tool loop: Continue', () => {
     await generate(convId, { kind: 'continue', messageId: m.id }, model('o/other', { tools: true }))
     const sent = bodyOf(f, 0)
     expect(sent.messages.some((x) => x.role === 'tool')).toBe(false)
-    expect(sent.messages.at(-1)).toEqual({ role: 'assistant', content: '(Used echo.)' })
+    // Flat steps end on an assistant message, so this needs the line too.
+    expect(sent.messages.slice(-2)).toEqual([{ role: 'assistant', content: '(Used echo.)' }, USER_LINE])
     expect((await steps())[0].model).toBe(T.id)
   })
 
@@ -1593,7 +1598,7 @@ describe('tool loop: Continue', () => {
     await storage.appendMessage(convId, 'assistant', doneVersion('first'))
     const m = await storage.appendMessage(convId, 'assistant', doneVersion('second'))
     await generate(convId, { kind: 'continue', messageId: m.id }, T)
-    expect(bodyOf(f, 0).messages.at(-1)).toEqual({ role: 'assistant', content: 'first\n\nsecond' })
+    expect(bodyOf(f, 0).messages.slice(-2)).toEqual([{ role: 'assistant', content: 'first\n\nsecond' }, USER_LINE])
     expect((await activeVersion()).content).toEqual([{ type: 'text', text: 'second more' }])
   })
 
@@ -1603,8 +1608,140 @@ describe('tool loop: Continue', () => {
     const m = await storage.appendMessage(convId, 'assistant', doneVersion('Once'))
     await generate(convId, { kind: 'continue', messageId: m.id }, T)
     const sent = bodyOf(f, 1).messages
-    expect(sent.map((x) => x.role)).toEqual(['system', 'user', 'assistant', 'tool'])
+    expect(sent.map((x) => x.role)).toEqual(['system', 'user', 'assistant', 'user', 'assistant', 'tool'])
     expect(sent[2].content).toBe('Once')
+    expect(sent[3]).toEqual(USER_LINE)
+  })
+
+  describe('a request never ends on an assistant message', () => {
+    const raw = (f: ReturnType<typeof stubFetch>, i: number) => (f.mock.calls[i] as unknown as [string, RequestInit])[1].body as string
+    /** The messages of request `i`, as bytes, with the closing bracket off, so a longer one starts with it. */
+    const head = (f: ReturnType<typeof stubFetch>, i: number) => JSON.stringify((JSON.parse(raw(f, i)) as { messages: unknown[] }).messages).slice(0, -1)
+    const stored = async () => JSON.stringify(await storage.listMessages(convId))
+
+    /** A finished text reply. */
+    async function textReply() {
+      await storage.appendMessage(convId, 'user', doneVersion('go'))
+      return storage.appendMessage(convId, 'assistant', { ...doneVersion('Blue'), model: T.id })
+    }
+
+    /** Sends one turn from a chat at rest, so that `lastRequest` holds a real request. */
+    async function finishedReply(...responses: Array<() => Response>) {
+      const f = stubFetch(...responses)
+      await sendUserMessage(convId, 'go', { reply: true, model: T })
+      return { f, m: await lastMsg() }
+    }
+
+    it('the line is the last message on a finished text reply, and it is never stored', async () => {
+      const f = stubFetch(() => sse(reply('.')))
+      const m = await textReply()
+      await generate(convId, { kind: 'continue', messageId: m.id }, T)
+      expect(bodyOf(f, 0).messages.map((x) => x.role)).toEqual(['system', 'user', 'assistant', 'user'])
+      expect(bodyOf(f, 0).messages.at(-1)).toEqual(USER_LINE)
+      expect(await stored()).not.toContain('Continue exactly')
+      expect((await storage.listMessages(convId)).map((x) => x.role)).toEqual(['user', 'assistant'])
+      expect((await activeVersion()).content).toEqual([{ type: 'text', text: 'Blue.' }])
+    })
+
+    it('a reply on a tool turn with text at the end gets the line too', async () => {
+      const f = stubFetch(() => sse(reply('')))
+      const m = await cutOff([step('c1', 0), { type: 'text', text: 'Saved.' }], { status: 'done' })
+      await generate(convId, { kind: 'continue', messageId: m.id }, T)
+      expect(bodyOf(f, 0).messages.map((x) => x.role)).toEqual(['system', 'user', 'assistant', 'tool', 'assistant', 'user'])
+      expect(bodyOf(f, 0).messages.at(-1)).toEqual(USER_LINE)
+    })
+
+    it('a Continue that ends on a tool message adds nothing', async () => {
+      const f = stubFetch(() => sse(reply('Answer')))
+      const m = await cutOff([step('c1', 0)])
+      await generate(convId, { kind: 'continue', messageId: m.id }, T)
+      expect(bodyOf(f, 0).messages.map((x) => x.role)).toEqual(['system', 'user', 'assistant', 'tool'])
+      expect(raw(f, 0)).not.toContain('Continue exactly')
+      expect(await coldNow(T)).toBe(false)
+    })
+
+    it('a model may answer a finished reply with nothing: that is done, and the reply stays', async () => {
+      stubFetch(() => sse([ev({ choices: [{ delta: {}, finish_reason: 'stop' }] }), usageChunk(), 'data: [DONE]\n\n']))
+      const m = await textReply()
+      await generate(convId, { kind: 'continue', messageId: m.id }, T)
+      const v = await activeVersion()
+      expect(v.status).toBe('done')
+      expect(v.error).toBeUndefined()
+      expect(v.content).toEqual([{ type: 'text', text: 'Blue' }])
+    })
+
+    it('a short word joins the reply, and that is done', async () => {
+      stubFetch(() => sse(reply(' Done.')))
+      const m = await textReply()
+      await generate(convId, { kind: 'continue', messageId: m.id }, T)
+      const v = await activeVersion()
+      expect(v.status).toBe('done')
+      expect(v.content).toEqual([{ type: 'text', text: 'Blue Done.' }])
+    })
+
+    it('the next send after a text reply is warm, and sends no line', async () => {
+      const { f, m } = await finishedReply(() => sse(reply('Blue')), () => sse(reply(' sky')), () => sse(reply('ok')))
+      await generate(convId, { kind: 'continue', messageId: m.id }, T)
+      await storage.appendMessage(convId, 'user', doneVersion('next'))
+      expect(await coldNow(T)).toBe(false)
+      await generate(convId, { kind: 'new' }, T)
+      expect(raw(f, 2)).not.toContain('Continue exactly')
+      expect(bodyOf(f, 2).messages.map((x) => x.content).slice(-3)).toEqual(['go', 'Blue sky', 'next'])
+    })
+
+    it('the next send after a tool turn is warm', async () => {
+      const { m } = await finishedReply(() => sse(asks(['c1', 'echo', '{}'])), () => sse(reply('Saved')), () => sse(reply('.')))
+      await generate(convId, { kind: 'continue', messageId: m.id }, T)
+      await storage.appendMessage(convId, 'user', doneVersion('next'))
+      expect(await coldNow(T)).toBe(false)
+    })
+
+    it('the next send after a Continue that ran tool rounds is warm', async () => {
+      const { m } = await finishedReply(
+        () => sse(reply('Blue')),
+        () => sse(asks(['c1', 'echo', '{}'])),
+        () => sse(reply('Saved')),
+      )
+      await generate(convId, { kind: 'continue', messageId: m.id }, T)
+      await storage.appendMessage(convId, 'user', doneVersion('next'))
+      expect(await coldNow(T)).toBe(false)
+    })
+
+    it('rounds stay exact prefixes, with the line in each, and base stays frozen', async () => {
+      const { f, m } = await finishedReply(
+        () => sse(reply('Blue')),
+        () => sse([ev({ choices: [{ delta: { content: ' sky' } }] }), ...asks(['c1', 'echo', '{}'])]),
+        () => sse(asks(['c2', 'echo', '{}'])),
+        () => sse(reply('Done')),
+      )
+      await generate(convId, { kind: 'continue', messageId: m.id }, T)
+      expect(f).toHaveBeenCalledTimes(4)
+      for (const i of [1, 2, 3]) expect(raw(f, i)).toContain('Continue exactly')
+      expect(head(f, 2).startsWith(head(f, 1))).toBe(true)
+      expect(head(f, 3).startsWith(head(f, 2))).toBe(true)
+      expect(bodyOf(f, 3).messages.map((x) => x.role)).toEqual(['system', 'user', 'assistant', 'user', 'assistant', 'tool', 'assistant', 'tool'])
+      // The old text stays apart in the request. In storage the new text joins it.
+      expect(bodyOf(f, 3).messages[2].content).toBe('Blue')
+      expect(bodyOf(f, 3).messages[4].content).toBe(' sky')
+      expect((await activeVersion()).content[0]).toEqual({ type: 'text', text: 'Blue sky' })
+      expect(await stored()).not.toContain('Continue exactly')
+    })
+
+    it('a Continue that ended on a tool message keeps exact prefixes with no line', async () => {
+      const f = stubFetch(() => sse(asks(['c2', 'echo', '{}'])), () => sse(reply('Done')))
+      const m = await cutOff([step('c1', 0)])
+      await generate(convId, { kind: 'continue', messageId: m.id }, T)
+      expect(head(f, 1).startsWith(head(f, 0))).toBe(true)
+      expect(raw(f, 1)).not.toContain('Continue exactly')
+    })
+
+    it('a step that flattens in this run does not leave the request on an assistant message', async () => {
+      const bad = 'bad name'
+      const f = stubFetch(() => sse(asks(['c2', bad, '{}'])), () => sse(reply('Done')))
+      const m = await cutOff([step('c1', 0)])
+      await generate(convId, { kind: 'continue', messageId: m.id }, T)
+      expect(bodyOf(f, 1).messages.at(-1)).toEqual(USER_LINE)
+    })
   })
 
   it('a reply with nothing before it still follows a user turn', async () => {
@@ -2228,10 +2365,12 @@ describe('abilities in settings', () => {
     expect(bodyOf(f, 0).messages).toEqual([
       { role: 'user', content: 'go' },
       { role: 'assistant', content: '(Used one.)\n\nSo far' },
+      USER_LINE,
     ])
     const second = JSON.stringify(bodyOf(f, 1).messages)
     expect(second).toContain('(Used one.)')
     expect(second).toContain('(Tried made_up. It failed.)')
+    expect(bodyOf(f, 1).messages.at(-1)).toEqual(USER_LINE)
   })
 
   it('turning plain off brings back the switches as they were, and the next request reads cold', async () => {

@@ -130,6 +130,8 @@ Lives in `src/lib/send.ts`. All tools run on the phone.
 
 A tool error is a normal result the model can read, never a thrown failure. Refusals say what to do next.
 
+**Continue:** a Continue whose request would end on an assistant message gets one user line after that message, for every model, because Haiku and Gemini refuse such a request and GPT and DeepSeek restart the answer; the line is never stored, stays in each of that Continue's tool rounds, and is left out of `lastRequest`, so the next send reads warm.
+
 **Stop:** write a `stopped` result for every open call, or the next request fails.
 
 **Locking the phone:** the reply ends `interrupted` as it does today. Continue finishes open calls, then runs the next round. Plan 2's relay covers one request at a time, so it can't run a tool step alone. A locked phone pauses the reply. Accepted. (agreed)

@@ -19,6 +19,14 @@ export const MAX_ROUNDS = 8
 const ROUND_LIMIT = 'Round limit reached. Answer now.'
 const OUT_OF_ROUNDS = 'The model used all its steps without an answer.'
 const REFUSED = 'The provider refused this reply. Try again, or pick another model.'
+/**
+ * Closes a Continue's request that would end on an assistant message. Some models refuse such a
+ * request, and the others start the answer again. This message is never stored.
+ */
+const CONTINUE_TURN: OutMessage = {
+  role: 'user',
+  content: 'Continue exactly where you stopped. Do not repeat what you already wrote. Do not repeat a tool call that already ran.',
+}
 const WRITE_INTERVAL_MS = 200
 /** Share of the context limit above which a cold cache triggers a trim (spec §6). */
 const SOFT_THRESHOLD = 0.85
@@ -440,6 +448,9 @@ function withTurn(base: OutMessage[], turn: OutMessage[]): OutMessage[] {
   return opens ? [...base, { role: 'user', content: '…' }, ...turn] : [...base, ...turn]
 }
 
+/** The request with `CONTINUE_TURN` after it, if it would end on an assistant message. */
+const withContinue = (out: OutMessage[]): OutMessage[] => (out.at(-1)?.role === 'assistant' ? [...out, CONTINUE_TURN] : out)
+
 /** The messages `buildOutgoing` sends for this start (from the start on, plus pinned ones before it). */
 function windowOf(sorted: Message[], startId: string | null): Message[] {
   const start = startId === null ? 0 : Math.max(0, sorted.findIndex((m) => m.id === startId))
@@ -587,7 +598,7 @@ async function startReply(
   // (catalog not loaded) we cannot know, so a chosen effort is still sent rather than dropped.
   const effort =
     conversation.nextEffort !== null && (model.efforts !== null || model.unlisted === true) ? conversation.nextEffort : undefined
-  // Built before the new version exists, so a continue prefills with the old text.
+  // Built before the new version exists, so a Continue sends the old text.
   const outgoing = outgoingFor(messages, system, plan.startId, model, tools !== null, conversation.plain)
   // Ratio 1: tokenRatio is the correction to this raw estimate, not a correction of a correction.
   const estimate = estimateTokens(windowOf(messages, plan.startId), system, 1, overheadChars, stepChars)
@@ -603,10 +614,11 @@ async function startReply(
     initial = (old?.content ?? []).map((p) => ({ ...p }))
     roundReasoning = old?.roundReasoning
   }
-  // A continued reply goes out from its own parts, each round. If the base held it too, each call
-  // would go out twice. A text reply keeps its old first request: `outgoing` with the old text as prefill.
-  const base = target.kind === 'continue' ? outgoingFor(sendable(messages, target.messageId), system, plan.startId, model, tools !== null, conversation.plain) : outgoing
-  const prefill = target.kind === 'continue' && !initial.some(isTool) ? outgoing : null
+  // A continued reply goes out from its own parts. If the base held it too, each call would go out
+  // twice. A text reply goes out as `outgoing`, because there it joins a reply before it.
+  const continues = target.kind === 'continue'
+  const base = continues ? outgoingFor(sendable(messages, target.messageId), system, plan.startId, model, tools !== null, conversation.plain) : outgoing
+  const textReply = continues && !initial.some(isTool) ? outgoing : null
   const version: Version = {
     id: versionId,
     content: initial,
@@ -640,7 +652,8 @@ async function startReply(
     messageId,
     version,
     base,
-    prefill,
+    continues,
+    textReply,
     tools,
     enabled,
     model,
@@ -717,8 +730,9 @@ interface RunArgs {
   version: Version
   /** History before the reply. Frozen for the whole reply, so each round extends the one before it. */
   base: OutMessage[]
-  /** A continue of a text reply: its first request, with the old text at the end. */
-  prefill: OutMessage[] | null
+  continues: boolean
+  /** A Continue of a text reply: the history with the old text at the end. */
+  textReply: OutMessage[] | null
   tools: ReturnType<typeof toolsFor>
   enabled: Ability[]
   model: ModelInfo
@@ -789,13 +803,31 @@ async function run(a: RunArgs): Promise<void> {
     else content = [...content, { type: 'text', text }]
   }
 
+  const rendered = (parts: ContentPart[]): OutMessage[] =>
+    renderRounds(parts, { modelId: a.model.id, toolsEnabled: a.tools !== null, reasoning: roundReasoning })
+
+  /** What this run added to a Continue. New text joins the old last text in `content`, so only its tail counts. */
+  const added = (): ContentPart[] => {
+    const at = a.initial.length - 1
+    const [was, is] = [a.initial[at], content[at]]
+    const tail = was?.type === 'text' && is?.type === 'text' ? is.text.slice(was.text.length) : ''
+    return [...(tail === '' ? [] : [{ type: 'text' as const, text: tail }]), ...content.slice(a.initial.length)]
+  }
+
+  /** A Continue's old reply and the line. Set at its first request, so each round extends the one before it. */
+  let resumed: OutMessage[] | null = null
+
+  /** The request for this round. It runs after open calls closed, so their results go out. */
+  const nextRequest = (): OutMessage[] => {
+    if (!a.continues) return withTurn(a.base, rendered(content))
+    resumed ??= withContinue(a.textReply ?? withTurn(a.base, rendered(content)))
+    return withContinue(withTurn(resumed, rendered(added())))
+  }
+
   /** One request and its stream. `first`: the first request of this run. */
   const streamRound = async (first: boolean): Promise<RoundEnd> => {
     const end: RoundEnd = { finished: false, calls: [], replied: false, errored: null, aborted: false }
-    const outgoing =
-      first && a.prefill
-        ? a.prefill
-        : withTurn(a.base, renderRounds(content, { modelId: a.model.id, toolsEnabled: a.tools !== null, reasoning: roundReasoning }))
+    const outgoing = nextRequest()
     let counted: Usage | null = null
     let accepted = false
 
@@ -812,12 +844,14 @@ async function run(a: RunArgs): Promise<void> {
         // The first output (text, thinking, calls, usage or a finish) means the provider took the request,
         // so its prompt is now what the cache holds. `meta` is not enough: it comes with the HTTP 200,
         // and an in-stream error can still follow before any token. A failed request is not recorded.
+        // The line is not stored, and new text joins the text before it, so after a Continue with
+        // the line the next send repeats only the history before the reply.
         accepted = true
         const lastRequest: LastRequest = {
           model: a.model.id,
           provider: PROVIDER_PREFERENCE,
           toolsHash: a.tools?.hash ?? null,
-          ...fingerprint(outgoing),
+          ...fingerprint(outgoing.includes(CONTINUE_TURN) ? a.base : outgoing),
           at: Date.now(),
         }
         await storage.updateConversation(conversation.id, { lastRequest })
