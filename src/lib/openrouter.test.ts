@@ -121,6 +121,67 @@ describe('streamChat', () => {
     ])
   })
 
+  describe('a provider error says what went wrong', () => {
+    const failing = (metadata: unknown, message = 'Provider returned error') =>
+      vi.stubGlobal('fetch', vi.fn(async () => new Response(JSON.stringify({ error: { code: 400, message, metadata } }), { status: 400 })))
+
+    it('reads the inner message of raw JSON, with the provider', async () => {
+      const raw = JSON.stringify({ type: 'error', error: { type: 'invalid_request_error', message: 'This model does not support assistant message prefill.' } })
+      failing({ raw, provider_name: 'Claude Platform on AWS' })
+      expect(await run()).toEqual([
+        { type: 'error', code: 400, message: 'Claude Platform on AWS: This model does not support assistant message prefill.' },
+      ])
+    })
+
+    it('reads the other shapes that providers send', async () => {
+      failing({ raw: '{\n  "error": {\n    "code": 400,\n    "message": "Requests ending with a model turn are not supported.",\n    "status": "INVALID_ARGUMENT"\n  }\n}\n' })
+      expect(await run()).toEqual([{ type: 'error', code: 400, message: 'Requests ending with a model turn are not supported.' }])
+      failing({ raw: '[{"error":{"message":"From a list."}}]' })
+      expect(await run()).toMatchObject([{ message: 'From a list.' }])
+      failing({ raw: { message: 'Already an object.' } })
+      expect(await run()).toMatchObject([{ message: 'Already an object.' }])
+      failing({ raw: '{"detail":"Only a detail."}' })
+      expect(await run()).toMatchObject([{ message: 'Only a detail.' }])
+    })
+
+    it('shows raw text as it is, on one line', async () => {
+      failing({ raw: 'upstream said\n  no\tway', provider_name: 'Venice' })
+      expect(await run()).toMatchObject([{ message: 'Venice: upstream said no way' }])
+    })
+
+    it('shows raw JSON with no message as text', async () => {
+      failing({ raw: '{"code":5}' })
+      expect(await run()).toMatchObject([{ message: '{"code":5}' }])
+    })
+
+    it('cuts a long message to about 300 characters, and never in half an emoji', async () => {
+      failing({ raw: `${'x'.repeat(299)}😀${'y'.repeat(1000)}` })
+      const [e] = await run()
+      if (e.type !== 'error') throw new Error('expected error')
+      expect(e.message).toBe(`${'x'.repeat(299)}…`)
+    })
+
+    it('with no usable metadata, keeps the text of today', async () => {
+      for (const metadata of [undefined, null, 'odd', {}, { raw: '' }, { raw: null }, { raw: 7 }]) {
+        failing(metadata, 'Plain message')
+        expect(await run()).toEqual([{ type: 'error', code: 400, message: 'Plain message' }])
+      }
+    })
+
+    it('names the provider when the raw text is missing', async () => {
+      failing({ provider_name: 'Google' })
+      expect(await run()).toMatchObject([{ message: 'Google: Provider returned error' }])
+    })
+
+    it('works for an error inside the stream, and in a JSON reply', async () => {
+      const error = { code: 400, message: 'Provider returned error', metadata: { raw: '{"message":"Too long."}', provider_name: 'Azure' } }
+      vi.stubGlobal('fetch', vi.fn(async () => sseResponse([ev({ error })])))
+      expect(await run()).toEqual([{ type: 'error', code: 400, message: 'Azure: Too long.' }])
+      vi.stubGlobal('fetch', vi.fn(async () => new Response(JSON.stringify({ error }), { status: 200 })))
+      expect(await run({ ...req, stream: false })).toEqual([{ type: 'error', code: 400, message: 'Azure: Too long.' }])
+    })
+  })
+
   it('yields a network error event when fetch rejects', async () => {
     vi.stubGlobal('fetch', vi.fn(async () => Promise.reject(new TypeError('Failed to fetch'))))
     expect(await run()).toEqual([{ type: 'error', kind: 'network', message: 'Failed to fetch' }])

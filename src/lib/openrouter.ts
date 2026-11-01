@@ -1,8 +1,11 @@
+import { safeCut } from './notes/rules'
 import { sseData } from './sse'
 import type { ToolDef } from './abilities/registry'
 import type { Usage } from './types'
 
 export const API = 'https://openrouter.ai/api/v1'
+/** Longest error text the app shows. */
+const ERROR_CHARS = 300
 
 export type OutPart = { type: 'text'; text: string } | { type: 'image_url'; image_url: { url: string } }
 export interface OutToolCall {
@@ -76,6 +79,7 @@ interface WireUsage {
 interface WireError {
   code?: number | string
   message?: string
+  metadata?: { raw?: unknown; provider_name?: unknown } | null
 }
 interface WireToolCall {
   index?: number
@@ -104,9 +108,39 @@ function mapUsage(u: WireUsage): Usage {
   }
 }
 
+/** The message inside a provider's raw error. It is JSON in many shapes, or plain text. */
+function innerMessage(raw: unknown): string | undefined {
+  if (typeof raw === 'string') {
+    try {
+      return innerMessage(JSON.parse(raw)) ?? raw
+    } catch {
+      return raw
+    }
+  }
+  if (Array.isArray(raw)) return innerMessage(raw[0])
+  if (typeof raw !== 'object' || raw === null) return undefined
+  const { error, message, detail } = raw as Record<string, unknown>
+  return innerMessage(error ?? message ?? detail)
+}
+
+/**
+ * What an error says. `message` is often only "Provider returned error", and the real reason is in
+ * `metadata`. The result is one line, and the app shows it as text, never as HTML.
+ */
+function errorMessage(e: WireError): string | undefined {
+  const inner = innerMessage(e.metadata?.raw)?.trim()
+  const name = e.metadata?.provider_name
+  const provider = typeof name === 'string' && name !== '' ? `${name}: ` : ''
+  if (!inner && !provider) return e.message
+  const text = inner || e.message
+  if (!text) return undefined
+  const line = `${provider}${text}`.replace(/\s+/g, ' ')
+  return line.length > ERROR_CHARS ? `${safeCut(line, ERROR_CHARS)}…` : line
+}
+
 function errorEvent(e: WireError, fallback: string): StreamEvent {
   const code = typeof e.code === 'number' ? e.code : typeof e.code === 'string' && /^\d+$/.test(e.code) ? Number(e.code) : undefined
-  const ev: StreamEvent = { type: 'error', message: e.message || fallback }
+  const ev: StreamEvent = { type: 'error', message: errorMessage(e) || fallback }
   if (code !== undefined) ev.code = code
   return ev
 }
@@ -230,7 +264,7 @@ export async function* streamChat(req: ChatRequest, key: string, signal: AbortSi
     let message = `HTTP ${res.status}`
     try {
       const j = (await res.json()) as { error?: WireError }
-      if (j.error?.message) message = j.error.message
+      if (j.error) message = errorMessage(j.error) || message
     } catch {
       // keep the generic message
     }
