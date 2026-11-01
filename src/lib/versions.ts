@@ -39,12 +39,12 @@ export function settled(m: Message): Message {
   return { ...m, versions: m.versions.map((v) => (v.status === 'streaming' ? { ...v, status: 'stopped' as const } : v)) }
 }
 
-/** A new version holding edited text. Media parts stay; text parts become one. */
+/** A new version holding edited text. Media and tool parts stay, in order. Text parts become one, after them. */
 export function editedVersion(source: Version, text: string, now = Date.now()): Version {
-  const media = source.content.filter((p) => p.type !== 'text')
+  const kept = source.content.filter((p) => p.type !== 'text')
   return {
     id: newId(),
-    content: [...media, { type: 'text', text }],
+    content: [...kept, { type: 'text', text }],
     status: 'done',
     model: source.model,
     provider: source.provider,

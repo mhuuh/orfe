@@ -107,6 +107,7 @@ interface Summary {
 
 interface Conversation { /* existing */
   abilities: Record<string, boolean> | null   // null = defaults
+  plain: boolean                              // see §13
   notesIndex: string | null                   // frozen text, see §8
 }
 interface Prompt { /* existing */ abilities?: Record<string, boolean> }
@@ -288,6 +289,8 @@ interface Ability {
 One function, `toolsFor(chat, model)`, decides what reaches the model, so a dispatcher can replace direct tools later without touching abilities. Stay at or below about 12 tools per request.
 
 Notes, History search and Compaction are on by default, in all chats. Each can be switched off per chat, and a prompt can carry its own default set. (agreed; applying to existing chats: my call)
+
+**Plain chat (Mikael):** one switch per chat, above the ability switches. A plain chat is a plain OpenRouter chat: no tools, no vault, no search, no compaction, no note index, no instructions and no capability note. The request holds only the prompt and the messages. The ability switches keep their values, so turning Plain off brings them back. Like any toggle, it costs one cold turn. (Mikael asked for this or per-chat toggles; he gets both. Dropping the capability note: my call.)
 
 **Trust:** a chat that holds private data, reads untrusted content and has an outward channel at once must warn or refuse. After a model reads anything `untrusted`, its note writes wait for a visible OK. Nothing in this design is `untrusted`, so the gate exists but stays closed until such an ability ships. (agreed)
 

@@ -6,7 +6,7 @@ import type { RawModel } from './openrouter'
 vi.mock('./openrouter', () => ({ fetchModels: vi.fn() }))
 
 import { fetchModels } from './openrouter'
-import { chatModels, getCatalog, groupByMonth, loadCatalog, refreshCatalog, resetCatalog, search, sortAZ, subscribeCatalog, toModelInfo } from './catalog'
+import { CATALOG_CACHE_KEY, chatModels, getCatalog, groupByMonth, loadCatalog, refreshCatalog, resetCatalog, search, sortAZ, subscribeCatalog, toModelInfo, fallbackModelInfo } from './catalog'
 import { db } from './db'
 import { storage } from './storage'
 
@@ -76,8 +76,25 @@ describe('catalog', () => {
     expect(search(all, '  ')).toHaveLength(all.length)
   })
 
+  it('toModelInfo sets tools from supported_parameters', () => {
+    const base = raw[0]
+    expect(toModelInfo({ ...base, supported_parameters: ['temperature', 'tools'] }).tools).toBe(true)
+    expect(toModelInfo({ ...base, supported_parameters: ['temperature'] }).tools).toBe(false)
+    expect(toModelInfo({ ...base, supported_parameters: undefined }).tools).toBe(false)
+    expect(fallbackModelInfo('x/gone').tools).toBe(false)
+  })
+
+  it('a catalog cached before this schema re-fetches', async () => {
+    // The old row sits under the old key and has no `tools`. It must not read as "no tools".
+    await db.cache.put({ k: 'catalog', value: all.map(({ tools: _t, ...m }) => m), at: Date.now() })
+    mockFetch.mockResolvedValue(raw)
+    const r = await loadCatalog()
+    expect(mockFetch).toHaveBeenCalledTimes(1)
+    expect(r.models).toHaveLength(all.length)
+  })
+
   it('loadCatalog uses fresh cache without fetching', async () => {
-    await storage.setCache('catalog', all)
+    await storage.setCache(CATALOG_CACHE_KEY, all)
     const r = await loadCatalog()
     expect(mockFetch).not.toHaveBeenCalled()
     expect(r.models).toHaveLength(all.length)
@@ -86,7 +103,7 @@ describe('catalog', () => {
   })
 
   it('falls back to cached catalog when fetch fails', async () => {
-    await storage.setCache('catalog', all)
+    await storage.setCache(CATALOG_CACHE_KEY, all)
     mockFetch.mockRejectedValue(new Error('offline'))
     const r = await loadCatalog({ force: true })
     expect(mockFetch).toHaveBeenCalled()
@@ -102,7 +119,7 @@ describe('catalog', () => {
   })
 
   it('stale cache: shows the saved list at once (efforts intact) and refreshes in the background', async () => {
-    await db.cache.put({ k: 'catalog', value: all, at: Date.now() - 2 * 60 * 60 * 1000 })
+    await db.cache.put({ k: CATALOG_CACHE_KEY, value: all, at: Date.now() - 2 * 60 * 60 * 1000 })
     const d = deferred<RawModel[]>()
     mockFetch.mockReturnValue(d.promise)
     const seen: number[] = []
@@ -131,7 +148,7 @@ describe('catalog', () => {
   })
 
   it('fresh cache: no fetch; force fetches', async () => {
-    await storage.setCache('catalog', all)
+    await storage.setCache(CATALOG_CACHE_KEY, all)
     await refreshCatalog()
     expect(mockFetch).not.toHaveBeenCalled()
     expect(getCatalog().models).toHaveLength(all.length)
@@ -142,7 +159,7 @@ describe('catalog', () => {
   })
 
   it('store: offline with stale cache keeps the saved list and reports the error', async () => {
-    await db.cache.put({ k: 'catalog', value: all, at: Date.now() - 2 * 60 * 60 * 1000 })
+    await db.cache.put({ k: CATALOG_CACHE_KEY, value: all, at: Date.now() - 2 * 60 * 60 * 1000 })
     mockFetch.mockRejectedValue(new Error('offline'))
     await refreshCatalog()
     expect(getCatalog().models).toHaveLength(all.length)

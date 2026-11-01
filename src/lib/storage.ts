@@ -10,27 +10,6 @@ export const NO_WINDOW_START = { windowStartMessageId: null, windowStartOrder: n
 
 export const newId = (): string => crypto.randomUUID()
 
-export const DEFAULT_SETTINGS: Settings = {
-  key: null,
-  streaming: true,
-  themeMode: 'system',
-  defaultModel: 'anthropic/claude-sonnet-5.5',
-  context: { mode: 'tokens', limit: 32000, trimTo: 0.7 },
-  anthropicCacheHour: false,
-  lastBackupAt: null,
-}
-
-/** Fills fields that rows written before schema v2 do not have. Not written back. */
-function withConversationDefaults(c: Conversation): Conversation {
-  return {
-    ...c,
-    context: c.context ?? null,
-    windowStartOrder: c.windowStartOrder ?? null,
-    lastRequest: c.lastRequest ?? null,
-    tokenRatio: c.tokenRatio ?? 1,
-  }
-}
-
 export const zeroUsage = (): Usage => ({
   promptTokens: 0,
   completionTokens: 0,
@@ -39,6 +18,36 @@ export const zeroUsage = (): Usage => ({
   reasoningTokens: 0,
   cost: 0,
 })
+
+export const DEFAULT_SETTINGS: Settings = {
+  key: null,
+  streaming: true,
+  themeMode: 'system',
+  defaultModel: 'anthropic/claude-sonnet-5.5',
+  context: { mode: 'tokens', limit: 32000, trimTo: 0.7 },
+  anthropicCacheHour: false,
+  lastBackupAt: null,
+  tidying: true,
+  // Checked against the live catalog on 2026-11-01: 1M context, and reasoning is not mandatory.
+  summaryModel: 'google/gemini-3.1-flash-lite',
+  tidyModel: 'anthropic/claude-sonnet-5.5',
+  vaultUsage: zeroUsage(),
+}
+
+/** Fills fields that rows written before schema v2 or v3 do not have. Not written back. */
+function withConversationDefaults(c: Conversation): Conversation {
+  return {
+    ...c,
+    context: c.context ?? null,
+    windowStartOrder: c.windowStartOrder ?? null,
+    lastRequest: c.lastRequest ?? null,
+    tokenRatio: c.tokenRatio ?? 1,
+    abilities: c.abilities ?? null,
+    plain: c.plain ?? false,
+    notesIndex: c.notesIndex ?? null,
+    summaryBlock: c.summaryBlock ?? null,
+  }
+}
 
 export interface Storage {
   listConversations(): Promise<Conversation[]>
@@ -83,7 +92,8 @@ async function getSettings(): Promise<Settings> {
   const row = await db.settings.get(SETTINGS_KEY)
   const stored = (row?.value ?? {}) as Partial<Settings>
   const context: ContextSetting = { ...DEFAULT_SETTINGS.context, ...stored.context }
-  return { ...DEFAULT_SETTINGS, ...stored, context }
+  const vaultUsage: Usage = { ...zeroUsage(), ...stored.vaultUsage }
+  return { ...DEFAULT_SETTINGS, ...stored, context, vaultUsage }
 }
 
 export const storage: Storage = {
@@ -113,6 +123,10 @@ export const storage: Storage = {
       windowStartOrder: null,
       lastRequest: null,
       tokenRatio: 1,
+      abilities: null,
+      plain: false,
+      notesIndex: null,
+      summaryBlock: null,
       ...init,
     }
     await db.conversations.add(c)

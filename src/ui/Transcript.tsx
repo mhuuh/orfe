@@ -121,7 +121,7 @@ export function Transcript({ conversationId }: { conversationId: string | null }
   const lastId = messages[messages.length - 1]?.id
 
   // Where the stored window starts, resolved exactly as a send resolves it, never trimmed here.
-  // The start does not depend on the limit or the system text, so defaults stand in for them.
+  // The start does not depend on the limit, the system text or the tools, so defaults stand in for them.
   const conv = data?.conversation
   const startId = conv
     ? viewWindow({
@@ -131,6 +131,7 @@ export function Transcript({ conversationId }: { conversationId: string | null }
         setting: conv.context ?? DEFAULT_SETTINGS.context,
         system: null,
         ratio: 1,
+        overheadChars: 0,
       }).startId
     : null
   const startIdx = startId === null ? -1 : messages.findIndex((m) => m.id === startId)

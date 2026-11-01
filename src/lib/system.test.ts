@@ -21,6 +21,13 @@ describe('system assembly', () => {
     expect(assembleSystem(null, false)).toBeNull()
     expect(assembleSystem('  \n ', false)).toBeNull()
   })
+  it('assembleSystem joins prompt, note and extras, skipping nulls', () => {
+    expect(assembleSystem('Be brief.', true, ['Rules.', null, 'Index.', '  ', 'Summary.'])).toBe(
+      `Be brief.\n\n${CAPABILITY_NOTE}\n\nRules.\n\nIndex.\n\nSummary.`,
+    )
+    expect(assembleSystem(null, false, [null, 'Only this.'])).toBe('Only this.')
+    expect(assembleSystem(null, false, [null, null])).toBeNull()
+  })
   it('missing prompt ref assembles as no prompt', async () => {
     const c = await storage.createConversation()
     const r = await systemFor({ ...c, systemPromptRef: 'gone', capabilityNote: true })

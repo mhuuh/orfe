@@ -1,10 +1,19 @@
 import { sseData } from './sse'
+import type { ToolDef } from './abilities/registry'
 import type { Usage } from './types'
 
 export const API = 'https://openrouter.ai/api/v1'
 
 export type OutPart = { type: 'text'; text: string } | { type: 'image_url'; image_url: { url: string } }
-export type OutMessage = { role: 'system' | 'user' | 'assistant'; content: string | OutPart[] }
+export interface OutToolCall {
+  id: string
+  type: 'function'
+  function: { name: string; arguments: string }
+}
+export type OutMessage =
+  | { role: 'system' | 'user'; content: string | OutPart[] }
+  | { role: 'assistant'; content: string | OutPart[] | null; tool_calls?: OutToolCall[]; reasoning_details?: unknown[] }
+  | { role: 'tool'; tool_call_id: string; content: string }
 
 export interface ChatRequest {
   model: string
@@ -15,11 +24,17 @@ export interface ChatRequest {
   provider?: unknown
   /** Top-level prompt caching (Anthropic models). Sent as `cache_control`. */
   cacheControl?: { type: 'ephemeral'; ttl?: '1h' }
+  /** Sent as `{ type: 'function', function }`, in this order, so the bytes never change. */
+  tools?: ToolDef[]
+  /** Sent only together with `tools`. */
+  toolChoice?: 'auto'
 }
 
 export type StreamEvent =
   | { type: 'content'; text: string }
   | { type: 'reasoning'; text: string; details?: unknown[] }
+  /** The finished calls of one reply, once, just before `finish`. `arguments` is the raw string: the caller parses it. */
+  | { type: 'tool_calls'; calls: { id: string; name: string; arguments: string }[] }
   | { type: 'usage'; usage: Usage }
   | { type: 'meta'; generationId?: string; provider?: string }
   | { type: 'finish'; reason: string }
@@ -34,6 +49,7 @@ export interface RawModel {
   pricing: { prompt: string; completion: string }
   architecture: { input_modalities: string[]; output_modalities: string[] }
   reasoning?: { supported_efforts?: string[]; default_effort?: string }
+  supported_parameters?: string[]
 }
 
 /** Attribution headers for every call. `json` adds Content-Type, for requests with a JSON body only. */
@@ -61,9 +77,14 @@ interface WireError {
   code?: number | string
   message?: string
 }
+interface WireToolCall {
+  index?: number
+  id?: string
+  function?: { name?: string; arguments?: string }
+}
 interface WireChoice {
-  delta?: { content?: string | null; reasoning?: string | null; reasoning_details?: unknown[] }
-  message?: { content?: string | null; reasoning?: string | null; reasoning_details?: unknown[] }
+  delta?: { content?: string | null; reasoning?: string | null; reasoning_details?: unknown[]; tool_calls?: WireToolCall[] }
+  message?: { content?: string | null; reasoning?: string | null; reasoning_details?: unknown[]; tool_calls?: WireToolCall[] }
   finish_reason?: string | null
 }
 interface WireChunk {
@@ -112,6 +133,64 @@ function reasoningEvent(text: string | null | undefined, details: unknown[] | un
   return ev
 }
 
+const JOINED = ['text', 'summary', 'signature'] as const
+
+/**
+ * Joins `reasoning_details` deltas by `index`: the text, summary and signature strings
+ * are added together. It never joins across indexes (that gives "Invalid signature").
+ * A delta with no index is its own entry. It returns a new list and changes neither input.
+ */
+export function mergeReasoning(list: unknown[], d: unknown[]): unknown[] {
+  const out = list.map((x) => (x && typeof x === 'object' ? { ...(x as Record<string, unknown>) } : x))
+  for (const item of d) {
+    if (!item || typeof item !== 'object') {
+      out.push(item)
+      continue
+    }
+    const delta = item as Record<string, unknown>
+    const at = typeof delta.index === 'number' ? out.findIndex((x) => x && typeof x === 'object' && (x as Record<string, unknown>).index === delta.index) : -1
+    if (at < 0) {
+      out.push({ ...delta })
+      continue
+    }
+    const into = out[at] as Record<string, unknown>
+    for (const [k, v] of Object.entries(delta)) {
+      const old = into[k]
+      if ((JOINED as readonly string[]).includes(k) && typeof v === 'string' && typeof old === 'string') into[k] = old + v
+      else if (old === undefined) into[k] = v
+    }
+  }
+  return out
+}
+
+/**
+ * Where a piece with no `index` goes. Weak models send odd shapes: an id we know goes to its entry,
+ * a new id starts one, and with no id it goes by its place in the chunk or to the newest entry.
+ */
+function slotFor(p: WireToolCall, i: number, count: number, into: Map<number, { id: string }>): number {
+  const keys = [...into.keys()]
+  const next = keys.length ? Math.max(...keys) + 1 : 0
+  if (p.id) return keys.find((k) => into.get(k)?.id === p.id) ?? next
+  return count > 1 || next === 0 ? i : next - 1
+}
+
+/** Collects streamed tool call pieces by `index`. An id and a name come once; `arguments` come in pieces. */
+function toolCallsFrom(pieces: WireToolCall[], into: Map<number, { id: string; name: string; arguments: string }>): void {
+  pieces.forEach((p, i) => {
+    const at = typeof p.index === 'number' ? p.index : slotFor(p, i, pieces.length, into)
+    const c = into.get(at) ?? { id: '', name: '', arguments: '' }
+    if (p.id) c.id = p.id
+    if (p.function?.name && c.name === '') c.name = p.function.name
+    if (p.function?.arguments) c.arguments += p.function.arguments
+    into.set(at, c)
+  })
+}
+
+function callsEvent(m: Map<number, { id: string; name: string; arguments: string }>): StreamEvent | null {
+  if (m.size === 0) return null
+  return { type: 'tool_calls', calls: [...m.entries()].sort((a, b) => a[0] - b[0]).map(([, c]) => c) }
+}
+
 /**
  * Streams (or fetches) a chat completion and yields normalised events.
  * Never throws for HTTP errors, network failures or mid-stream errors: those
@@ -128,6 +207,10 @@ export async function* streamChat(req: ChatRequest, key: string, signal: AbortSi
   if (req.reasoning !== undefined) body.reasoning = req.reasoning
   if (req.provider !== undefined) body.provider = req.provider
   if (req.cacheControl !== undefined) body.cache_control = req.cacheControl
+  if (req.tools && req.tools.length > 0) {
+    body.tools = req.tools.map((t) => ({ type: 'function', function: { name: t.name, description: t.description, parameters: t.parameters } }))
+    body.tool_choice = req.toolChoice ?? 'auto'
+  }
 
   let res: Response
   try {
@@ -169,6 +252,10 @@ export async function* streamChat(req: ChatRequest, key: string, signal: AbortSi
       const r = reasoningEvent(choice?.message?.reasoning, choice?.message?.reasoning_details)
       if (r) yield r
       if (choice?.message?.content) yield { type: 'content', text: choice.message.content }
+      const calls = new Map<number, { id: string; name: string; arguments: string }>()
+      toolCallsFrom(choice?.message?.tool_calls ?? [], calls)
+      const ce = callsEvent(calls)
+      if (ce) yield ce
       if (choice?.finish_reason) yield { type: 'finish', reason: choice.finish_reason }
       if (j.usage) yield { type: 'usage', usage: mapUsage(j.usage) }
       return
@@ -178,6 +265,8 @@ export async function* streamChat(req: ChatRequest, key: string, signal: AbortSi
       yield { type: 'error', message: 'Empty response body' }
       return
     }
+    const calls = new Map<number, { id: string; name: string; arguments: string }>()
+    let callsSent = false
     for await (const payload of sseData(res.body)) {
       let chunk: WireChunk
       try {
@@ -195,10 +284,19 @@ export async function* streamChat(req: ChatRequest, key: string, signal: AbortSi
         const r = reasoningEvent(delta.reasoning, delta.reasoning_details)
         if (r) yield r
         if (delta.content) yield { type: 'content', text: delta.content }
+        if (Array.isArray(delta.tool_calls)) toolCallsFrom(delta.tool_calls, calls)
       }
-      if (choice?.finish_reason) yield { type: 'finish', reason: choice.finish_reason }
+      if (choice?.finish_reason) {
+        const ce = callsSent ? null : callsEvent(calls)
+        if (ce) {
+          callsSent = true
+          yield ce
+        }
+        yield { type: 'finish', reason: choice.finish_reason }
+      }
       if (chunk.usage) yield { type: 'usage', usage: mapUsage(chunk.usage) }
     }
+    // A stream with no finish chunk hands over no calls: they may be cut off, so they must not run.
   } catch (e) {
     if (isAbort(e)) throw e
     // A read that throws is the connection dropping (Android kills it when the app is hidden).

@@ -1,10 +1,12 @@
 import { useState } from 'react'
 import { useLiveQuery } from 'dexie-react-hooks'
+import { toolsFor } from '../lib/abilities/registry'
 import { viewWindow } from '../lib/context'
 import { storage } from '../lib/storage'
 import { systemFor } from '../lib/system'
 import type { Message } from '../lib/types'
 import { ChatSettings, compact } from './ChatSettings'
+import { findModel, useCatalog } from './useCatalog'
 import css from './Header.module.css'
 
 export type CacheState = 'warm' | 'cold' | 'none'
@@ -37,6 +39,7 @@ export function cacheState(messages: Message[]): CacheState {
 
 export function Header({ conversationId, onMenu }: { conversationId: string | null; onMenu: () => void }) {
   const [settingsOpen, setSettingsOpen] = useState(false)
+  const { models } = useCatalog()
   const info = useLiveQuery(async () => {
     if (!conversationId) return null
     const [conv, messages, settings] = await Promise.all([
@@ -45,7 +48,7 @@ export function Header({ conversationId, onMenu }: { conversationId: string | nu
       storage.getSettings(),
     ])
     if (!conv) return null
-    const { system } = await systemFor(conv)
+    const { system, prompt } = await systemFor(conv)
     const setting = conv.context ?? settings.context
     // Display only: the stored window, never trimmed here. Sending decides trims.
     const view = viewWindow({
@@ -55,6 +58,7 @@ export function Header({ conversationId, onMenu }: { conversationId: string | nu
       setting,
       system,
       ratio: conv.tokenRatio,
+      overheadChars: toolsFor(conv, prompt, findModel(models, conv.nextModel))?.json.length ?? 0,
     })
     const meta = headerMeta({
       turns: messages.filter((m) => m.role === 'user').length,
@@ -64,7 +68,7 @@ export function Header({ conversationId, onMenu }: { conversationId: string | nu
       cache: cacheState(messages),
     })
     return { id: conversationId, title: conv.title, meta }
-  }, [conversationId])
+  }, [conversationId, models])
 
   // On a chat switch useLiveQuery keeps the previous result until the new query returns. Show it
   // meanwhile (one frame of the old title) rather than flash the brand title with no meta.

@@ -92,7 +92,7 @@ A plain Node script with hand-built requests, run before the app work so its fin
 - Test: `src/lib/versions.test.ts`, `src/lib/storage.test.ts`, `src/lib/catalog.test.ts`
 
 **Interfaces:**
-- Produces: spec §4 types (`ToolPart`, `Note`, `NoteRevision`, `Summary`, new `Conversation`, `Prompt`, `Settings`, `Version` fields). Also `Conversation.summaryBlock: string | null`, frozen like `notesIndex` (spec §11: the block changes only at a trim). `Settings.vaultUsage: Usage`. `Note.aliases: string[]`. `NoteRevision.runId: string | null` for tidy runs. `ModelInfo.tools: boolean`, from `supported_parameters` including `tools`; a stand-in model has `tools: false`.
+- Produces: spec §4 types (`ToolPart`, `Note`, `NoteRevision`, `Summary`, new `Conversation`, `Prompt`, `Settings`, `Version` fields). Also `Conversation.summaryBlock: string | null`, frozen like `notesIndex` (spec §11: the block changes only at a trim). `Conversation.plain: boolean`, default false (spec §13). `Settings.vaultUsage: Usage`. `Note.aliases: string[]`. `NoteRevision.runId: string | null` for tidy runs. `ModelInfo.tools: boolean`, from `supported_parameters` including `tools`; a stand-in model has `tools: false`.
 - Dexie v3 tables: `notes: 'id, shelf, [shelf+path], deletedAt'`, `noteRevisions: 'id, noteId, callId, [noteId+version]'`, `summaries: 'id, conversationId, [conversationId+level]'`.
 
 - [ ] **Step 1: Write failing tests:**
@@ -131,7 +131,7 @@ interface Ability {
   traits: { private?: true; untrusted?: true; outward?: true }
 }
 const ABILITIES: Ability[]                                     // fixed order
-function enabledAbilities(c: Conversation, p: Prompt | null): Ability[]   // c.abilities ?? p?.abilities ?? all on
+function enabledAbilities(c: Conversation, p: Prompt | null): Ability[]   // [] when c.plain, else c.abilities ?? p?.abilities ?? all on
 function toolsFor(c: Conversation, p: Prompt | null, model: ModelInfo): { json: string; hash: string; tools: ToolDef[] } | null  // null without tool support
 function abilityInstructions(enabled: Ability[], model: ModelInfo): string | null
 function runTool(name: string, rawArgs: string, ctx: AbilityCtx, enabled: Ability[]): Promise<string>
@@ -147,6 +147,7 @@ it('toolsFor gives byte-identical JSON on every call')
 it('toolsFor is null for a model without tools')
 it('a switched-off ability leaves the list')
 it('c.abilities wins over the prompt, and the prompt over the defaults')
+it('a plain chat has no abilities and no tools, whatever its switches say')
 it('runTool returns a readable error for an unknown tool')
 it('runTool returns a readable error for bad JSON, naming the tool')
 it('runTool returns a readable error when run throws')
@@ -473,17 +474,19 @@ test('Trash restores a deleted note')
 **Interfaces:**
 - Produces: `setAbility(conversationId, id, on): Promise<void>` in `send.ts`. Rows per the mockup's fourth phone.
 
-A prompt's editor gains an Abilities row. Beside the model chip, one line once per model: "This model can't use notes." This is the no-tools notice of spec §6. Trust gate: in `run`, after any `untrusted` result in the reply, `outward` and note-writing tools wait for a visible OK. No shipped ability has the trait, so test it with a fake.
+A **Plain chat** switch sits at the top of Abilities (spec §13): on, the ability switches grey out and keep their values, and `generateInner` leaves out the capability note, so the request is the prompt and the messages only. `setPlain(conversationId, on): Promise<void>` in `send.ts`. A prompt's editor gains an Abilities row. Beside the model chip, one line once per model: "This model can't use notes." This is the no-tools notice of spec §6. Trust gate: in `run`, after any `untrusted` result in the reply, `outward` and note-writing tools wait for a visible OK. No shipped ability has the trait, so test it with a fake.
 
 - [ ] **Step 1: Write failing tests:**
 
 ```ts
 it('a switch changes the tool list and the next request reads cold')
 it('a chat with a prompt default follows it until the chat sets its own')
+it('a plain chat sends no tools, no index, no instructions, no summary block and no capability note')
+it('turning plain off brings back the switches as they were, and the next request reads cold')
 it('after untrusted content a note write waits for OK')
 ```
 
-e2e: `switching notes off removes the tools from the request`, `a no-tools model shows the notice and still replies`.
+e2e: `switching notes off removes the tools from the request`, `a plain chat sends only the prompt and the messages`, `a no-tools model shows the notice and still replies`.
 
 - [ ] **Step 2 to 4: Run FAIL, implement, run PASS. Step 5: Commit, merge M3 to `main`.** Mikael tries real notes on the phone here, with two different models.
 

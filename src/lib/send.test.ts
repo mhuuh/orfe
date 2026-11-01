@@ -1,10 +1,12 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { fallbackModelInfo, type ModelInfo } from './catalog'
 import { db, newId, storage } from './storage'
-import { computeCold, deleteChat, errorText, generate, patchVersion, isGenerating, recoverInterrupted, replacePromptRef, restoreChat, sendUserMessage, setPrompt, stop } from './send'
+import { setAbilitiesForTest, toolsFor, type Ability } from './abilities/registry'
+import { setModelRulesForTest } from './modelRules'
+import { computeCold, deleteChat, errorText, generate, MAX_ROUNDS, patchVersion, isGenerating, recoverInterrupted, replacePromptRef, restoreChat, sendUserMessage, setAlreadyDoneForTest, setPrompt, stop } from './send'
 import { CAPABILITY_NOTE, systemFor } from './system'
 import { fingerprint } from './context'
-import type { Version } from './types'
+import type { ToolPart, Version } from './types'
 
 const enc = new TextEncoder()
 const ev = (o: unknown) => `data: ${JSON.stringify(o)}\n\n`
@@ -22,6 +24,7 @@ function model(id: string, extra: Partial<ModelInfo> = {}): ModelInfo {
     efforts: null,
     defaultEffort: null,
     free: false,
+    tools: false,
     ...extra,
   }
 }
@@ -61,10 +64,18 @@ function stubFetch(...responses: Array<() => Response>) {
 const bodyOf = (f: ReturnType<typeof stubFetch>, i: number) =>
   JSON.parse((f.mock.calls[i] as unknown as [string, RequestInit])[1].body as string) as {
     model: string
-    messages: Array<{ role: string; content: unknown }>
+    messages: Array<{
+      role: string
+      content: unknown
+      tool_calls?: Array<{ id: string; function: { name: string; arguments: string } }>
+      tool_call_id?: string
+      reasoning_details?: unknown[]
+    }>
     reasoning?: { effort: string }
     session_id: string
     stream: boolean
+    tools?: unknown[]
+    tool_choice?: string
   }
 
 let convId: string
@@ -82,6 +93,9 @@ beforeEach(async () => {
 afterEach(() => {
   vi.useRealTimers()
   vi.unstubAllGlobals()
+  setAbilitiesForTest()
+  setAlreadyDoneForTest()
+  setModelRulesForTest()
 })
 
 describe('generate', () => {
@@ -277,6 +291,21 @@ describe('generate', () => {
     expect(r.durationMs).toBeGreaterThanOrEqual(0)
   })
 
+  it('joins streamed reasoning details by index, so a signature stays whole', async () => {
+    stubFetch(() =>
+      sse([
+        ev({ choices: [{ delta: { reasoning_details: [{ type: 'reasoning.text', index: 0, text: 'ab' }] } }] }),
+        ev({ choices: [{ delta: { reasoning_details: [{ type: 'reasoning.text', index: 0, text: 'cd', signature: 'sig' }] } }] }),
+        ev({ choices: [{ delta: { content: 'answer' } }] }),
+        ev({ choices: [{ delta: {}, finish_reason: 'stop' }] }),
+      ]),
+    )
+    await sendUserMessage(convId, 'hi', { reply: true, model: A })
+    const r = (await lastMsg()).versions[0].reasoning!
+    expect(r.details).toEqual([{ type: 'reasoning.text', index: 0, text: 'abcd', signature: 'sig' }])
+    expect(r.text).toBe('abcd')
+  })
+
   it('marks a stream that ends without finish as interrupted, keeping partial text', async () => {
     stubFetch(() => sse([ev({ choices: [{ delta: { content: 'cut of' } }] })]))
     await sendUserMessage(convId, 'hi', { reply: true, model: A })
@@ -447,13 +476,14 @@ describe('generate', () => {
 async function coldNow(m: ModelInfo = A): Promise<boolean> {
   const c = (await storage.getConversation(convId))!
   const s = await storage.getSettings()
-  const { system } = await systemFor(c)
+  const { system, prompt } = await systemFor(c)
   return computeCold({
     lastRequest: c.lastRequest,
     messages: await storage.listMessages(convId),
     system,
     windowStartId: c.windowStartMessageId,
     model: m,
+    toolsHash: toolsFor(c, prompt, m)?.hash ?? null,
     anthropicCacheHour: s.anthropicCacheHour,
     now: Date.now(),
   })
@@ -641,6 +671,690 @@ describe('generate: prompts, window and cache', () => {
     await sendUserMessage(convId, 'hi', { reply: true, model: A })
     expect((await lastMsg()).versions[0].status).toBe('error')
     expect((await storage.getConversation(convId))!.lastRequest).toBeNull()
+  })
+})
+
+/** The model that can use tools. */
+const T = model('a/tools', { tools: true })
+
+const ability = (
+  run: Ability['run'] = async (_n, args) => `ran ${JSON.stringify(args)}`,
+  name = 'echo',
+): Ability => ({
+  id: name,
+  title: name,
+  summary: '',
+  tools: [{ name, description: 'Say it back.', parameters: { type: 'object', properties: {} } }],
+  run,
+  describe: () => ({ running: 'running', done: 'done', past: `(Used ${name}.)` }),
+  traits: {},
+})
+
+const callPiece = (id: string, name: string, args: string, index = 0) =>
+  ev({ choices: [{ delta: { tool_calls: [{ index, id, function: { name, arguments: args } }] } }] })
+const finish = (reason: string) => ev({ choices: [{ delta: {}, finish_reason: reason }] })
+const DONE = 'data: [DONE]\n\n'
+/** One model reply that asks for these calls. */
+const asks = (...calls: [id: string, name: string, args: string][]) => [
+  ...calls.map(([id, name, args], i) => callPiece(id, name, args, i)),
+  finish('tool_calls'),
+  usageChunk(),
+  DONE,
+]
+const activeVersion = async () => {
+  const m = await lastMsg()
+  return m.versions[m.activeVersion]
+}
+const steps = async (): Promise<ToolPart[]> => (await activeVersion()).content.filter((p): p is ToolPart => p.type === 'tool')
+const step = (callId: string, round: number, extra: Partial<ToolPart> = {}): ToolPart => ({
+  type: 'tool',
+  callId,
+  round,
+  model: T.id,
+  name: 'echo',
+  args: {},
+  result: 'old result',
+  status: 'done',
+  ...extra,
+})
+const open = (callId: string, round: number) => step(callId, round, { status: 'running', result: '' })
+/** Every id in `tool_calls` has one `tool` message, right after it, and no id comes twice. */
+function expectValid(messages: ReturnType<typeof bodyOf>['messages']) {
+  const seen = new Set<string>()
+  messages.forEach((m, i) => {
+    m.tool_calls?.forEach((c, n) => {
+      expect(seen.has(c.id)).toBe(false)
+      seen.add(c.id)
+      expect(messages[i + 1 + n]).toMatchObject({ role: 'tool', tool_call_id: c.id })
+    })
+  })
+}
+/** The fetch itself fails, as when the connection is gone. */
+const dropped = (): Response => {
+  throw new TypeError('Failed to fetch')
+}
+/** A tool that waits until Stop, then rejects as a fetch would. */
+const hangs = (onStart: () => void): Ability['run'] => async (_n, _a, ctx) => {
+  onStart()
+  await new Promise<void>((_, rej) => ctx.signal.addEventListener('abort', () => rej(new DOMException('aborted', 'AbortError'))))
+  return 'never'
+}
+
+describe('tool loop', () => {
+  beforeEach(() => setAbilitiesForTest([ability()]))
+
+  it('runs a tool and sends the result in the next round', async () => {
+    const f = stubFetch(() => sse(asks(['c1', 'echo', '{"a":1}'])), () => sse(reply('Done')))
+    await sendUserMessage(convId, 'go', { reply: true, model: T })
+    expect(f).toHaveBeenCalledTimes(2)
+    const first = bodyOf(f, 0)
+    expect(first.tools).toEqual([{ type: 'function', function: ability().tools[0] }])
+    expect(first.tool_choice).toBe('auto')
+    const second = bodyOf(f, 1)
+    expect(second.tools).toEqual(first.tools)
+    expect(second.tool_choice).toBe('auto')
+    expect(second.messages.slice(-2)).toEqual([
+      { role: 'assistant', content: null, tool_calls: [{ id: 'c1', type: 'function', function: { name: 'echo', arguments: '{"a":1}' } }] },
+      { role: 'tool', tool_call_id: 'c1', content: 'ran {"a":1}' },
+    ])
+    const v = await activeVersion()
+    expect(v.status).toBe('done')
+    expect(v.content).toEqual([
+      { type: 'tool', callId: 'c1', round: 0, model: T.id, name: 'echo', args: { a: 1 }, result: 'ran {"a":1}', status: 'done' },
+      { type: 'text', text: 'Done' },
+    ])
+  })
+
+  it('a reply with only tool steps ends done', async () => {
+    const f = stubFetch(
+      () => sse(asks(['c1', 'echo', '{}'])),
+      () => sse([finish('stop'), usageChunk(), DONE]),
+      () => sse(reply('next')),
+    )
+    await sendUserMessage(convId, 'go', { reply: true, model: T })
+    const v = await activeVersion()
+    expect(v.status).toBe('done')
+    expect(v.error).toBeUndefined()
+    expect(v.content.map((p) => p.type)).toEqual(['tool'])
+    // The next turn is a valid request.
+    await sendUserMessage(convId, 'and now', { reply: true, model: T })
+    const next = bodyOf(f, 2).messages
+    expect(next.map((m) => m.role)).toEqual(['system', 'user', 'assistant', 'tool', 'user'])
+    expectValid(next)
+  })
+
+  it('saves running then done on the ToolPart', async () => {
+    const seen: string[][] = []
+    setAbilitiesForTest([
+      ability(async () => {
+        seen.push((await steps()).map((p) => p.status))
+        return 'result'
+      }),
+    ])
+    stubFetch(() => sse(asks(['c1', 'echo', '{}'], ['c2', 'echo', '{}'])), () => sse(reply('ok')))
+    await sendUserMessage(convId, 'go', { reply: true, model: T })
+    // All calls of a round are saved before the first one runs. They run in order, one at a time.
+    expect(seen).toEqual([
+      ['running', 'running'],
+      ['done', 'running'],
+    ])
+    expect((await steps()).map((p) => p.status)).toEqual(['done', 'done'])
+  })
+
+  it('base outgoing is byte-identical across rounds', async () => {
+    const f = stubFetch(() => sse(asks(['c1', 'echo', '{}'])), () => sse(asks(['c2', 'echo', '{}'])), () => sse(reply('ok')))
+    await sendUserMessage(convId, 'one', { reply: true, model: T })
+    const raw = (i: number) => JSON.parse((f.mock.calls[i] as unknown as [string, RequestInit])[1].body as string) as { messages: unknown[]; tools: unknown }
+    const head = (i: number) => JSON.stringify(raw(i).messages).slice(0, -1)
+    expect(raw(0).messages).toHaveLength(2)
+    expect(head(1).startsWith(head(0))).toBe(true)
+    expect(head(2).startsWith(head(1))).toBe(true)
+    expect(JSON.stringify(raw(2).tools)).toBe(JSON.stringify(raw(0).tools))
+  })
+
+  it('stops at 8 rounds and lets the model answer', async () => {
+    let ran = 0
+    setAbilitiesForTest([
+      ability(async () => {
+        ran++
+        return 'x'
+      }),
+    ])
+    let n = 0
+    const f = vi.fn(async () => (++n <= MAX_ROUNDS ? sse(asks([`c${n}`, 'echo', '{}'])) : sse(reply('Answer'))))
+    vi.stubGlobal('fetch', f)
+    await sendUserMessage(convId, 'go', { reply: true, model: T })
+    expect(MAX_ROUNDS).toBe(8)
+    expect(f).toHaveBeenCalledTimes(9)
+    expect(ran).toBe(7)
+    const all = await steps()
+    expect(all.map((p) => p.round)).toEqual([0, 1, 2, 3, 4, 5, 6, 7])
+    expect(all[7].result).toBe('Round limit reached. Answer now.')
+    expect(bodyOf(f as never, 8).messages.at(-1)).toEqual({ role: 'tool', tool_call_id: 'c8', content: 'Round limit reached. Answer now.' })
+    const v = await activeVersion()
+    expect(v.status).toBe('done')
+    expect(v.content.at(-1)).toEqual({ type: 'text', text: 'Answer' })
+  })
+
+  it('calls after the limit are stored as errors and the reply ends done', async () => {
+    let n = 0
+    const f = vi.fn(async () => sse(asks([`c${++n}`, 'echo', '{}'])))
+    vi.stubGlobal('fetch', f)
+    await sendUserMessage(convId, 'go', { reply: true, model: T })
+    expect(f).toHaveBeenCalledTimes(9)
+    expect((await steps()).at(-1)).toMatchObject({ callId: 'c9', round: 8, status: 'error', result: 'Round limit reached. Answer now.' })
+    expect((await activeVersion()).status).toBe('done')
+  })
+
+  it('sends reasoning_details inside the loop', async () => {
+    const think = (text: string) => ev({ choices: [{ delta: { reasoning_details: [{ type: 'reasoning.text', index: 0, text, signature: text }] } }] })
+    const f = stubFetch(
+      () => sse([think('one'), ...asks(['c1', 'echo', '{}'])]),
+      () => sse([think('two'), ...asks(['c2', 'echo', '{}'])]),
+      () => sse(reply('ok')),
+      () => sse(reply('later')),
+    )
+    await sendUserMessage(convId, 'go', { reply: true, model: T })
+    const first = { type: 'reasoning.text', index: 0, text: 'one', signature: 'one' }
+    const second = { type: 'reasoning.text', index: 0, text: 'two', signature: 'two' }
+    // The same index in two rounds never joins, or a signature breaks.
+    expect(bodyOf(f, 2).messages.filter((m) => m.tool_calls).map((m) => m.reasoning_details)).toEqual([[first], [second]])
+    const v = await activeVersion()
+    expect(v.roundReasoning).toEqual([[first], [second]])
+    expect(v.reasoning?.details).toEqual([first, second])
+    expect(v.reasoning?.text).toBe('onetwo')
+    // Once the reply is finished, it goes out with none.
+    await sendUserMessage(convId, 'more', { reply: true, model: T })
+    expect(bodyOf(f, 3).messages.some((m) => m.reasoning_details)).toBe(false)
+  })
+
+  it('Stop writes a stopped result for every open call, and the next request is valid', async () => {
+    let ran = 0
+    setAbilitiesForTest([ability(hangs(() => ran++))])
+    const f = stubFetch(() => sse(asks(['c1', 'echo', '{}'], ['c2', 'echo', '{}'])), () => sse(reply('next')))
+    await sendUserMessage(convId, 'go', { reply: false })
+    const p = generate(convId, { kind: 'new' }, T)
+    await vi.waitFor(() => expect(ran).toBe(1))
+    stop(convId)
+    await p
+    expect(ran).toBe(1)
+    expect(f).toHaveBeenCalledTimes(1)
+    expect(await steps()).toMatchObject([
+      { callId: 'c1', status: 'stopped', result: 'Stopped by the user.' },
+      { callId: 'c2', status: 'stopped', result: 'Stopped by the user.' },
+    ])
+    expect((await activeVersion()).status).toBe('stopped')
+    await sendUserMessage(convId, 'never mind', { reply: true, model: T })
+    const next = bodyOf(f, 1).messages
+    expectValid(next)
+    expect(next.filter((m) => m.role === 'tool').map((m) => m.content)).toEqual(['Stopped by the user.', 'Stopped by the user.'])
+  })
+
+  it('adds usage across rounds without double counting', async () => {
+    stubFetch(
+      () =>
+        sse([
+          callPiece('c1', 'echo', '{}'),
+          finish('tool_calls'),
+          usageChunk(10, 5, 0.01),
+          usageChunk(10, 5, 0.01), // a repeat replaces the one before it
+          DONE,
+        ]),
+      () => sse([ev({ choices: [{ delta: { content: 'ok' } }] }), finish('stop'), usageChunk(20, 7, 0.02), DONE]),
+    )
+    await sendUserMessage(convId, 'go', { reply: true, model: T })
+    const u = (await activeVersion()).usage!
+    expect(u.promptTokens).toBe(30)
+    expect(u.completionTokens).toBe(12)
+    expect(u.cost).toBeCloseTo(0.03)
+    const c = (await storage.getConversation(convId))!
+    expect(c.totals.promptTokens).toBe(30)
+    expect(c.totals.completionTokens).toBe(12)
+    expect(c.totals.cost).toBeCloseTo(0.03)
+  })
+
+  it('only the first request of a run sets tokenRatio', async () => {
+    await storage.updateConversation(convId, { capabilityNote: false })
+    // A later round holds tool text that the estimate leaves out, so it would read as a high ratio.
+    stubFetch(() => sse([callPiece('c1', 'echo', '{}'), finish('tool_calls'), usageChunk(150), DONE]), () => sse([finish('stop'), usageChunk(100000), DONE]))
+    await sendUserMessage(convId, 'x'.repeat(400 - JSON.stringify(ability().tools).length), { reply: true, model: T }) // estimate 100 tokens
+    expect((await storage.getConversation(convId))!.tokenRatio).toBeCloseTo(1.5)
+  })
+
+  it('updates lastRequest each round, with the tools hash', async () => {
+    const f = stubFetch(() => sse(asks(['c1', 'echo', '{}'])), () => sse(reply('ok')))
+    await sendUserMessage(convId, 'go', { reply: true, model: T })
+    const c = (await storage.getConversation(convId))!
+    const { prompt } = await systemFor(c)
+    expect(c.lastRequest!.toolsHash).toBe(toolsFor(c, prompt, T)!.hash)
+    const fp = fingerprint(bodyOf(f, 1).messages as never)
+    expect(c.lastRequest!.prefixCount).toBe(fp.prefixCount)
+    expect(c.lastRequest!.prefixHash).toBe(fp.prefixHash)
+  })
+
+  it('malformed arguments give the model an error result and the loop goes on', async () => {
+    const f = stubFetch(() => sse(asks(['c1', 'echo', '{"x"'])), () => sse(reply('Sorry')))
+    await sendUserMessage(convId, 'go', { reply: true, model: T })
+    const [part] = await steps()
+    expect(part.status).toBe('error')
+    expect(part.args).toBe('{"x"')
+    expect(part.result).toMatch(/^Error: the arguments for "echo" are not valid JSON/)
+    const sent = bodyOf(f, 1).messages
+    expect(sent.at(-2)!.tool_calls![0].function.arguments).toBe('{}')
+    expect(sent.at(-1)).toEqual({ role: 'tool', tool_call_id: 'c1', content: part.result })
+    expect((await activeVersion()).status).toBe('done')
+  })
+
+  it('an unknown tool gives the model an error result and the loop goes on', async () => {
+    const f = stubFetch(() => sse(asks(['c1', 'nope', '{}'])), () => sse(reply('Sorry')))
+    await sendUserMessage(convId, 'go', { reply: true, model: T })
+    const [part] = await steps()
+    expect(part.status).toBe('error')
+    expect(part.result).toBe('Error: there is no tool called "nope". The tools you have are: echo.')
+    expect(bodyOf(f, 1).messages.at(-1)).toEqual({ role: 'tool', tool_call_id: 'c1', content: part.result })
+    expect((await activeVersion()).status).toBe('done')
+  })
+
+  it('a tool that throws is a result too', async () => {
+    setAbilitiesForTest([
+      ability(async () => {
+        throw new Error('boom')
+      }),
+    ])
+    stubFetch(() => sse(asks(['c1', 'echo', '{}'])), () => sse(reply('Sorry')))
+    await sendUserMessage(convId, 'go', { reply: true, model: T })
+    expect((await steps())[0]).toMatchObject({ status: 'error', result: 'Error: "echo" failed. boom' })
+  })
+
+  it('a call with no id, or an id used before, gets a new one', async () => {
+    const f = stubFetch(() => sse(asks(['', 'echo', '{}'], ['same', 'echo', '{}'])), () => sse(asks(['same', 'echo', '{}'])), () => sse(reply('ok')))
+    await sendUserMessage(convId, 'go', { reply: true, model: T })
+    const ids = (await steps()).map((p) => p.callId)
+    expect(ids.every((id) => id !== '')).toBe(true)
+    expect(new Set(ids).size).toBe(3)
+    expectValid(bodyOf(f, 2).messages)
+  })
+
+  it('an id used in an earlier reply gets a new one, so no request holds it twice', async () => {
+    const f = stubFetch(
+      () => sse(asks(['call_0', 'echo', '{}'])),
+      () => sse(reply('one')),
+      () => sse(asks(['call_0', 'echo', '{}'])),
+      () => sse(reply('two')),
+    )
+    await sendUserMessage(convId, 'first', { reply: true, model: T })
+    await sendUserMessage(convId, 'second', { reply: true, model: T })
+    expect((await steps())[0].callId).not.toBe('call_0')
+    expectValid(bodyOf(f, 3).messages)
+    expect(bodyOf(f, 3).messages.filter((m) => m.tool_calls)).toHaveLength(2)
+  })
+
+  it('a fresh call with a reused id runs, and no lookup can skip it', async () => {
+    let ran = 0
+    const lookups: string[] = []
+    setAbilitiesForTest([
+      ability(async () => {
+        ran++
+        return 'ran now'
+      }),
+    ])
+    setAlreadyDoneForTest(async (id) => {
+      lookups.push(id)
+      return 'old result'
+    })
+    stubFetch(
+      () => sse(asks(['call_0', 'echo', '{}'])),
+      () => sse(reply('one')),
+      () => sse(asks(['call_0', 'echo', '{}'])),
+      () => sse(reply('two')),
+    )
+    await sendUserMessage(convId, 'first', { reply: true, model: T })
+    await sendUserMessage(convId, 'second', { reply: true, model: T })
+    expect(ran).toBe(2)
+    expect(lookups).toEqual([])
+    expect((await steps())[0]).toMatchObject({ status: 'done', result: 'ran now' })
+  })
+
+  it('a finish of stop with calls still runs them', async () => {
+    const f = stubFetch(() => sse([callPiece('c1', 'echo', '{}'), finish('stop')]), () => sse(reply('ok')))
+    await sendUserMessage(convId, 'go', { reply: true, model: T })
+    expect(f).toHaveBeenCalledTimes(2)
+    expect((await steps())[0].status).toBe('done')
+  })
+
+  it('calls cut off by the length limit do not run', async () => {
+    const f = stubFetch(() => sse([ev({ choices: [{ delta: { content: 'so far' } }] }), callPiece('c1', 'echo', '{"x'), finish('length')]))
+    await sendUserMessage(convId, 'go', { reply: true, model: T })
+    expect(f).toHaveBeenCalledTimes(1)
+    expect(await steps()).toEqual([])
+    expect(await activeVersion()).toMatchObject({ status: 'done', finishReason: 'length' })
+  })
+
+  it('calls from a stream with no finish do not run, and the reply ends interrupted', async () => {
+    let ran = 0
+    setAbilitiesForTest([
+      ability(async () => {
+        ran++
+        return 'x'
+      }),
+    ])
+    stubFetch(() => sse([callPiece('c1', 'echo', '{"x"')]))
+    await sendUserMessage(convId, 'go', { reply: true, model: T })
+    expect(ran).toBe(0)
+    expect(await steps()).toEqual([])
+    expect((await activeVersion()).status).toBe('interrupted')
+  })
+
+  it('a refusal with an empty reply is an error and stores no lastRequest', async () => {
+    stubFetch(() => sse([finish('content_filter'), usageChunk(0, 0, 0), DONE]))
+    await sendUserMessage(convId, 'go', { reply: true, model: T })
+    const v = await activeVersion()
+    expect(v.status).toBe('error')
+    expect(v.error).toBeTruthy()
+    expect((await storage.getConversation(convId))!.lastRequest).toBeNull()
+  })
+
+  it('a filter finish after real text stays a finished reply', async () => {
+    stubFetch(() => sse([ev({ choices: [{ delta: { content: 'part' } }] }), finish('content_filter')]))
+    await sendUserMessage(convId, 'go', { reply: true, model: T })
+    expect(await activeVersion()).toMatchObject({ status: 'done', finishReason: 'content_filter' })
+  })
+
+  it('a network drop mid-loop ends interrupted, with Continue', async () => {
+    const f = stubFetch(() => sse(asks(['c1', 'echo', '{}'])), dropped, () => sse(reply('Back')))
+    await sendUserMessage(convId, 'go', { reply: true, model: T })
+    const v = await activeVersion()
+    expect(v.status).toBe('interrupted')
+    expect(v.error).toBeUndefined()
+
+    await generate(convId, { kind: 'continue', messageId: (await lastMsg()).id }, T)
+    expect(f).toHaveBeenCalledTimes(3)
+    expectValid(bodyOf(f, 2).messages)
+    expect(bodyOf(f, 2).messages.at(-1)).toMatchObject({ role: 'tool', tool_call_id: 'c1' })
+    const after = await activeVersion()
+    expect(after.status).toBe('done')
+    expect(after.content.map((p) => p.type)).toEqual(['tool', 'text'])
+  })
+
+  it('a model without tools sends no tools field', async () => {
+    const f = stubFetch(() => sse(reply('ok')))
+    await sendUserMessage(convId, 'go', { reply: true, model: A })
+    expect(bodyOf(f, 0)).not.toHaveProperty('tools')
+    expect(bodyOf(f, 0)).not.toHaveProperty('tool_choice')
+
+    // A rule can take tools from a model that lists them.
+    setModelRulesForTest([{ pattern: /^a\/tools/, rule: { noTools: true } }])
+    await sendUserMessage(convId, 'again', { reply: true, model: T })
+    expect(bodyOf(f, 1)).not.toHaveProperty('tools')
+    setModelRulesForTest()
+
+    // So does a plain chat.
+    await storage.updateConversation(convId, { plain: true })
+    await sendUserMessage(convId, 'plain', { reply: true, model: T })
+    expect(bodyOf(f, 2)).not.toHaveProperty('tools')
+  })
+
+  it('with no abilities, a request is what it was before tools', async () => {
+    setAbilitiesForTest()
+    const f = stubFetch(() => sse(reply('ok')))
+    await sendUserMessage(convId, 'go', { reply: true, model: T })
+    expect(Object.keys(bodyOf(f, 0)).sort()).toEqual(['messages', 'model', 'session_id', 'stream'])
+    expect((await storage.getConversation(convId))!.lastRequest!.toolsHash).toBeNull()
+  })
+
+  it('old steps flatten for a model without tools', async () => {
+    const f = stubFetch(() => sse(asks(['c1', 'echo', '{}'])), () => sse(reply('one')), () => sse(reply('two')))
+    await sendUserMessage(convId, 'go', { reply: true, model: T })
+    await sendUserMessage(convId, 'next', { reply: true, model: A })
+    const sent = bodyOf(f, 2)
+    expect(sent).not.toHaveProperty('tools')
+    expect(sent.messages.some((m) => m.role === 'tool' || m.tool_calls)).toBe(false)
+    expect(JSON.stringify(sent.messages)).toContain('(Used echo.)')
+  })
+
+  it('counts the tools JSON toward the window', async () => {
+    const huge = ability()
+    huge.tools = [{ ...huge.tools[0], description: 'x'.repeat(4000) }]
+    setAbilitiesForTest([huge])
+    await storage.updateConversation(convId, { context: { mode: 'tokens', limit: 1000, trimTo: 0.5 } })
+    const f = stubFetch(() => sse(reply('ok')))
+    await storage.appendMessage(convId, 'user', doneVersion('old'))
+    await storage.appendMessage(convId, 'assistant', doneVersion('old reply'))
+    await sendUserMessage(convId, 'new', { reply: true, model: T })
+    expect(texts(f, 0)).toEqual(['new'])
+  })
+
+  it('an in-flight request with reasoning, then the stored next turn, reads warm', async () => {
+    const think = ev({ choices: [{ delta: { reasoning_details: [{ type: 'reasoning.text', index: 0, text: 'hm' }] } }] })
+    stubFetch(() => sse([think, ...asks(['c1', 'echo', '{"a":1}'])]), () => sse(reply('ok')))
+    await sendUserMessage(convId, 'go', { reply: true, model: T })
+    await sendUserMessage(convId, 'next', { reply: false })
+    expect(await coldNow(T)).toBe(false)
+  })
+
+  it('a change of tools reads cold', async () => {
+    stubFetch(() => sse(reply('ok')))
+    await sendUserMessage(convId, 'go', { reply: true, model: T })
+    await sendUserMessage(convId, 'next', { reply: false })
+    expect(await coldNow(T)).toBe(false)
+    setAbilitiesForTest([ability(undefined, 'other')])
+    expect(await coldNow(T)).toBe(true)
+  })
+})
+
+describe('tool loop: Continue', () => {
+  beforeEach(() => setAbilitiesForTest([ability()]))
+
+  /** A user turn and a reply cut off in this state. */
+  async function cutOff(content: Version['content'], extra: Partial<Version> = {}) {
+    await storage.appendMessage(convId, 'user', doneVersion('go'))
+    return storage.appendMessage(convId, 'assistant', { id: newId(), content, status: 'interrupted', model: T.id, createdAt: 1, ...extra })
+  }
+
+  it('Continue after a lock does not run a finished write twice', async () => {
+    const ran: string[] = []
+    setAbilitiesForTest([
+      ability(async (_n, _a, ctx) => {
+        ran.push(ctx.callId)
+        return 'ran now'
+      }),
+    ])
+    const lookups: [string, string][] = []
+    setAlreadyDoneForTest(async (id, messageId) => {
+      lookups.push([id, messageId])
+      return id === 'written' ? 'stored result' : null
+    })
+    const f = stubFetch(() => sse(reply('Finished')))
+    const m = await cutOff([open('written', 0), open('lost', 0), step('closed', 0)])
+    await generate(convId, { kind: 'continue', messageId: m.id }, T)
+    expect(ran).toEqual(['lost'])
+    // Only open parts are looked up, each with its message.
+    expect(lookups).toEqual([
+      ['written', m.id],
+      ['lost', m.id],
+    ])
+    expect(await steps()).toMatchObject([
+      { callId: 'written', status: 'done', result: 'stored result' },
+      { callId: 'lost', status: 'done', result: 'ran now' },
+      { callId: 'closed', status: 'done', result: 'old result' },
+    ])
+    expect(bodyOf(f, 0).messages.filter((x) => x.role === 'tool').map((x) => x.content)).toEqual(['stored result', 'ran now', 'old result'])
+    const v = await activeVersion()
+    expect(v.status).toBe('done')
+    expect(v.content.at(-1)).toEqual({ type: 'text', text: 'Finished' })
+    // The old version stays as it was.
+    const after = await lastMsg()
+    expect(after.versions).toHaveLength(2)
+    expect(after.versions[0].status).toBe('interrupted')
+  })
+
+  it('a failed lookup is a readable result, the call does not run, and the loop goes on', async () => {
+    const ran: string[] = []
+    setAbilitiesForTest([
+      ability(async (_n, _a, ctx) => {
+        ran.push(ctx.callId)
+        return 'ran now'
+      }),
+    ])
+    setAlreadyDoneForTest(async (id) => {
+      if (id === 'c1') throw new Error('database gone')
+      return null
+    })
+    const f = stubFetch(() => sse(reply('Finished')))
+    const m = await cutOff([open('c1', 0), open('c2', 0)])
+    await generate(convId, { kind: 'continue', messageId: m.id }, T)
+    // A write could run twice, so the call that could not be checked stays unrun.
+    expect(ran).toEqual(['c2'])
+    const [failed, next] = await steps()
+    expect(failed.status).toBe('error')
+    expect(failed.result).toMatch(/^Error: /)
+    expect(next).toMatchObject({ status: 'done', result: 'ran now' })
+    expect(bodyOf(f, 0).messages.find((x) => x.tool_call_id === 'c1')?.content).toBe(failed.result)
+    expect((await activeVersion()).status).toBe('done')
+  })
+
+  it('Stop during the lookup does not start the tool', async () => {
+    let ran = 0
+    setAbilitiesForTest([
+      ability(async () => {
+        ran++
+        return 'ran now'
+      }),
+    ])
+    setAlreadyDoneForTest(async () => {
+      stop(convId)
+      return null
+    })
+    const f = stubFetch(() => sse(reply('no')))
+    const m = await cutOff([open('c1', 0)])
+    await generate(convId, { kind: 'continue', messageId: m.id }, T)
+    expect(ran).toBe(0)
+    expect(f).not.toHaveBeenCalled()
+    expect((await steps())[0]).toMatchObject({ status: 'stopped', result: 'Stopped by the user.' })
+    expect((await activeVersion()).status).toBe('stopped')
+  })
+
+  it('Stop during the lookup keeps a result that was found', async () => {
+    setAlreadyDoneForTest(async () => {
+      stop(convId)
+      return 'stored result'
+    })
+    stubFetch(() => sse(reply('no')))
+    const m = await cutOff([open('c1', 0)])
+    await generate(convId, { kind: 'continue', messageId: m.id }, T)
+    expect((await steps())[0]).toMatchObject({ status: 'done', result: 'stored result' })
+    expect((await activeVersion()).status).toBe('stopped')
+  })
+
+  it('a new call cannot take an id from the reply it continues', async () => {
+    const f = stubFetch(() => sse(asks(['c1', 'echo', '{}'])), () => sse(reply('ok')))
+    const m = await cutOff([step('c1', 0)])
+    await generate(convId, { kind: 'continue', messageId: m.id }, T)
+    expect((await steps()).map((p) => p.callId)[1]).not.toBe('c1')
+    expectValid(bodyOf(f, 1).messages)
+  })
+
+  it('sends each call once', async () => {
+    const f = stubFetch(() => sse(reply('Back')))
+    const m = await cutOff([step('c1', 0), step('c2', 1)])
+    await generate(convId, { kind: 'continue', messageId: m.id }, T)
+    const sent = bodyOf(f, 0).messages
+    expectValid(sent)
+    expect(sent.map((x) => x.role)).toEqual(['system', 'user', 'assistant', 'tool', 'assistant', 'tool'])
+  })
+
+  it('resumes at the round after the last one, so two rounds never fold into one message', async () => {
+    const f = stubFetch(() => sse(asks(['c3', 'echo', '{}'])), () => sse(reply('ok')))
+    const m = await cutOff([step('c1', 0), step('c2', 1)])
+    await generate(convId, { kind: 'continue', messageId: m.id }, T)
+    expect((await steps()).map((p) => p.round)).toEqual([0, 1, 2])
+    expect(bodyOf(f, 1).messages.filter((x) => x.tool_calls).map((x) => x.tool_calls!.map((c) => c.id))).toEqual([['c1'], ['c2'], ['c3']])
+  })
+
+  it('counts the rounds of the old version toward the limit', async () => {
+    const f = stubFetch(() => sse(asks(['late', 'echo', '{}'])))
+    const m = await cutOff([step('c1', MAX_ROUNDS - 1)])
+    await generate(convId, { kind: 'continue', messageId: m.id }, T)
+    expect(f).toHaveBeenCalledTimes(1)
+    expect((await steps()).at(-1)).toMatchObject({ callId: 'late', status: 'error' })
+    expect((await activeVersion()).status).toBe('done')
+  })
+
+  it('keeps the reasoning of old rounds, in the request and on the new version', async () => {
+    const details = [{ type: 'reasoning.text', index: 0, text: 'hm', signature: 's' }]
+    const f = stubFetch(() => sse(reply('Back')))
+    const m = await cutOff([step('c1', 0)], { roundReasoning: [details] })
+    await generate(convId, { kind: 'continue', messageId: m.id }, T)
+    expect(bodyOf(f, 0).messages.find((x) => x.tool_calls)!.reasoning_details).toEqual(details)
+    expect((await activeVersion()).roundReasoning).toEqual([details])
+  })
+
+  it('after an edit the reasoning of old rounds is gone, and the request stays valid', async () => {
+    const f = stubFetch(() => sse(reply('Back')))
+    const m = await cutOff([step('c1', 0), { type: 'text', text: 'edited' }])
+    await generate(convId, { kind: 'continue', messageId: m.id }, T)
+    const sent = bodyOf(f, 0).messages
+    expectValid(sent)
+    expect(sent.some((x) => x.reasoning_details)).toBe(false)
+  })
+
+  it('a partial text after the steps goes out as a prefill, and the new text joins it', async () => {
+    const f = stubFetch(() => sse(reply(' more')))
+    const m = await cutOff([step('c1', 0), { type: 'text', text: 'partial' }])
+    await generate(convId, { kind: 'continue', messageId: m.id }, T)
+    expect(bodyOf(f, 0).messages.at(-1)).toEqual({ role: 'assistant', content: 'partial' })
+    expect((await activeVersion()).content.at(-1)).toEqual({ type: 'text', text: 'partial more' })
+  })
+
+  it('Stop while finishing open calls closes them', async () => {
+    let ran = 0
+    setAbilitiesForTest([ability(hangs(() => ran++))])
+    const f = stubFetch(() => sse(reply('no')))
+    const m = await cutOff([open('c1', 0), open('c2', 0)])
+    const p = generate(convId, { kind: 'continue', messageId: m.id }, T)
+    await vi.waitFor(() => expect(ran).toBe(1))
+    stop(convId)
+    await p
+    expect(f).not.toHaveBeenCalled()
+    expect((await steps()).map((s) => s.status)).toEqual(['stopped', 'stopped'])
+    expect((await activeVersion()).status).toBe('stopped')
+  })
+
+  it('another model sees the old steps as text, and they keep their model', async () => {
+    const f = stubFetch(() => sse(reply('Back')))
+    const m = await cutOff([step('c1', 0)])
+    await generate(convId, { kind: 'continue', messageId: m.id }, model('o/other', { tools: true }))
+    const sent = bodyOf(f, 0)
+    expect(sent.messages.some((x) => x.role === 'tool')).toBe(false)
+    expect(sent.messages.at(-1)).toEqual({ role: 'assistant', content: '(Used echo.)' })
+    expect((await steps())[0].model).toBe(T.id)
+  })
+
+  it('a text reply continues as it did, merged into the reply before it', async () => {
+    const f = stubFetch(() => sse(reply(' more')))
+    await storage.appendMessage(convId, 'user', doneVersion('go'))
+    await storage.appendMessage(convId, 'assistant', doneVersion('first'))
+    const m = await storage.appendMessage(convId, 'assistant', doneVersion('second'))
+    await generate(convId, { kind: 'continue', messageId: m.id }, T)
+    expect(bodyOf(f, 0).messages.at(-1)).toEqual({ role: 'assistant', content: 'first\n\nsecond' })
+    expect((await activeVersion()).content).toEqual([{ type: 'text', text: 'second more' }])
+  })
+
+  it('a text reply that continues into a tool call sends the reply once', async () => {
+    const f = stubFetch(() => sse(asks(['c1', 'echo', '{}'])), () => sse(reply('ok')))
+    await storage.appendMessage(convId, 'user', doneVersion('go'))
+    const m = await storage.appendMessage(convId, 'assistant', doneVersion('Once'))
+    await generate(convId, { kind: 'continue', messageId: m.id }, T)
+    const sent = bodyOf(f, 1).messages
+    expect(sent.map((x) => x.role)).toEqual(['system', 'user', 'assistant', 'tool'])
+    expect(sent[2].content).toBe('Once')
+  })
+
+  it('a reply with nothing before it still follows a user turn', async () => {
+    const f = stubFetch(() => sse(reply('Back')))
+    const m = await storage.appendMessage(convId, 'assistant', { id: newId(), content: [step('c1', 0)], status: 'interrupted', model: T.id, createdAt: 1 })
+    await generate(convId, { kind: 'continue', messageId: m.id }, T)
+    expect(bodyOf(f, 0).messages.map((x) => x.role)).toEqual(['system', 'user', 'assistant', 'tool'])
   })
 })
 
