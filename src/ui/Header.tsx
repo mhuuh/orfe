@@ -48,7 +48,8 @@ export function Header({ conversationId, onMenu }: { conversationId: string | nu
       storage.getSettings(),
     ])
     if (!conv) return null
-    const { system, prompt } = await systemFor(conv)
+    const model = findModel(models, conv.nextModel)
+    const { system, prompt } = await systemFor(conv, model)
     const setting = conv.context ?? settings.context
     // Display only: the stored window, never trimmed here. Sending decides trims.
     const view = viewWindow({
@@ -58,7 +59,7 @@ export function Header({ conversationId, onMenu }: { conversationId: string | nu
       setting,
       system,
       ratio: conv.tokenRatio,
-      overheadChars: toolsFor(conv, prompt, findModel(models, conv.nextModel))?.json.length ?? 0,
+      overheadChars: toolsFor(conv, prompt, model)?.json.length ?? 0,
     })
     const meta = headerMeta({
       turns: messages.filter((m) => m.role === 'user').length,

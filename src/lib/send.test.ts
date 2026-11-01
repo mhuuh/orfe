@@ -477,7 +477,7 @@ describe('generate', () => {
 async function coldNow(m: ModelInfo = A): Promise<boolean> {
   const c = (await storage.getConversation(convId))!
   const s = await storage.getSettings()
-  const { system, prompt } = await systemFor(c)
+  const { system, prompt } = await systemFor(c, m)
   return computeCold({
     lastRequest: c.lastRequest,
     messages: await storage.listMessages(convId),
@@ -926,7 +926,7 @@ describe('tool loop', () => {
     const f = stubFetch(() => sse(asks(['c1', 'echo', '{}'])), () => sse(reply('ok')))
     await sendUserMessage(convId, 'go', { reply: true, model: T })
     const c = (await storage.getConversation(convId))!
-    const { prompt } = await systemFor(c)
+    const { prompt } = await systemFor(c, T)
     expect(c.lastRequest!.toolsHash).toBe(toolsFor(c, prompt, T)!.hash)
     const fp = fingerprint(bodyOf(f, 1).messages as never)
     expect(c.lastRequest!.prefixCount).toBe(fp.prefixCount)
@@ -1096,7 +1096,7 @@ describe('tool loop', () => {
   })
 
   it('with no abilities, a request is what it was before tools', async () => {
-    setAbilitiesForTest()
+    setAbilitiesForTest([])
     const f = stubFetch(() => sse(reply('ok')))
     await sendUserMessage(convId, 'go', { reply: true, model: T })
     expect(Object.keys(bodyOf(f, 0)).sort()).toEqual(['messages', 'model', 'session_id', 'stream'])

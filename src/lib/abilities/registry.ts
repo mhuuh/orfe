@@ -2,6 +2,8 @@ import type { ModelInfo } from '../catalog'
 import { hashText } from '../hash'
 import { ruleFor } from '../modelRules'
 import type { Conversation, Message, Prompt, ToolPart } from '../types'
+import { notesAbility } from './notes'
+import { outcome } from './outcome'
 
 export interface ToolDef {
   name: string
@@ -47,10 +49,12 @@ export interface Ability {
 }
 
 /** Fixed order. This order sets the order of the tools JSON. */
-export let ABILITIES: Ability[] = []
+const SHIPPED: Ability[] = [notesAbility]
+
+export let ABILITIES: Ability[] = SHIPPED
 
 /** Test seam: swap the list. Call with no argument to reset. */
-export function setAbilitiesForTest(list: Ability[] = []): void {
+export function setAbilitiesForTest(list: Ability[] = SHIPPED): void {
   ABILITIES = list
 }
 
@@ -76,6 +80,9 @@ export function toolsFor(
   const json = JSON.stringify(tools)
   return { json, hash: hashText(json), tools }
 }
+
+/** Whether the system message carries the note index. */
+export const wantsIndex = (enabled: Ability[]): boolean => enabled.some((a) => a.id === notesAbility.id)
 
 /** The instruction text of the enabled abilities. Null when there is none or the model has no tools. */
 export function abilityInstructions(enabled: Ability[], model: ModelInfo): string | null {
@@ -122,5 +129,16 @@ export function describeStep(part: ToolPart): StepWords {
       // Use the plain words below.
     }
   }
-  return { running: `${part.name}…`, done: part.name, past: `(Used ${part.name}.)` }
+  const { name } = part
+  const running = `${name}…`
+  switch (outcome(part)) {
+    case 'done':
+      return { running, done: name, past: `(Used ${name}.)` }
+    case 'failed':
+      return { running, done: `${name} failed`, past: `(Tried ${name}. It failed.)` }
+    case 'stopped':
+      return { running, done: `${name} stopped`, past: `(Stopped ${name} before it finished.)` }
+    case 'unknown':
+      return { running, done: `${name} not finished`, past: `(Started ${name}. It may or may not have happened.)` }
+  }
 }

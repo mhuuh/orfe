@@ -1,11 +1,13 @@
-import { enabledAbilities, runTool, toolsFor, type Ability } from './abilities/registry'
+import { UNCHECKED } from './abilities/outcome'
+import { enabledAbilities, runTool, toolsFor, wantsIndex, type Ability } from './abilities/registry'
 import { fallbackModelInfo, type ModelInfo } from './catalog'
 import { estimateTokens, fingerprint, isCold, planWindow, ttlFor } from './context'
 import { buildOutgoing, renderRounds } from './normalise'
+import { buildIndex } from './notes/index'
 import { notes, writeResult } from './notes/store'
 import { mergeReasoning, streamChat, type ChatRequest, type OutMessage, type StreamEvent } from './openrouter'
 import { db, newId, storage } from './storage'
-import { systemFor } from './system'
+import { systemFor, systemText } from './system'
 import type { ContentPart, Conversation, LastRequest, Message, Reasoning, ToolPart, Usage, Version } from './types'
 import { settled } from './versions'
 
@@ -14,7 +16,6 @@ export const MAX_ROUNDS = 8
 const ROUND_LIMIT = 'Round limit reached. Answer now.'
 const STOPPED = 'Stopped by the user.'
 const REFUSED = 'The provider refused this reply. Try again, or pick another model.'
-const UNCHECKED = 'Error: could not check if this call already finished, so it did not run again. Check before you run it again.'
 const WRITE_INTERVAL_MS = 200
 /** Share of the context limit above which a cold cache triggers a trim (spec §6). */
 const SOFT_THRESHOLD = 0.85
@@ -317,10 +318,23 @@ async function generateInner(
   // point past the cut (buildOutgoing would then fall back to the whole transcript).
   const isReroll = target.kind === 'reroll'
   const messages = sendable(await storage.listMessages(conversationId), isReroll ? target.messageId : undefined)
-  const { system, prompt } = await systemFor(conversation)
+  const frozen = await systemFor(conversation, model)
+  const { prompt } = frozen
+  let system = frozen.system
   const setting = conversation.context ?? settings.context
   const tools = toolsFor(conversation, prompt, model)
   const overheadChars = tools?.json.length ?? 0
+  // A model without tools has no abilities, so a call it makes up finds nothing to run.
+  const enabled = tools ? enabledAbilities(conversation, prompt) : []
+
+  /** The index moves only here: at a cold moment or a trim, where the prefix is broken anyway. */
+  let indexFresh = false
+  const refreshIndex = async (): Promise<void> => {
+    const notesIndex = buildIndex(await notes.list('shared'), await notes.list(conversationId))
+    await storage.updateConversation(conversationId, { notesIndex })
+    system = systemText(conversation, prompt, model, notesIndex)
+    indexFresh = true
+  }
 
   // The stored start. For a reroll before it (nothing in the cut is at or after the start),
   // the chat's window does not apply: plan the cut from its beginning instead.
@@ -346,6 +360,7 @@ async function generateInner(
     anthropicCacheHour: settings.anthropicCacheHour,
     now: Date.now(),
   })
+  if (wantsIndex(enabled) && (cold || conversation.notesIndex === null)) await refreshIndex()
   const plan = planWindow({
     messages,
     windowStartId: storedId,
@@ -357,6 +372,8 @@ async function generateInner(
     soft: SOFT_THRESHOLD,
     overheadChars,
   })
+  // A warm send can still trim. The plan used the old index: a larger new one shows at the next send.
+  if (wantsIndex(enabled) && plan.trimmed && !indexFresh) await refreshIndex()
 
   // Store the start whenever it moved (a trim, or a deleted start snapped to the next message),
   // so the order fallback keeps working. A reroll's window is a local view of the cut: it never
@@ -430,8 +447,7 @@ async function generateInner(
     base,
     prefill,
     tools,
-    // A model without tools has no abilities, so a call it makes up finds nothing to run.
-    enabled: tools ? enabledAbilities(conversation, prompt) : [],
+    enabled,
     model,
     effort,
     cacheControl,

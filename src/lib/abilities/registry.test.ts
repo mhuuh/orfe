@@ -2,7 +2,9 @@ import { afterEach, describe, expect, it } from 'vitest'
 import type { ModelInfo } from '../catalog'
 import { fallbackModelInfo } from '../catalog'
 import type { Conversation, Prompt, ToolPart } from '../types'
+import { UNCHECKED } from './outcome'
 import {
+  ABILITIES,
   type Ability,
   type AbilityCtx,
   describeStep,
@@ -122,5 +124,21 @@ describe('registry', () => {
     })
     setAbilitiesForTest([fake('a', ['a1'])])
     expect(describeStep(part('a1')).done).toBe('did a1')
+  })
+
+  it('the fallback words do not read as finished for a step that did not finish', () => {
+    const words = (over: Partial<ToolPart>) => describeStep({ ...part('mystery'), ...over })
+    expect(words({ status: 'error', result: 'Error: no.' })).toMatchObject({ done: 'mystery failed', past: '(Tried mystery. It failed.)' })
+    expect(words({ status: 'stopped' })).toMatchObject({ done: 'mystery stopped', past: '(Stopped mystery before it finished.)' })
+    const doubt = '(Started mystery. It may or may not have happened.)'
+    expect(words({ status: 'running' }).past).toBe(doubt)
+    expect(words({ status: 'error', result: UNCHECKED }).past).toBe(doubt)
+  })
+
+  it('a reset brings back the abilities that ship', () => {
+    setAbilitiesForTest([])
+    expect(ABILITIES).toEqual([])
+    setAbilitiesForTest()
+    expect(ABILITIES.map((a) => a.id)).toEqual(['notes'])
   })
 })

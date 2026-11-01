@@ -1,6 +1,9 @@
 import { beforeEach, describe, expect, it } from 'vitest'
+import { fallbackModelInfo } from './catalog'
 import { db, storage } from './storage'
 import { CAPABILITY_NOTE, assembleSystem, systemFor } from './system'
+
+const model = fallbackModelInfo('m/x')
 
 beforeEach(async () => {
   await Promise.all(db.tables.map((t) => t.clear()))
@@ -30,14 +33,14 @@ describe('system assembly', () => {
   })
   it('missing prompt ref assembles as no prompt', async () => {
     const c = await storage.createConversation()
-    const r = await systemFor({ ...c, systemPromptRef: 'gone', capabilityNote: true })
+    const r = await systemFor({ ...c, systemPromptRef: 'gone', capabilityNote: true }, model)
     expect(r.prompt).toBeNull()
     expect(r.system).toBe(CAPABILITY_NOTE)
   })
   it('resolves an existing prompt', async () => {
     const p = await storage.savePrompt({ name: 'P', parentId: null, text: 'Hi' })
     const c = await storage.createConversation()
-    const r = await systemFor({ ...c, systemPromptRef: p.id, capabilityNote: false })
+    const r = await systemFor({ ...c, systemPromptRef: p.id, capabilityNote: false }, model)
     expect(r.prompt?.id).toBe(p.id)
     expect(r.system).toBe('Hi')
   })
