@@ -7,3 +7,6 @@ dev-dist/
 *.tsbuildinfo
 test-results/
 playwright-report/
+
+# Local test keys. The repo is public.
+*.key
