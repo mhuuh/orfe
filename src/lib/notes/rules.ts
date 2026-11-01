@@ -9,6 +9,9 @@ export const MAX_PATH = 200
 /** Refusal for a text change to a protected note. */
 export const PROTECTED = 'Error: This note is protected. Move or tag it, or write a new note that links to it.'
 
+/** How a model writes a note's path. A refusal must name this form, or notes_read can't use it. */
+export const shownPath = (n: Pick<Note, 'shelf' | 'path'>): string => `${n.shelf === 'shared' ? 'shared' : 'chat'}/${n.path}`
+
 /**
  * Tidy a path: one slash between parts, none at the ends, NFC form.
  * NFC makes a typed "ä" and a pasted "a" + accent the same path. Case stays as written.
@@ -109,7 +112,7 @@ export function checkWrite(
     return PROTECTED
   }
   if (prev && next.isNew) {
-    return `Error: A note already exists at ${prev.path}. Use notes_read to see it, then update it or pick another path.`
+    return `Error: A note already exists at ${shownPath(prev)}. Use notes_read to see it, then update it or pick another path.`
   }
   const desc = next.description.trim()
   if (!desc) {

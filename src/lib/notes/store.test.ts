@@ -2,6 +2,7 @@ import { beforeEach, describe, expect, it } from 'vitest'
 import { deleteChat, restoreChat } from '../send'
 import { db, storage } from '../storage'
 import type { Note } from '../types'
+import { MAX_BODY } from './rules'
 import { notes, YOU, type NoteRef, type Result, type WriteInput, type Writer } from './store'
 
 const CHAT = 'c1'
@@ -99,8 +100,52 @@ describe('writes and revisions', () => {
     okNote(await notes.remove(shared('a'), model()))
     const fresh = await create(shared('a'), 'new text')
     expect(fresh.id).not.toBe(old.id)
-    expect(fresh.version).toBe(1)
+    expect(fresh.version).toBe(3)
     expect((await notes.read(shared('a')))?.body).toBe('new text')
+  })
+
+  it('a stale expectedVersion does not pass on a new note at the same path', async () => {
+    const seen = await create(shared('story'), 'old story')
+    okNote(await notes.remove(shared('story'), model()))
+    const made = await create(shared('story'), 'A new poem from chat B')
+    expect(made.version).toBeGreaterThan(seen.version + 1)
+    expect(refusal(await notes.write(shared('story'), body('stale write from chat A', { expectedVersion: seen.version }), model()))).toMatch(/notes_read/)
+    expect((await notes.read(shared('story')))?.body).toBe('A new poem from chat B')
+  })
+
+  it('the same holds for a Trash note that held the path as an old path', async () => {
+    const seen = await create(shared('old'), 'old story')
+    okNote(await notes.move(shared('old'), 'shared/new', model()))
+    okNote(await notes.remove(shared('new'), model()))
+    const made = await create(shared('old'), 'fresh')
+    expect(made.version).toBe(seen.version + 3)
+  })
+
+  it('a stale expectedVersion does not pass on a note that came to the path later', async () => {
+    const seen = await create(shared('p1'), 'old story')
+    okNote(await notes.move(shared('p1'), 'shared/m1', model()))
+    okNote(await notes.remove(shared('m1'), model()))
+    await create(shared('elsewhere'), 'other')
+    okNote(await notes.move(shared('elsewhere'), 'shared/p1', model()))
+    expect((await notes.read(shared('p1')))?.version).toBeGreaterThan(seen.version + 2)
+  })
+
+  it('the same holds for a note restored to a path that a later note held', async () => {
+    const a = await create(shared('p1'), 'A')
+    okNote(await notes.remove(shared('p1'), model()))
+    const b = await create(shared('p1'), 'B')
+    okNote(await notes.write(shared('p1'), body('B again', { expectedVersion: b.version }), model()))
+    okNote(await notes.remove(shared('p1'), model()))
+    expect(await notes.revert((await last(a.id)).id, YOU)).toBe('done')
+    const back = (await notes.read(shared('p1')))!
+    expect(back.id).toBe(a.id)
+    expect(back.version).toBeGreaterThan(b.version + 2)
+  })
+
+  it('a refusal for an existing note names a path that notes_read can use', async () => {
+    await create(chat('p1'))
+    const r = refusal(await notes.write(chat('p1'), body('x', { isNew: true }), model()))
+    expect(r).toMatch(/at chat\/p1\./)
   })
 
   it('keeps tags, supersedes and protected on a replace that does not name them', async () => {
@@ -179,9 +224,24 @@ describe('edit', () => {
 
   it('checks the size cap on an edit, but not on a change of tags', async () => {
     await notes.write(shared('big'), body(`${'y'.repeat(9000)} end`), YOU)
-    expect(refusal(await notes.edit(shared('big'), { oldText: ' end', newText: '!', expectedVersion: 1 }, model()))).toMatch(/limit/)
+    expect(refusal(await notes.edit(shared('big'), { oldText: ' end', newText: ' the end', expectedVersion: 1 }, model()))).toMatch(/limit/)
+    expect(refusal(await notes.edit(shared('big'), { newText: 'more', expectedVersion: 1 }, model()))).toMatch(/limit/)
     const n = okNote(await notes.edit(shared('big'), { tags: ['long'], expectedVersion: 1 }, model()))
     expect(n.tags).toEqual(['long'])
+  })
+
+  it('a fix that does not grow a long note goes through; growing past the cap does not', async () => {
+    await notes.write(shared('big'), body(`${'y'.repeat(9000)} end`), YOU)
+    const fixed = okNote(await notes.edit(shared('big'), { oldText: ' end', newText: ' End', expectedVersion: 1 }, model()))
+    expect(fixed.body.endsWith(' End')).toBe(true)
+    const cut = okNote(await notes.edit(shared('big'), { oldText: ' End', newText: '', expectedVersion: 2 }, model()))
+    expect(cut.body).toHaveLength(9000)
+
+    await create(shared('near'), 'x'.repeat(MAX_BODY))
+    expect(refusal(await notes.edit(shared('near'), { newText: 'y', expectedVersion: 1 }, model()))).toMatch(/limit/)
+
+    // A whole-note replace over the cap stays refused, even when it does not grow the note.
+    expect(refusal(await notes.write(shared('big'), body('z'.repeat(8999), { expectedVersion: 3 }), model()))).toMatch(/limit/)
   })
 
   it('refuses an edit that changes nothing, and a bad description', async () => {
@@ -241,9 +301,21 @@ describe('move', () => {
 
     // A shared note moved to a chat is that chat's: other chats do not see it.
     const down = await create(shared('secret'))
-    okNote(await notes.move(shared('secret'), 'chat/secret', model()))
+    okNote(await notes.move(shared('secret'), 'chat/secret', YOU))
     expect((await notes.read(shared('secret')))?.id).toBe(down.id)
     expect(await notes.read({ path: 'shared/secret', conversationId: 'other' })).toBeUndefined()
+  })
+
+  it('only "you" can move a shared note to a chat shelf', async () => {
+    await create(shared('poem'), 'words')
+    for (const by of [model(), { ...model(), writer: 'tidy' }]) {
+      const r = refusal(await notes.move(shared('poem'), 'chat/poem', by))
+      expect(r).toMatch(/^Error:/)
+      expect(r).toMatch(/shared\//)
+      expect(r).toMatch(/links to it/)
+    }
+    expect((await notes.read(shared('poem')))?.shelf).toBe('shared')
+    expect(await notes.list(CHAT)).toEqual([])
   })
 
   it('refuses a bad new path', async () => {
@@ -299,15 +371,19 @@ describe('protection', () => {
     expect(refusal(await notes.remove(shared('poem'), { ...m, writer: 'tidy' }))).toMatch(/protected/)
     expect((await notes.read(shared('poem')))?.body).toBe('Words stay')
 
-    const tagged = okNote(await notes.edit(shared('poem'), { tags: ['verse'], description: 'A poem', expectedVersion: 1 }, m))
-    expect(tagged).toMatchObject({ tags: ['verse'], description: 'A poem', body: 'Words stay', protected: true })
+    expect(refusal(await notes.edit(shared('poem'), { description: 'A poem', expectedVersion: 1 }, m))).toMatch(/protected/)
+    expect(refusal(await notes.edit(shared('poem'), { description: 'A poem', tags: ['x'], expectedVersion: 1 }, { ...m, writer: 'tidy' }))).toMatch(/protected/)
+
+    // Sending the same description again changes nothing, so it is no reason to refuse a tag.
+    const tagged = okNote(await notes.edit(shared('poem'), { tags: ['verse'], description: 'A line', expectedVersion: 1 }, m))
+    expect(tagged).toMatchObject({ tags: ['verse'], description: 'A line', body: 'Words stay', protected: true })
     const moved = okNote(await notes.move(shared('poem'), 'shared/poems/words', m))
     expect(moved).toMatchObject({ path: 'poems/words', body: 'Words stay', protected: true })
   })
 
   it('"you" can edit and delete a protected note', async () => {
     await notes.write(shared('poem'), body('Words stay', { protected: true }), model())
-    expect(okNote(await notes.edit(shared('poem'), { oldText: 'stay', newText: 'stayed', expectedVersion: 1 }, YOU)).body).toBe('Words stayed')
+    expect(okNote(await notes.edit(shared('poem'), { oldText: 'stay', newText: 'stayed', description: 'A poem', expectedVersion: 1 }, YOU)).body).toBe('Words stayed')
     okNote(await notes.remove(shared('poem'), YOU))
     expect(await notes.read(shared('poem'))).toBeUndefined()
   })
@@ -458,6 +534,30 @@ describe('revert', () => {
     expect(await notes.revert('none', YOU)).toBe('changed-later')
   })
 
+  it('a restored note gives up an old path that another note now holds', async () => {
+    const a = await create(shared('old'), 'A text')
+    okNote(await notes.move(shared('old'), 'shared/new', YOU))
+    okNote(await notes.remove(shared('new'), YOU))
+    await create(shared('old'), 'B text')
+    await create(shared('other'), 'C text')
+    expect(await notes.revert((await last(a.id)).id, YOU)).toBe('done')
+    expect((await notes.read(shared('new')))?.aliases).toEqual([])
+    expect((await notes.read(shared('old')))?.body).toBe('B text')
+
+    // With B gone, the old path must not fall back to A.
+    okNote(await notes.remove(shared('old'), YOU))
+    expect(await notes.read(shared('old'))).toBeUndefined()
+    expect(okNote(await notes.write(shared('old'), body('fresh', { isNew: true }), model())).path).toBe('old')
+  })
+
+  it('an old path that nobody took stays when a note is restored', async () => {
+    const a = await create(shared('old'), 'A text')
+    okNote(await notes.move(shared('old'), 'shared/new', YOU))
+    okNote(await notes.remove(shared('new'), YOU))
+    expect(await notes.revert((await last(a.id)).id, YOU)).toBe('done')
+    expect((await notes.read(shared('old')))?.id).toBe(a.id)
+  })
+
   it('an undo can itself be reverted, and the earlier write then counts as latest again', async () => {
     const n = await create(shared('a'), 'one', model('c1'))
     okNote(await notes.remove(shared('a'), YOU))
@@ -544,9 +644,49 @@ describe('undoCalls and redoCalls', () => {
     okNote(await notes.write(chat('a'), body('two', { expectedVersion: 1 }), model('c2')))
     await create(chat('b'), 'other', model('c3'))
     const { undone } = await notes.undoCalls('m1', ['c1', 'c2', 'c3'], 'chat')
-    await notes.redoCalls(undone)
+    await notes.redoCalls(undone, 'm1')
     expect((await notes.read(chat('a')))?.body).toBe('two')
     expect((await notes.read(chat('b')))?.body).toBe('other')
+  })
+
+  it('redo acts only in reverse order of the undos, so a chain stays whole', async () => {
+    await create(chat('a'), 'one', model('c1'))
+    okNote(await notes.write(chat('a'), body('two', { expectedVersion: 1 }), model('c2')))
+    await notes.undoCalls('m1', ['c1', 'c2'], 'chat')
+    await notes.redoCalls(['c2'], 'm1')
+    expect(await notes.read(chat('a'))).toBeUndefined()
+    await notes.redoCalls(['c1'], 'm1')
+    expect((await notes.read(chat('a')))?.body).toBe('one')
+    await notes.redoCalls(['c2'], 'm1')
+    expect((await notes.read(chat('a')))?.body).toBe('two')
+  })
+
+  it('redo does not bring back a note Mikael restored and then deleted', async () => {
+    const n = await create(chat('a'), 'one', model('c1'))
+    const { undone } = await notes.undoCalls('m1', ['c1'], 'chat')
+    expect(await notes.revert((await last(n.id)).id, YOU)).toBe('done')
+    okNote(await notes.remove(chat('a'), YOU))
+    await notes.redoCalls(undone, 'm1')
+    expect(await notes.read(chat('a'))).toBeUndefined()
+  })
+
+  it('redo does nothing to a write that was never undone, even when the text matches', async () => {
+    await create(chat('a'), 'one', model('c1'))
+    okNote(await notes.write(chat('a'), body('two', { expectedVersion: 1 }), model('c2')))
+    okNote(await notes.write(chat('a'), body('one'), YOU))
+    await notes.redoCalls(['c2'], 'm1')
+    expect((await notes.read(chat('a')))?.body).toBe('one')
+  })
+
+  it('redo does nothing after a later write, even when that write was undone too', async () => {
+    await create(chat('a'), 'one', model('c1'))
+    okNote(await notes.write(chat('a'), body('two', { expectedVersion: 1 }), model('c2')))
+    await notes.undoCalls('m1', ['c2'], 'chat')
+    okNote(await notes.write(chat('a'), body('three'), YOU))
+    const n = (await notes.read(chat('a')))!
+    await notes.revert((await last(n.id)).id, YOU)
+    await notes.redoCalls(['c2'], 'm1')
+    expect((await notes.read(chat('a')))?.body).toBe('one')
   })
 
   it('redoCalls leaves a note that changed after the undo', async () => {
@@ -555,7 +695,7 @@ describe('undoCalls and redoCalls', () => {
     await notes.undoCalls('m1', ['c2'], 'chat')
     okNote(await notes.write(chat('a'), body('Mikael wrote this', { expectedVersion: 3 }), YOU))
     const before = await notes.revisions((await notes.read(chat('a')))!.id)
-    await notes.redoCalls(['c2'])
+    await notes.redoCalls(['c2'], 'm1')
     expect((await notes.read(chat('a')))?.body).toBe('Mikael wrote this')
     expect(await notes.revisions(before[0].noteId)).toHaveLength(before.length)
   })
@@ -564,7 +704,7 @@ describe('undoCalls and redoCalls', () => {
     const old = await create(chat('a'), 'old', model('c1'))
     await notes.undoCalls('m1', ['c1'], 'chat')
     await create(chat('a'), 'new', model('c2'))
-    await notes.redoCalls(['c1'])
+    await notes.redoCalls(['c1'], 'm1')
     expect((await notes.read(chat('a')))?.body).toBe('new')
     expect((await db.notes.get(old.id))?.body).toBe('old')
   })
@@ -573,15 +713,16 @@ describe('undoCalls and redoCalls', () => {
     await create(chat('a'), 'one', model('c1'))
     okNote(await notes.write(chat('a'), body('two', { expectedVersion: 1 }), model('c2')))
     await notes.undoCalls('m1', ['c2'], 'chat')
-    await notes.redoCalls(['c2'])
-    await notes.redoCalls(['c2'])
+    await notes.redoCalls(['c2'], 'm1')
+    await notes.redoCalls(['c2'], 'm1')
     const n = (await notes.read(chat('a')))!
     expect(n.body).toBe('two')
     expect(await notes.revisions(n.id)).toHaveLength(4)
     const rev = (await notes.byCall('c2'))!
-    expect(rev).toMatchObject({ writer: 'you', callId: 'c2', messageId: 'm1' })
     expect(await notes.revert(rev.id, YOU)).toBe('done')
     expect((await notes.read(chat('a')))?.body).toBe('one')
+    await notes.redoCalls(['c2'], 'm1')
+    expect((await notes.read(chat('a')))?.body).toBe('two')
   })
 
   it('redoCalls can be scoped by message, because a model can reuse call_0', async () => {
@@ -599,7 +740,7 @@ describe('undoCalls and redoCalls', () => {
     okNote(await notes.remove(chat('a'), model('c1')))
     await notes.undoCalls('m1', ['c1'], 'chat')
     expect(await notes.read(chat('a'))).toBeDefined()
-    await notes.redoCalls(['c1'])
+    await notes.redoCalls(['c1'], 'm1')
     expect(await notes.read(chat('a'))).toBeUndefined()
   })
 })

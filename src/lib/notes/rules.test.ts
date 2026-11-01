@@ -131,7 +131,8 @@ describe('checkWrite', () => {
   })
 
   it('refuses a new-note write onto an existing note', () => {
-    expect(checkWrite(note(), { ...ok, isNew: true }, 'm')).toMatch(/^Error:.*already exists/)
+    expect(checkWrite(note(), { ...ok, isNew: true }, 'm')).toMatch(/^Error:.*already exists at shared\/lists\/insects\./)
+    expect(checkWrite(note({ shelf: 'c1' }), { ...ok, isNew: true }, 'm')).toMatch(/at chat\/lists\/insects\./)
     expect(checkWrite(null, { ...ok, isNew: true }, 'm')).toBeNull()
   })
 

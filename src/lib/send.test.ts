@@ -1327,6 +1327,45 @@ describe('tool loop: Continue', () => {
     expect(await notes.byCall(part.callId, m.id)).toBeDefined()
   })
 
+  it('a reroll does not take the id of an open part on an older version', async () => {
+    const ran: string[] = []
+    setAbilitiesForTest([
+      ability(async (_n, _a, ctx) => {
+        ran.push(ctx.callId)
+        await notes.write(
+          { path: `chat/run-${ran.length}`, conversationId: ctx.conversationId },
+          { body: 'text', description: 'A line' },
+          { writer: ctx.model, messageId: ctx.messageId, callId: ctx.callId },
+        )
+        return 'written now'
+      }),
+    ])
+    const m = await cutOff([open('call_0', 0)])
+    stubFetch(() => sse(asks(['call_0', 'echo', '{}'])), () => sse(reply('two')))
+    await generate(convId, { kind: 'reroll', messageId: m.id }, T)
+    expect((await steps())[0].callId).not.toBe('call_0')
+
+    // Flip back to the first version and Continue: its open call still has to run.
+    await storage.mutateMessage(m.id, (x) => ({ ...x, activeVersion: 0 }))
+    stubFetch(() => sse(reply('Finished')))
+    await generate(convId, { kind: 'continue', messageId: m.id }, T)
+    expect(ran).toHaveLength(2)
+    expect(ran[1]).toBe('call_0')
+    expect((await steps())[0]).toMatchObject({ callId: 'call_0', status: 'done', result: 'written now' })
+  })
+
+  it('a reroll does not take the id of a write from a deleted version', async () => {
+    setAbilitiesForTest([writes()])
+    stubFetch(() => sse(asks(['call_0', 'echo', '{}'])), () => sse(reply('one')))
+    await sendUserMessage(convId, 'go', { reply: true, model: T })
+    const m = await lastMsg()
+    await storage.mutateMessage(m.id, (x) => ({ ...x, versions: x.versions.map((v) => ({ ...v, content: [] })) }))
+    await notes.remove(todo(), YOU)
+    stubFetch(() => sse(asks(['call_0', 'echo', '{}'])), () => sse(reply('two')))
+    await generate(convId, { kind: 'reroll', messageId: m.id }, T)
+    expect((await steps())[0].callId).not.toBe('call_0')
+  })
+
   it('a write that lands just before Stop does not read as stopped', async () => {
     setAbilitiesForTest([writes(() => stop(convId))])
     const f = stubFetch(() => sse(asks(['c1', 'echo', '{}'])), () => sse(reply('no')))

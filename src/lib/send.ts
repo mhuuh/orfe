@@ -684,11 +684,14 @@ async function run(a: RunArgs): Promise<void> {
 
   /**
    * Turns the model's calls into parts. A weak model can send no id, or repeat one from this reply,
-   * an earlier one or an older version of this one, and a request needs each id once.
+   * an earlier one or any version of this one, and a request needs each id once. An id stays
+   * unique across versions, or a Continue of an old open part would find the newer write.
    */
   const partsFrom = async (calls: ToolCall[]): Promise<ToolPart[]> => {
     const history = a.base.flatMap((m) => (m.role === 'assistant' ? (m.tool_calls ?? []).map((c) => c.id) : []))
-    const seen = new Set([...history, ...content.filter(isTool).map((p) => p.callId)])
+    const versions = (await db.messages.get(messageId))?.versions ?? []
+    const siblings = versions.flatMap((v) => v.content.filter(isTool).map((p) => p.callId))
+    const seen = new Set([...history, ...siblings, ...content.filter(isTool).map((p) => p.callId)])
     const parts: ToolPart[] = []
     for (const c of calls) {
       const callId = c.id && !seen.has(c.id) && !(await usedByOldVersion(c.id)) ? c.id : `call_${newId()}`
