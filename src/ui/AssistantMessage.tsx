@@ -1,10 +1,11 @@
 import { useMemo, type KeyboardEvent, type MouseEvent } from 'react'
 import { renderMarkdown } from '../lib/markdown'
 import type { Message, Version } from '../lib/types'
-import { versionText } from '../lib/versions'
+import { segments, versionText } from '../lib/versions'
 import { EditBox, MessageActions, type MessageOps } from './MessageActions'
 import { MetaLine, type PromptIndex } from './MetaLine'
 import { Thinking } from './Thinking'
+import { ToolLine } from './ToolLine'
 import { Versions } from './Versions'
 import css from './AssistantMessage.module.css'
 
@@ -108,10 +109,18 @@ export function AssistantMessage({ message, isLast, busy, selected, editing, aft
   const streaming = version.status === 'streaming'
   // While the model is only thinking, the open Thinking block shows activity instead of a caret.
   const caret = streaming && !(text === '' && version.reasoning)
-  const html = useMemo(() => {
-    const out = text ? renderMarkdown(text) : ''
-    return caret ? withCaret(out) : out
-  }, [text, caret])
+  // The caret trails the last text only. A running tool line is the activity then.
+  const toolRunning = version.content.some((p) => p.type === 'tool' && p.status === 'running')
+  const parts = useMemo(() => {
+    const segs = segments(version.content)
+    const lastText = segs.map((x) => x.kind).lastIndexOf('text')
+    return segs.map((x, i) => {
+      if (x.kind === 'tool') return x
+      const out = renderMarkdown(x.text)
+      return { ...x, html: caret && !toolRunning && i === lastText ? withCaret(out) : out }
+    })
+  }, [version.content, caret, toolRunning])
+  const firstText = parts.findIndex((x) => x.kind === 'text')
 
   return (
     <article
@@ -129,10 +138,17 @@ export function AssistantMessage({ message, isLast, busy, selected, editing, aft
         <Versions count={message.versions.length} active={message.activeVersion} onPick={(i) => ops.setActive(message.id, i)} />
       </div>
       {version.reasoning && <Thinking key={version.id} reasoning={version.reasoning} thinking={streaming && text === ''} />}
-      {editing ? (
+      {parts.map((x, i) => {
+        if (x.kind === 'tool') return <ToolLine key={i} part={x.part} messageId={message.id} versionId={version.id} />
+        if (editing) {
+          return i === firstText ? (
+            <EditBox key="edit" initial={text} prose onSave={(t) => ops.saveEdit(message.id, t)} onCancel={ops.cancelEdit} />
+          ) : null
+        }
+        return <div key={i} className={css.prose} dangerouslySetInnerHTML={{ __html: x.html }} />
+      })}
+      {editing && firstText < 0 && (
         <EditBox initial={text} prose onSave={(t) => ops.saveEdit(message.id, t)} onCancel={ops.cancelEdit} />
-      ) : (
-        html && <div className={css.prose} dangerouslySetInnerHTML={{ __html: html }} />
       )}
       {!editing && (
         <StatusNote

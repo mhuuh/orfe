@@ -1,0 +1,92 @@
+/* Style A: an inline mono line where the step happened. */
+.line {
+  display: flex;
+  align-items: center;
+  gap: var(--s2);
+  width: 100%;
+  padding: var(--s2) 0;
+  border: 0;
+  background: none;
+  font: 400 11px/16px var(--font-mono);
+  color: var(--mute);
+  text-align: left;
+  cursor: pointer;
+  -webkit-tap-highlight-color: transparent;
+}
+div.line {
+  cursor: default;
+}
+button.line:focus-visible {
+  color: var(--ink);
+  outline: none;
+}
+@media (hover: hover) {
+  button.line:hover {
+    color: var(--ink);
+  }
+}
+.live {
+  color: var(--ink);
+}
+.dot {
+  flex: none;
+  width: 4px;
+  height: 4px;
+  border-radius: 50%;
+  background: var(--faint);
+}
+.live .dot {
+  background: var(--ink);
+}
+.text {
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+.undone {
+  color: var(--faint);
+}
+.chev {
+  margin-left: auto;
+  color: var(--faint);
+  transition: transform 180ms ease-out;
+}
+.line[aria-expanded='true'] .chev {
+  transform: rotate(90deg);
+}
+
+.detail {
+  margin: calc(-1 * var(--s1)) 0 var(--s2) 1px;
+  padding: 0 0 var(--s1) var(--s3);
+  border-left: 1px solid var(--line);
+  font: 400 11px/16px var(--font-mono);
+  color: var(--mute);
+}
+.result {
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+.action {
+  margin: var(--s1) 0 0;
+  padding: var(--s2) 0;
+  border: 0;
+  background: none;
+  font: inherit;
+  color: var(--ink);
+  text-decoration: underline;
+  text-decoration-color: var(--line);
+  text-underline-offset: 3px;
+  cursor: pointer;
+  -webkit-tap-highlight-color: transparent;
+}
+.action:hover:not(:disabled),
+.action:focus-visible {
+  text-decoration-color: currentColor;
+  outline: none;
+}
+.action:disabled {
+  color: var(--faint);
+  cursor: default;
+}
+.note {
+  color: var(--mute);
+}

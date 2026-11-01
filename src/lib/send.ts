@@ -219,6 +219,18 @@ export async function patchVersion(messageId: string, versionId: string, patch: 
   })
 }
 
+/** Marks one tool step as undone or not. Re-reads the message first. A missing step changes nothing. */
+export async function setToolUndone(messageId: string, versionId: string, callId: string, undone: boolean): Promise<void> {
+  await storage.mutateMessage(messageId, (m) => ({
+    ...m,
+    versions: m.versions.map((v) =>
+      v.id === versionId
+        ? { ...v, content: v.content.map((p) => (p.type === 'tool' && p.callId === callId ? { ...p, undone } : p)) }
+        : v,
+    ),
+  }))
+}
+
 export async function generate(conversationId: string, target: GenerateTarget, model: ModelInfo): Promise<void> {
   if (controllers.has(conversationId)) return
   // Register before any await so a second call (double tap) sees it and stop() works at once.

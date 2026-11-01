@@ -1,10 +1,26 @@
 import { newId } from './storage'
-import type { Message, Version } from './types'
+import type { ContentPart, Message, ToolPart, Version } from './types'
 
 /** Pure edits on a Message's versions. Apply them through `storage.mutateMessage`. */
 
 export const versionText = (v: Version | undefined): string =>
   (v?.content ?? []).map((p) => (p.type === 'text' ? p.text : '')).join('')
+
+export type Segment = { kind: 'text'; text: string } | { kind: 'tool'; part: ToolPart }
+
+/** A reply in reading order: text and tool steps. Adjacent text parts merge. Media is left out. */
+export function segments(content: ContentPart[]): Segment[] {
+  const out: Segment[] = []
+  for (const p of content) {
+    if (p.type === 'tool') out.push({ kind: 'tool', part: p })
+    else if (p.type === 'text' && p.text !== '') {
+      const last = out[out.length - 1]
+      if (last?.kind === 'text') last.text += p.text
+      else out.push({ kind: 'text', text: p.text })
+    }
+  }
+  return out
+}
 
 export const withNewVersion = (m: Message, v: Version): Message => ({
   ...m,

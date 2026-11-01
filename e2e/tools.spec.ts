@@ -60,3 +60,51 @@ test('no ability means no tools field, even on a model that can take tools', asy
   expect(api.chats[0]).not.toHaveProperty('tools')
   expect(api.chats[0]).not.toHaveProperty('tool_choice')
 })
+
+test('tool line shows, opens, and Undo restores the note', async ({ page }) => {
+  await signIn(page)
+  const first = JSON.stringify({ path: 'shared/harbour', description: 'The harbour', body: 'Boats at dawn.' })
+  const second = JSON.stringify({ path: 'shared/harbour', description: 'The harbour', body: 'Boats at dusk.', expected_version: 1 })
+  await send(page, `${TOOLCALL}:notes_write:${first}`)
+  await expect(page.getByText(/^Reply 2 /)).toBeVisible()
+  await send(page, `${TOOLCALL}:notes_write:${second}`)
+  await expect(page.getByText(/^Reply 4 /)).toBeVisible()
+
+  const body = () =>
+    page.evaluate(async () => {
+      const url = '/orfe/src/lib/notes/store.ts'
+      const store = (await import(/* @vite-ignore */ url)) as {
+        notes: { read(ref: { path: string; conversationId: string }): Promise<{ body: string } | undefined> }
+      }
+      return (await store.notes.read({ path: 'shared/harbour', conversationId: 'none' }))?.body
+    })
+  expect(await body()).toBe('Boats at dusk.')
+
+  const lines = page.getByRole('button', { name: /^wrote Harbour/ })
+  await expect(lines).toHaveCount(2)
+  const line = lines.nth(1)
+  await expect(line).toHaveAttribute('aria-expanded', 'false')
+  await line.click()
+  await expect(line).toHaveAttribute('aria-expanded', 'true')
+  // The tap opened the line, not the message actions.
+  await expect(page.getByRole('toolbar', { name: 'Message actions' })).toHaveCount(0)
+  await expect(page.getByText(/^Wrote shared\/harbour/).last()).toBeVisible()
+
+  await page.getByRole('button', { name: 'Undo', exact: true }).click()
+  await expect(page.getByRole('button', { name: /^wrote Harbour undone/ })).toHaveCount(1)
+  await expect(page.getByRole('button', { name: 'Redo', exact: true })).toBeVisible()
+  expect(await body()).toBe('Boats at dawn.')
+
+  await page.getByRole('button', { name: 'Redo', exact: true }).click()
+  await expect(page.getByRole('button', { name: 'Undo', exact: true })).toBeVisible()
+  expect(await body()).toBe('Boats at dusk.')
+})
+
+test('a tap on the reply text still opens the message actions', async ({ page }) => {
+  await signIn(page)
+  await send(page, 'hi')
+  const reply = page.getByText(/^Reply 1 /)
+  await expect(reply).toBeVisible()
+  await reply.click()
+  await expect(page.getByRole('toolbar', { name: 'Message actions' })).toBeVisible()
+})
