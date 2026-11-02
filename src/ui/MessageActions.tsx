@@ -1,9 +1,9 @@
 import { useCallback, useLayoutEffect, useMemo, useRef, useState } from 'react'
 import type { ModelInfo } from '../lib/catalog'
-import { deleteMessage, deleteVersion, generate, restoreMessage, restoreVersion } from '../lib/send'
+import { deleteMessage, deleteVersion, editMessage, flipVersion, generate, restoreMessage, restoreVersion } from '../lib/send'
 import { storage } from '../lib/storage'
 import type { Conversation, Message } from '../lib/types'
-import { editedVersion, versionText, withActive, withNewVersion } from '../lib/versions'
+import { versionText } from '../lib/versions'
 import { useToast } from './Toast'
 import { findModel } from './useCatalog'
 import css from './MessageActions.module.css'
@@ -55,7 +55,7 @@ export function useMessageOps(
       saveEdit(id, text) {
         setEditing(null)
         deselect()
-        void storage.mutateMessage(id, (m) => withNewVersion(m, editedVersion(m.versions[m.activeVersion], text)))
+        void editMessage(id, text)
       },
       reroll: (id) => run('reroll', id),
       cont: (id) => run('continue', id),
@@ -79,7 +79,7 @@ export function useMessageOps(
         })
       },
       setActive(id, index) {
-        void storage.mutateMessage(id, (m) => withActive(m, index))
+        void flipVersion(id, index)
       },
       pin(id, pinned) {
         deselect()

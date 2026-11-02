@@ -10,7 +10,7 @@ import './styles/base.css'
 import { App } from './App'
 import { DEFAULT_SETTINGS, storage } from './lib/storage'
 import { requestPersist } from './lib/backup'
-import { recoverInterrupted } from './lib/send'
+import { backfillSoon, recoverInterrupted } from './lib/send'
 import { applyUpdateIfIdle, setUpdatePending } from './lib/appUpdate'
 import { applyTheme } from './ui/theme'
 
@@ -31,6 +31,7 @@ async function start() {
       <App />
     </StrictMode>,
   )
+  backfillSoon()
 }
 
 /**

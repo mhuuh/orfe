@@ -74,6 +74,15 @@ export interface Message {
   createdAt: number
 }
 
+/** One message in the term index. Rebuilt from messages, so it is never backed up. */
+export interface SearchDoc {
+  messageId: string
+  conversationId: string
+  terms: string[]
+  /** Of the indexed text. A backfill pass uses it to see that a row is out of date. */
+  textHash: string
+}
+
 export interface Prompt {
   id: string
   name: string
