@@ -368,8 +368,9 @@ describe('backfill', () => {
   })
 
   it('a slice always moves on, however large the first message', async () => {
-    await text(Array.from({ length: 500 }, (_, i) => `sana${i}`).join(' '))
-    await text('kissa')
+    const words = Array.from({ length: 500 }, (_, i) => `sana${i}`).join(' ')
+    await text(words)
+    await text(words)
     expect(await searchIndex.backfill(1)).toBe(false)
     expect(await db.searchDocs.count()).toBe(1)
   })
