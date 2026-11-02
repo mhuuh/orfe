@@ -253,8 +253,11 @@ test('you can delete a note, and Undo brings it back', async ({ page }) => {
   const note = await openNote(page, vault, /^Harbour/)
   await note.getByRole('button', { name: 'More' }).click()
   await note.getByRole('button', { name: 'Delete' }).click()
-  await expect(page.getByRole('dialog', { name: 'Note' })).toHaveCount(0)
-  await expect(thisChat(vault).getByRole('button', { name: /^Harbour/ })).toHaveCount(0)
+  // The toast lasts 6 s. One wait for both, so two in a row can't use it up before the tap.
+  await Promise.all([
+    expect(page.getByRole('dialog', { name: 'Note' })).toHaveCount(0),
+    expect(thisChat(vault).getByRole('button', { name: /^Harbour/ })).toHaveCount(0),
+  ])
   await page.getByRole('button', { name: 'Undo' }).click()
   await expect(thisChat(vault).getByRole('button', { name: /^Harbour/ })).toBeVisible()
 })

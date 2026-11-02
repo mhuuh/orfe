@@ -273,7 +273,7 @@ function count(body: string, text: string): number {
 }
 
 /** The number that notes_read puts before a line. */
-const LINE_NUMBER = /^\d+\| ?/gm
+const LINE_NUMBER = /^\d+\|(?: |$)/gm
 
 /**
  * The text to find and the text to put in. Models copy the numbers from notes_read, so old text that
@@ -419,7 +419,9 @@ export const notes: NoteStore = {
       let span: Span | undefined
       if (oldText !== '') {
         const [from, to] = texts(body, oldText, newText ?? '')
-        if (from === to) return refuse('Error: old_text and new_text are the same, so nothing would change. Use notes_read to see the note, then send the new words.')
+        if (from === to && change.tags === undefined && change.description === undefined) {
+          return refuse('Error: old_text and new_text are the same, so nothing would change. Use notes_read to see the note, then send the new words.')
+        }
         const n = count(body, from)
         if (n === 0) return refuse('Error: The old text was not found. Use notes_read to get the exact text, then edit again.')
         if (n > 1) return refuse(`Error: The old text appears ${n} times. Add more of the text around it, so that it matches once.`)

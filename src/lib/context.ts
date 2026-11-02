@@ -85,7 +85,9 @@ export function fingerprint(outgoing: OutMessage[]): { prefixHash: string; prefi
  * provider that served the reply.
  *
  * A Continue that adds its line (see `CONTINUE_TURN`) records only the history before the reply,
- * because the next request repeats no more than that. So that request reads warm.
+ * because the next request repeats no more than that. So that request reads warm. The exception
+ * is a text reply that merges with an assistant reply before it: the merged message is new, so that
+ * request reads cold, as it did before the line.
  */
 export function isCold(
   last: LastRequest | null,

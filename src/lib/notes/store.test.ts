@@ -257,6 +257,17 @@ describe('edit', () => {
       expect(refusal(await edit('1| Same', 'x'))).toMatch(/not found/)
     })
 
+    it('a number with no space after it is text, not a line number', async () => {
+      await create(shared('a'), 'total 34')
+      expect(refusal(await edit('12|34', '56'))).toMatch(/not found/)
+      expect((await notes.read(shared('a')))?.body).toBe('total 34')
+    })
+
+    it('a blank line that notes_read numbered has no space to lose', async () => {
+      await create(shared('a'), 'Milk\n\nBread')
+      expect(okNote(await edit('1| Milk\n2|\n3| Bread', 'Rye')).body).toBe('Rye')
+    })
+
     it('a line number with nothing after it finds nothing', async () => {
       await create(shared('a'), LIST)
       expect(refusal(await edit('1| ', 'x'))).toMatch(/not found/)
@@ -313,6 +324,14 @@ describe('edit', () => {
       await create(shared('a'), 'Milk')
       expect(refusal(await notes.edit(shared('a'), { newText: '\n\n', expectedVersion: 1 }, model()))).toMatch(/changes nothing/)
     })
+  })
+
+  it('old text equal to new text is no refusal when tags or a description come with it', async () => {
+    await create(shared('a'), 'Bread')
+    const tagged = okNote(await notes.edit(shared('a'), { oldText: 'Bread', newText: 'Bread', tags: ['food'], expectedVersion: 1 }, model()))
+    expect(tagged).toMatchObject({ body: 'Bread', tags: ['food'], version: 2 })
+    const described = okNote(await notes.edit(shared('a'), { oldText: 'Bread', newText: 'Bread', description: 'A loaf', expectedVersion: 2 }, model()))
+    expect(described).toMatchObject({ body: 'Bread', description: 'A loaf', version: 3 })
   })
 
   it('refuses old text that equals new text, with a next step, and writes no version', async () => {

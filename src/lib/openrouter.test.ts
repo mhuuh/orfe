@@ -122,7 +122,7 @@ describe('streamChat', () => {
   })
 
   describe('a provider error says what went wrong', () => {
-    const failing = (metadata: unknown, message = 'Provider returned error') =>
+    const failing = (metadata: unknown, message: unknown = 'Provider returned error') =>
       vi.stubGlobal('fetch', vi.fn(async () => new Response(JSON.stringify({ error: { code: 400, message, metadata } }), { status: 400 })))
 
     it('reads the inner message of raw JSON, with the provider', async () => {
@@ -149,9 +149,29 @@ describe('streamChat', () => {
       expect(await run()).toMatchObject([{ message: 'Venice: upstream said no way' }])
     })
 
-    it('shows raw JSON with no message as text', async () => {
-      failing({ raw: '{"code":5}' })
-      expect(await run()).toMatchObject([{ message: '{"code":5}' }])
+    it.each(['{}', '[]', 'null', 'true', '12', '{"code":5}', '{"error":{"code":5}}', '[{}]', '{"message":"  "}'])('raw %s holds no text, so the message stands', async (raw) => {
+      failing({ raw }, 'Plain message')
+      expect(await run()).toEqual([{ type: 'error', code: 400, message: 'Plain message' }])
+    })
+
+    it('tries error, message and detail in turn', async () => {
+      failing({ raw: '{"error":{"code":5},"message":"real reason"}' })
+      expect(await run()).toMatchObject([{ message: 'real reason' }])
+      failing({ raw: '{"error":"","message":{},"detail":"the detail"}' })
+      expect(await run()).toMatchObject([{ message: 'the detail' }])
+      failing({ raw: '[{},{"error":{"message":"second item"}}]' })
+      expect(await run()).toMatchObject([{ message: 'second item' }])
+    })
+
+    it.each([[{ text: 'odd' }], [7], [null]])('a message of %j never reaches the app', async (message) => {
+      failing(undefined, message)
+      expect(await run()).toEqual([{ type: 'error', code: 400, message: 'HTTP 400' }])
+      failing({ provider_name: 'Google' }, message)
+      expect(await run()).toEqual([{ type: 'error', code: 400, message: 'HTTP 400' }])
+      vi.stubGlobal('fetch', vi.fn(async () => sseResponse([ev({ error: { code: 502, message } })])))
+      expect(await run()).toEqual([{ type: 'error', code: 502, message: 'Stream error' }])
+      vi.stubGlobal('fetch', vi.fn(async () => new Response(JSON.stringify({ error: { message } }), { status: 200 })))
+      expect(await run({ ...req, stream: false })).toEqual([{ type: 'error', message: 'Request failed' }])
     })
 
     it('cuts a long message to about 300 characters, and never in half an emoji', async () => {

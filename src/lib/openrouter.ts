@@ -108,19 +108,25 @@ function mapUsage(u: WireUsage): Usage {
   }
 }
 
-/** The message inside a provider's raw error. It is JSON in many shapes, or plain text. */
+/**
+ * The text inside a provider's raw error, or undefined when it holds none. It is JSON in many
+ * shapes, or plain text. Each place is tried in turn, so a place with no text can't hide a good one.
+ */
 function innerMessage(raw: unknown): string | undefined {
   if (typeof raw === 'string') {
     try {
-      return innerMessage(JSON.parse(raw)) ?? raw
+      return innerMessage(JSON.parse(raw))
     } catch {
-      return raw
+      return raw.trim() === '' ? undefined : raw
     }
   }
-  if (Array.isArray(raw)) return innerMessage(raw[0])
   if (typeof raw !== 'object' || raw === null) return undefined
   const { error, message, detail } = raw as Record<string, unknown>
-  return innerMessage(error ?? message ?? detail)
+  for (const place of Array.isArray(raw) ? raw : [error, message, detail]) {
+    const text = innerMessage(place)
+    if (text !== undefined) return text
+  }
+  return undefined
 }
 
 /**
@@ -128,11 +134,13 @@ function innerMessage(raw: unknown): string | undefined {
  * `metadata`. The result is one line, and the app shows it as text, never as HTML.
  */
 function errorMessage(e: WireError): string | undefined {
+  // The wire can send any type here, and the app stores this text and shows it as a React child.
+  const message = typeof e.message === 'string' ? e.message : undefined
   const inner = innerMessage(e.metadata?.raw)?.trim()
   const name = e.metadata?.provider_name
   const provider = typeof name === 'string' && name !== '' ? `${name}: ` : ''
-  if (!inner && !provider) return e.message
-  const text = inner || e.message
+  if (!inner && !provider) return message
+  const text = inner || message
   if (!text) return undefined
   const line = `${provider}${text}`.replace(/\s+/g, ' ')
   return line.length > ERROR_CHARS ? `${safeCut(line, ERROR_CHARS)}…` : line
