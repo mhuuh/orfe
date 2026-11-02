@@ -53,6 +53,8 @@ export default defineConfig({
         // Fonts are bundled for offline use. woff too: geist-mono's symbols2 subset ships only as woff.
         // Icons are added from includeAssets and the manifest, so they are not globbed again.
         globPatterns: ['**/*.{js,css,html,woff2,woff}'],
+        // Only `?bench` fetches the bench. A normal install must not download it.
+        globIgnores: ['**/bench-*'],
       },
     }),
   ],

@@ -105,3 +105,50 @@ The interface is `ModelRule { keepReasoning?: true; noTools?: true; flattenAll?:
 6. **Strip soon stays on.** It passed on Anthropic and OpenAI. It did no worse than a normal turn on Gemini. On some DeepSeek hosts a strip costs the whole prompt, about 6,000 tokens. At deepseek-v4-flash prices ($0.091 per million input tokens uncached, $0.0182 cached), 6,400 missed tokens cost 6,400 x ($0.091 - $0.0182) / 1,000,000 = about $0.0005 extra per strip. Spec section 15 says to strip only at trims "if not". I judge the cost too small to add a rule for it. If Mikael disagrees, the rule needs a new field, because `ModelRule` has none for this.
 7. **Dropping reasoning after a finished tool turn is safe on all four.** The cost is a tail miss of roughly 80 to 170 tokens on Anthropic and OpenAI, and not distinguishable from keeping reasoning on Gemini and DeepSeek at their coarse cache step size (no error on any). In the app's live smoke test on Haiku 5.5, it cost about 11% of the Anthropic prefix once (1,964 of 2,214 tokens cached on the next send). Spec section 6 accepts this as a tail miss.
 8. **Treat HTTP 200 with `finish_reason: content_filter` and no content as a failure.** (Not a `ModelRule`; it belongs in the send loop.)
+
+## Term index bench (2026-11-02): desktop with throttling, not a phone
+
+Task 16's `?bench` page, run on a production build under `vite preview`, in full Chromium, with the CPU throttled 6x through CDP. The machine is a 12-core desktop with 16 GB RAM. Mikael's phone run is still to come, and that run is the gate.
+
+**What the numbers do not show.** The throttle slows page JavaScript. It does not slow the browser's IndexedDB process or the disk, so a phone can be slower than this on index writes and on reads from flash. The text is made up: a few hundred Finnish and English words, with some rare ones. The first noun in each list (`kissa`, `memory`) is far more common than any real word, on purpose.
+
+**Result of the final code: no query over 500 ms.** Min 34 ms, median 140 ms, max 300 ms over 20 queries.
+
+| Measure | Final code |
+|---|---|
+| Messages | 100,000 in 100 chats. Queries run in the longest chat, 20,000 messages |
+| Seed | 56.6 s |
+| Index (a full backfill) | 653 s |
+| Repair pass with nothing to do | 84.1 s |
+| Index size | 657.7 MB (messages: 85.1 MB) |
+| Terms per message | about 77 |
+| One `index` write | min 13 ms, median 20 ms, max 45 ms |
+| Queries | min 34 ms, median 140 ms, max 300 ms. Slowest: `kissoille` |
+| Longest stall of the page during the run | 489 ms (timer tick check) |
+| CSP violations | 0, with a `securitypolicyviolation` listener on |
+| Hosts contacted | localhost only |
+| Databases after the run | none: `orfe-bench` is gone and `orfe` was never opened |
+| Normal load | 0 requests for the bench chunk, with the service worker active |
+
+All 20 queries, in ms: the 153, and 115, ja 122, memory 223, project 97, window 93, kissa 223, koira 96, zebra 122, kissoille 300, talossa 140, kirjastossa 34, järvellä 98, ystävälle 82, metsästä 120, kirja 186, "kissa koira" 257, "memory project" 246, "talo järvi" 289, "kirja window" 285.
+
+**The first two designs failed the 500 ms line, and the final one passes because of what changed.** Plainly:
+
+| Run | Index design | Shape | Queries (min / median / max) | Over 500 ms |
+|---|---|---|---|---|
+| 1 | Plain terms, plus a read of all the chat's ids | all 100k in one chat | 1,535 / 3,639 / 12,524 ms | 20 of 20 |
+| 2 | Terms filed under the chat | 100 chats, longest 20k | 49 / 596 / 2,782 ms | 10 of 20 |
+| 3 | Run 2, plus at most 4,000 rows read per token | 100 chats, longest 20k | 34 / 140 / 300 ms | 0 of 20 |
+
+Runs 1 and 2 differ in the chat shape as well as the design, so the gap between them is not all from the design. Run 1 is the harsher shape. Filing terms under the chat also cut the index time from 1,268 s to 650 s.
+
+**What the 4,000 row limit costs.** A word that fills more than 4,000 rows in one chat is only partly read, so a search sees only some of the messages that hold it. The exact word comes first, and rare words never reach the limit. A chat of a few thousand messages barely touches it. In a very long chat, a two-word search of two common words can miss a message that holds both. `MAX_ROWS_PER_TOKEN` in `src/lib/search/termIndex.ts` changes it. Search time then grows with it, at about 18 microseconds per row under this throttle.
+
+**Keys in one read, not `startsWithAnyOf`.** Each token gets one `startsWith(...).primaryKeys()` read, and Dexie serves that with `getAllKeys`. `startsWithAnyOf` walks a cursor row by row. Raw IndexedDB under the same throttle, 80,000 rows: `getAllKeys` 1,383 ms, key cursor 6,945 ms. That is 5 times slower.
+
+**Other things to know.**
+- The index is large: 7.7 times the messages in this run, about 6.7 KB per message. 10,000 real messages would take about 66 MB. It is never backed up.
+- A pass runs once at each app start, in idle slices of 30 ms. With nothing to repair it reads every message and its row: 84 s of work at 100k here, so about 8 s of idle time at 10k.
+- A plain Playwright context keeps IndexedDB in memory and hit `QuotaExceededError` at about 70k messages. A persistent profile had no such limit, so the runs above use one. The page reports that error and still deletes its data. The phone stores on flash, so this should not happen there unless it is nearly full.
+- The full run took about 14 minutes here, not "a few minutes", so the page's warning says 20 minutes or more.
+- The Finnish stemmer has limits. `kissoille` stems to `kiso`, and `kissa` to `kis`. A search for `kissa` finds `kissoille` through the prefix, but a search for `kissoille` does not find `kissa`. Words that change inside (`vesi`, `veden`) share no stem. The tool description should ask for several forms, as spec §10 says.

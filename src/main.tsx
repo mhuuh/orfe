@@ -56,6 +56,12 @@ function registerServiceWorker() {
   })
 }
 
-void start()
-registerServiceWorker()
-void requestPersist()
+// The bench page runs in place of the app: it must not touch the real database, and a normal load
+// never fetches its chunk (the service worker's precache leaves it out too).
+if (new URLSearchParams(location.search).has('bench')) {
+  void import('./bench/bench').then(({ mountBench }) => mountBench(document.getElementById('root')!))
+} else {
+  void start()
+  registerServiceWorker()
+  void requestPersist()
+}

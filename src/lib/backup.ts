@@ -6,7 +6,7 @@ import type { Settings } from './types'
 const FORMAT = 'orfe-backup'
 const VERSION = 1
 const DAY = 86_400_000
-/** Tables that rebuild by themselves. `searchDocs` is a later table: a name with no table is harmless. */
+/** Tables that rebuild by themselves. */
 const SKIP = new Set(['cache', 'searchDocs'])
 /** Settings fields that belong to this phone. A file never sets or reads them. */
 const LOCAL_ONLY = ['key', 'lastBackupAt'] as const
