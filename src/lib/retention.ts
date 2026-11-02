@@ -1,6 +1,7 @@
 import { readOf } from './abilities/notes'
 import { pointerWords, readsOnly } from './abilities/registry'
 import { windowOf } from './context'
+import { stripMarker } from './notes/rules'
 import type { Message, ToolPart } from './types'
 
 /**
@@ -63,7 +64,7 @@ export function pointerFor(part: ToolPart): string {
 
 /** Arguments with each big string as a short marker. They stay valid JSON, with the same keys in the same order. */
 export function shrinkArgs(v: unknown): unknown {
-  if (typeof v === 'string') return big(v) ? `(Stripped, ${v.length} characters.)` : v
+  if (typeof v === 'string') return big(v) ? stripMarker(v.length) : v
   if (Array.isArray(v)) return v.map(shrinkArgs)
   if (typeof v !== 'object' || v === null) return v
   return Object.fromEntries(Object.entries(v).map(([key, value]) => [key, shrinkArgs(value)]))

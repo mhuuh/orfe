@@ -13,6 +13,14 @@ const MAX_ECHO = 100
 /** Refusal for a text change to a protected note. */
 export const PROTECTED = 'Error: This note is protected. Move or tag it, or write a new note that links to it.'
 
+/** Stands in for a big string in a stripped call. A model sees it in its own old calls. */
+export const stripMarker = (chars: number): string => `(Stripped, ${chars} characters.)`
+const STRIP_MARKER = new RegExp(stripMarker(0).replace(/[().]/g, '\\$&').replace('0', '\\d+'))
+/** Whether text holds that marker. A model that copies it would write the marker over a note's words. */
+export const hasStripMarker = (s: string): boolean => STRIP_MARKER.test(s)
+/** Refusal for a model's text that holds the marker. */
+export const PLACEHOLDER = "Error: That is a placeholder, not the note's text. Use notes_read to get the text, then write again."
+
 /** How a model writes a note's path. A refusal must name this form, or notes_read can't use it. */
 export const shownPath = (n: Pick<Note, 'shelf' | 'path'>): string => `${n.shelf === 'shared' ? 'shared' : 'chat'}/${n.path}`
 

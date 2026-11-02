@@ -1,4 +1,4 @@
-import { badPathText, echo, normalisePath, safeCut, shelfOf, shownPath } from '../notes/rules'
+import { badPathText, echo, hasStripMarker, normalisePath, PLACEHOLDER, safeCut, shelfOf, shownPath } from '../notes/rules'
 import { notes, type Result, type Span } from '../notes/store'
 import type { Note, ToolPart } from '../types'
 import { outcome } from './outcome'
@@ -282,6 +282,7 @@ function run(name: string, a: Args, ctx: AbilityCtx): Promise<string> | string {
       if (description === undefined || body === undefined) {
         return 'Error: notes_write needs path, description and body. Send the call again with all three.'
       }
+      if (hasStripMarker(body)) return PLACEHOLDER
       const input = {
         body,
         description,
@@ -305,6 +306,7 @@ function run(name: string, a: Args, ctx: AbilityCtx): Promise<string> | string {
         return 'Error: new_text must be text. To replace old_text, send the new words. To remove it, send new_text as an empty string.'
       }
       const newText = oldText ? raw(a.new_text) : raw(a.new_text) || undefined
+      if (newText && hasStripMarker(newText)) return PLACEHOLDER
       const change = { oldText, newText, tags: list(a.tags), description: word(a.description), expectedVersion }
       return notes.edit(ref, change, by).then((r) =>
         report(r, (n, span) => {
