@@ -1,5 +1,5 @@
 import { badPathText, echo, normalisePath, safeCut, shelfOf, shownPath } from '../notes/rules'
-import { notes, type Result } from '../notes/store'
+import { notes, type Result, type Span } from '../notes/store'
 import type { Note, ToolPart } from '../types'
 import { outcome } from './outcome'
 import type { Ability, AbilityCtx, StepWords } from './registry'
@@ -7,6 +7,8 @@ import type { Ability, AbilityCtx, StepWords } from './registry'
 /** Characters of note text in one notes_read page. */
 const PAGE_CHARS = 8000
 const SEARCH_LIMIT = 10
+/** Characters of note text that a notes_edit result shows back. */
+const SHOWN_CHARS = 300
 /** Starts the result of a read that found nothing. A miss is a normal result, not an error. */
 const NO_NOTE = 'No note'
 /** What a model may copy along with a path from an index line: ` — description` or ` (12 notes)`. */
@@ -24,7 +26,8 @@ Paths start with shared/ (every chat) or chat/ (this chat only). A new note goes
 - Don't save your own paraphrase of a note you just read.
 - Notes say what is true now. When notes disagree, prefer the newest, and when one states a limit, follow it. When a note replaces another, set supersedes.
 - Keep planned events in a "Planned" section, apart from what has happened.
-- What Mikael just did outranks any note.`
+- What Mikael just did outranks any note.
+- After a refusal, do the next step it names yourself. Don't ask Mikael first.`
 
 /** The model sees this in every request. Keep it short, and keep counts, dates and titles out. */
 const TOOLS: Ability['tools'] = [
@@ -76,7 +79,7 @@ const TOOLS: Ability['tools'] = [
   {
     name: 'notes_edit',
     description:
-      'Change a part of a note. To replace text, give old_text, which must match once, exactly, and new_text. To add to the end, give new_text alone. To change only tags or the description, give only those.',
+      'Change a part of a note. To replace text, give old_text, which must match once, exactly, and new_text. Line numbers are not part of the text. To add to the end, give new_text alone. To change only tags or the description, give only those.',
     parameters: {
       type: 'object',
       properties: {
@@ -128,9 +131,27 @@ const list = (v: unknown): string[] | undefined => {
   return tags.length > 0 ? tags : undefined
 }
 
-const report = (r: Result, ok: (n: Note) => string): string => ('ok' in r ? ok(r.ok) : r.refused)
+const report = (r: Result, ok: (n: Note, span?: Span) => string): string => ('ok' in r ? ok(r.ok, r.span) : r.refused)
 
 const atVersion = (n: Note): string => `It is at version ${n.version}.`
+
+/**
+ * The changed lines and one line each side, numbered as notes_read numbers them. A long view is cut
+ * around the change, or to the end of the note after an append.
+ */
+function changedLines(body: string, span: Span, appended: boolean): string {
+  const before = body.slice(0, span.from).split('\n')
+  const top = Math.max(0, before.length - 2)
+  const bottom = body.slice(0, span.to).split('\n').length + 1
+  const numbered = (lines: string[]): string => lines.map((line, i) => `${top + i + 1}| ${line}`).join('\n')
+  const view = numbered(body.split('\n').slice(top, bottom))
+  if (view.length <= SHOWN_CHARS) return view
+  const near = Math.max(0, numbered(before.slice(top)).length - SHOWN_CHARS / 3)
+  const start = appended ? view.length - SHOWN_CHARS : Math.min(near, view.length - SHOWN_CHARS)
+  // A cut can land inside an emoji, so a lone half at either end goes.
+  const part = view.slice(start, start + SHOWN_CHARS).replace(/^[\udc00-\udfff]|[\ud800-\udbff]$/g, '')
+  return `${start > 0 ? '…' : ''}${part}${start + SHOWN_CHARS < view.length ? '…' : ''}`
+}
 
 /** Splits at line ends. A line longer than a page is cut, so every page fits and each is reachable. */
 function paginate(lines: string[]): string[] {
@@ -272,7 +293,12 @@ function run(name: string, a: Args, ctx: AbilityCtx): Promise<string> | string {
       }
       const newText = oldText ? raw(a.new_text) : raw(a.new_text) || undefined
       const change = { oldText, newText, tags: list(a.tags), description: word(a.description), expectedVersion }
-      return notes.edit(ref, change, by).then((r) => report(r, (n) => `Edited ${shownPath(n)}. ${atVersion(n)}`))
+      return notes.edit(ref, change, by).then((r) =>
+        report(r, (n, span) => {
+          const done = `Edited ${shownPath(n)}. ${atVersion(n)}`
+          return span ? `${done}\n\n${changedLines(n.body, span, oldText === undefined)}` : done
+        }),
+      )
     }
     case 'notes_delete': {
       if (notText(a.new_path)) return 'Error: new_path must be text that starts with shared/ or chat/. Send it again, or leave it out to delete the note.'
@@ -329,7 +355,8 @@ function describe(part: ToolPart): StepWords {
   }
 
   const name = path ? title(path) : 'note'
-  const noun = path ? `the note ${name}` : 'a note'
+  // The path, so a second model can read the note with no search. The screen keeps the name.
+  const noun = path ? `the note ${echo(normalisePath(path))}` : 'a note'
   const moved = part.name === 'notes_delete' ? word(a.new_path) : undefined
   const f = moved ? FORMS.moving : (FORMS[part.name as keyof typeof FORMS] ?? FORMS.notes_write)
   const running = part.name === 'notes_write' ? 'writing note…' : `${f.ing} ${name}…`

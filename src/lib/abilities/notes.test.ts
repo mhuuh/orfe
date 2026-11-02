@@ -84,7 +84,7 @@ describe('notes tools', () => {
     expect(await call('notes_read', {})).toContain('chat/harbour — The harbour')
 
     expect(await call('notes_edit', { path: 'chat/harbour', expected_version: 1, old_text: 'dawn', new_text: 'dusk' })).toBe(
-      'Edited chat/harbour. It is at version 2.',
+      'Edited chat/harbour. It is at version 2.\n\n1| Boats at dusk.',
     )
     expect(await call('notes_delete', { path: 'chat/harbour', new_path: 'shared/harbour' })).toBe(
       'Moved chat/harbour to shared/harbour. It is at version 3.',
@@ -131,7 +131,7 @@ describe('notes tools', () => {
     it('null counts as left out on every optional field, as a strict-mode model sends it', async () => {
       const nulls = { old_text: null, new_text: null, description: null, tags: null }
       expect(await edit(nulls)).toMatch(/^Error: This edit changes nothing/)
-      expect(await edit({ ...nulls, new_text: ' More.' })).toBe('Edited chat/a. It is at version 2.')
+      expect(await edit({ ...nulls, new_text: ' More.' })).toBe(`Edited chat/a. It is at version 2.\n\n1| ${BODY}\n2|  More.`)
       expect(await body()).toBe(`${BODY}\n More.`)
       expect((await call('notes_read', { path: 'chat/a', page: null })).length).toBeGreaterThan(0)
       expect(await call('notes_read', { path: null })).toContain('chat/a — d')
@@ -149,7 +149,7 @@ describe('notes tools', () => {
     })
 
     it('new_text as an empty string still removes text', async () => {
-      expect(await edit({ old_text: ' Town: Oulu.', new_text: '' })).toBe('Edited chat/a. It is at version 2.')
+      expect(await edit({ old_text: ' Town: Oulu.', new_text: '' })).toBe('Edited chat/a. It is at version 2.\n\n1| Age: 30.')
       expect(await body()).toBe('Age: 30.')
     })
 
@@ -197,7 +197,7 @@ describe('notes tools', () => {
 
     // Mikael has no cap, and an edit that leaves his long line alone still goes through.
     await notes.write(ref('chat/his'), { body: 'b', description: long, isNew: true }, YOU)
-    expect(await call('notes_edit', { path: 'chat/his', expected_version: 1, new_text: 'more' })).toBe('Edited chat/his. It is at version 2.')
+    expect(await call('notes_edit', { path: 'chat/his', expected_version: 1, new_text: 'more' })).toBe('Edited chat/his. It is at version 2.\n\n1| b\n2| more')
   })
 
   it('a huge path or query does not come back whole', async () => {
@@ -221,6 +221,105 @@ describe('notes tools', () => {
     await notes.write(ref('shared/e'), { body: `river${'😀'.repeat(60)}`, description: 'd', isNew: true }, YOU)
     await notes.write(ref('shared/f'), { body: `${'😀'.repeat(60)}x river`, description: 'd', isNew: true }, YOU)
     expect(whole(await call('notes_search', { query: 'river' }))).toBe(true)
+  })
+
+  describe('notes_edit shows what it did', () => {
+    const LIST = 'One\nTwo\nThree\nFour\nFive'
+    const head = 'Edited chat/a. It is at version 2.'
+    const edit = (args: object) => call('notes_edit', { path: 'chat/a', expected_version: 1, ...args })
+    const view = (out: string) => out.split('\n\n').slice(1).join('\n\n')
+
+    it('gives the changed line and one line each side, numbered as notes_read numbers them', async () => {
+      await put('chat/a', 'd', LIST)
+      expect(await edit({ old_text: 'Three', new_text: 'THREE' })).toBe(`${head}\n\n2| Two\n3| THREE\n4| Four`)
+      expect(await call('notes_read', { path: 'chat/a' })).toContain('2| Two\n3| THREE\n4| Four')
+    })
+
+    it('at the top and the bottom there is only one side', async () => {
+      await put('chat/a', 'd', LIST)
+      expect(await edit({ old_text: 'One', new_text: '1' })).toBe(`${head}\n\n1| 1\n2| Two`)
+      await put('chat/b', 'd', LIST)
+      expect(await call('notes_edit', { path: 'chat/b', expected_version: 1, old_text: 'Five', new_text: '5' })).toContain('4| Four\n5| 5')
+    })
+
+    it('a new text of several lines shows them all', async () => {
+      await put('chat/a', 'd', LIST)
+      expect(await edit({ old_text: 'Two', new_text: 'A\nB\nC' })).toBe(`${head}\n\n1| One\n2| A\n3| B\n4| C\n5| Three`)
+    })
+
+    it('a removed line shows where it was', async () => {
+      await put('chat/a', 'd', LIST)
+      expect(await edit({ old_text: 'Three', new_text: '' })).toBe(`${head}\n\n2| Two\n3| Four\n4| Five`)
+    })
+
+    it('a removed last line shows the new end', async () => {
+      await put('chat/a', 'd', LIST)
+      expect(await edit({ old_text: 'Five', new_text: '' })).toBe(`${head}\n\n3| Three\n4| Four`)
+    })
+
+    it('a cut inside a line shows the line as it is now', async () => {
+      await put('chat/a', 'd', 'One\nTwo two\nThree')
+      expect(await edit({ old_text: 'Two ', new_text: '' })).toBe(`${head}\n\n1| One\n2| two\n3| Three`)
+    })
+
+    it('an append shows the end of the note', async () => {
+      await put('chat/a', 'd', LIST)
+      expect(await edit({ new_text: 'Six' })).toBe(`${head}\n\n5| Five\n6| Six`)
+    })
+
+    it('stays near 300 characters, and keeps the change in view', async () => {
+      await put('chat/a', 'd', `${'x'.repeat(2000)} old ${'y'.repeat(2000)}`)
+      const shown = view(await edit({ old_text: 'old', new_text: 'NEW' }))
+      expect(shown.length).toBeLessThanOrEqual(310)
+      expect(shown).toContain('NEW')
+      expect(shown.startsWith('…')).toBe(true)
+      expect(shown.endsWith('…')).toBe(true)
+    })
+
+    it('a long append keeps its end', async () => {
+      await put('chat/a', 'd', 'Start')
+      const shown = view(await edit({ new_text: `${'x'.repeat(1000)} last words` }))
+      expect(shown.length).toBeLessThanOrEqual(310)
+      expect(shown.endsWith('last words')).toBe(true)
+    })
+
+    it('never cuts an emoji in two', async () => {
+      await notes.write(ref('chat/a'), { body: `${'😀'.repeat(400)} old ${'😀'.repeat(400)}`, description: 'd', isNew: true }, YOU)
+      expect(whole(await edit({ old_text: 'old', new_text: 'new' }))).toBe(true)
+      await notes.write(ref('chat/b'), { body: 'x', description: 'd', isNew: true }, YOU)
+      expect(whole(await call('notes_edit', { path: 'chat/b', expected_version: 1, new_text: 'x'.repeat(5) + '😀'.repeat(400) }))).toBe(true)
+    })
+
+    it('a change to tags or the description stays as it was', async () => {
+      await put('chat/a', 'd', LIST)
+      expect(await edit({ tags: ['x'] })).toBe(head)
+      expect(await call('notes_edit', { path: 'chat/a', expected_version: 2, description: 'New' })).toBe('Edited chat/a. It is at version 3.')
+    })
+
+    it('refuses a no-op edit with a next step', async () => {
+      await put('chat/a', 'd', LIST)
+      const out = await edit({ old_text: 'Two', new_text: 'Two' })
+      expect(out).toMatch(/^Error:/)
+      expect(out).toContain('notes_read')
+      expect((await notes.read(ref('chat/a')))?.version).toBe(1)
+    })
+  })
+
+  it('notes_edit takes what models really send', async () => {
+    const list = 'Milk\nBread\nApples\nCoffee'
+    await put('chat/a', 'd', list)
+    expect(await call('notes_edit', { path: 'chat/a', expected_version: 1, old_text: '1| Milk\n', new_text: '' })).toContain('It is at version 2.')
+    expect(await call('notes_edit', { path: 'chat/a', expected_version: 2, old_text: 'Apples', new_text: '' })).toContain('It is at version 3.')
+    expect(await call('notes_edit', { path: 'chat/a', expected_version: 3, new_text: '\nEggs' })).toContain('It is at version 4.')
+    expect((await notes.read(ref('chat/a')))?.body).toBe('Bread\nCoffee\nEggs')
+  })
+
+  it('the notes_edit description says that line numbers are not part of the text', () => {
+    expect(notesAbility.tools.find((t) => t.name === 'notes_edit')?.description).toContain('Line numbers are not part of the text.')
+  })
+
+  it('the instructions say to act on a refusal without asking first', () => {
+    expect(notesAbility.instructions).toContain("After a refusal, do the next step it names yourself. Don't ask Mikael first.")
   })
 
   it('takes loosely typed arguments from a weak model', async () => {
@@ -678,7 +777,7 @@ describe('step words', () => {
     expect(describeStep(step('notes_read', { path: 'shared/harbour' }))).toEqual({
       running: 'recalling Harbour…',
       done: 'recalled Harbour',
-      past: '(Read the note Harbour.)',
+      past: '(Read the note shared/harbour.)',
     })
     expect(describeStep(step('notes_read', { path: 'chat/mira/voice' })).done).toBe('recalled Mira, voice')
     expect(describeStep(step('notes_read', {})).done).toBe('listed notes')
@@ -692,33 +791,39 @@ describe('step words', () => {
     expect(describeStep(step('notes_write', { path: 'chat/harbour' }))).toEqual({
       running: 'writing note…',
       done: 'wrote Harbour',
-      past: '(Wrote the note Harbour.)',
+      past: '(Wrote the note chat/harbour.)',
     })
-    expect(describeStep(step('notes_delete', { path: 'chat/x', new_path: 'shared/y' })).past).toBe('(Moved the note X to shared/y.)')
+    expect(describeStep(step('notes_delete', { path: 'chat/x', new_path: 'shared/y' })).past).toBe('(Moved the note chat/x to shared/y.)')
   })
 
   it('a note that was not there does not read as recalled', async () => {
     const result = await call('notes_read', { path: 'chat/lost' })
     const words = describeStep(step('notes_read', { path: 'chat/lost' }, { result }))
     expect(words.done).toBe('no note Lost')
-    expect(words.past).toBe('(Looked for the note Lost. It was not there.)')
+    expect(words.past).toBe('(Looked for the note chat/lost. It was not there.)')
   })
 
   it('an error, a stop or an open call does not read as finished', () => {
     const args = { path: 'chat/harbour' }
     const refused = describeStep(step('notes_write', args, { status: 'error', result: 'Error: no.' }))
     expect(refused.done).toBe("couldn't write Harbour")
-    expect(refused.past).toBe('(Tried to write the note Harbour. It did not work.)')
+    expect(refused.past).toBe('(Tried to write the note chat/harbour. It did not work.)')
 
-    expect(describeStep(step('notes_write', args, { status: 'stopped' })).past).toBe('(Stopped before writing the note Harbour.)')
+    expect(describeStep(step('notes_write', args, { status: 'stopped' })).past).toBe('(Stopped before writing the note chat/harbour.)')
 
-    const doubt = '(Started to write the note Harbour. It may or may not have happened.)'
+    const doubt = '(Started to write the note chat/harbour. It may or may not have happened.)'
     expect(describeStep(step('notes_write', args, { status: 'running', result: '' })).past).toBe(doubt)
     expect(describeStep(step('notes_write', args, { status: 'error', result: UNCHECKED })).past).toBe(doubt)
 
     expect(describeStep(step('notes_read', args, { status: 'running', result: '' })).past).toBe(
-      '(Started to read the note Harbour. It did not finish.)',
+      '(Started to read the note chat/harbour. It did not finish.)',
     )
+  })
+
+  it('the past line uses the path as it was given, tidy, and the screen keeps the friendly name', () => {
+    const words = describeStep(step('notes_write', { path: 'chat//mikael/favourite-insect/' }))
+    expect(words.past).toBe('(Wrote the note chat/mikael/favourite-insect.)')
+    expect(words.done).toBe('wrote Mikael, favourite insect')
   })
 
   it('bad arguments still give words', () => {
@@ -749,6 +854,6 @@ describe('step words', () => {
       ],
       { system: null, windowStartId: null, inputModalities: [], blobUrl: () => undefined, modelId: 'm', toolsEnabled: true, plain: false },
     )
-    expect(JSON.stringify(out)).toContain('Tried to write the note Harbour')
+    expect(JSON.stringify(out)).toContain('Tried to write the note chat/harbour')
   })
 })

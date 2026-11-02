@@ -38,7 +38,14 @@ export interface Writer {
   runId?: string
 }
 
-export type Result = { ok: Note } | { refused: string }
+/** Where an edit's text is in the new body. Both ends are the same when it only took text out. */
+export interface Span {
+  from: number
+  to: number
+}
+
+/** `span`: on an edit of the text. */
+export type Result = { ok: Note; span?: Span } | { refused: string }
 
 /** Call ids. `kept` means changed later, so the write stays. A shared-shelf write is in neither list. */
 export interface UndoReport {
@@ -265,6 +272,29 @@ function count(body: string, text: string): number {
   return n
 }
 
+/** The number that notes_read puts before a line. */
+const LINE_NUMBER = /^\d+\| ?/gm
+
+/**
+ * The text to find and the text to put in. Models copy the numbers from notes_read, so old text that
+ * is not in the body is tried without them. New text then loses them too, or they land in the note.
+ */
+function texts(body: string, oldText: string, newText: string): [string, string] {
+  const bare = oldText.replace(LINE_NUMBER, '')
+  if (body.includes(oldText) || bare === '' || bare === oldText) return [oldText, newText]
+  return [bare, newText.replace(LINE_NUMBER, '')]
+}
+
+/** Puts `newText` in for `oldText`, found at `at`. Taking out a whole line takes its line break too, so no blank line stays. */
+function replaced(body: string, at: number, oldText: string, newText: string): { body: string; span: Span } {
+  const end = at + oldText.length
+  const wholeLine = newText === '' && !oldText.endsWith('\n') && (at === 0 || body[at - 1] === '\n') && (end === body.length || body[end] === '\n')
+  if (!wholeLine) return { body: body.slice(0, at) + newText + body.slice(end), span: { from: at, to: at + newText.length } }
+  // The last line has no break after it, so the one before it goes.
+  const [from, to] = end === body.length ? [Math.max(0, at - 1), end] : [at, end + 1]
+  return { body: body.slice(0, from) + body.slice(to), span: { from, to: from } }
+}
+
 function snippet(note: Note, terms: string[]): string {
   const body = lower(note.body)
   const at = terms.map((t) => body.indexOf(t)).find((i) => i !== -1)
@@ -371,7 +401,9 @@ export const notes: NoteStore = {
     return rw(async () => {
       const prev = await find(ref)
       if (!prev) return missing(ref.path)
-      const { oldText = '', newText, expectedVersion } = change
+      const { oldText = '', expectedVersion } = change
+      // The app adds its own line break before an append.
+      const newText = oldText === '' ? change.newText?.replace(/^[\r\n]+/, '') || undefined : change.newText
       const changesText = oldText !== '' || newText !== undefined
       if (!changesText && change.tags === undefined && change.description === undefined) {
         return refuse('Error: This edit changes nothing. Give old_text and new_text, or tags, or a description.')
@@ -384,14 +416,18 @@ export const notes: NoteStore = {
       if (first) return refuse(first)
 
       let body = prev.body
+      let span: Span | undefined
       if (oldText !== '') {
-        const n = count(body, oldText)
+        const [from, to] = texts(body, oldText, newText ?? '')
+        if (from === to) return refuse('Error: old_text and new_text are the same, so nothing would change. Use notes_read to see the note, then send the new words.')
+        const n = count(body, from)
         if (n === 0) return refuse('Error: The old text was not found. Use notes_read to get the exact text, then edit again.')
         if (n > 1) return refuse(`Error: The old text appears ${n} times. Add more of the text around it, so that it matches once.`)
-        const i = body.indexOf(oldText)
-        body = body.slice(0, i) + (newText ?? '') + body.slice(i + oldText.length)
+        ;({ body, span } = replaced(body, body.indexOf(from), from, to))
       } else if (newText !== undefined) {
-        body = body === '' || body.endsWith('\n') ? body + newText : `${body}\n${newText}`
+        const start = body === '' || body.endsWith('\n') ? body : `${body}\n`
+        body = start + newText
+        span = { from: start.length, to: body.length }
       }
       // The size cap stops growth only, so a small fix on a long note goes through. There is no
       // shrink guard: it catches a whole-note replace built from a part of a note. An edit must
@@ -400,7 +436,7 @@ export const notes: NoteStore = {
         const size = checkWrite(prev, { body, description }, by.writer)
         if (size) return refuse(size)
       }
-      return { ok: await commit(prev, bump(prev, { body, description: description.trim(), tags: change.tags ?? prev.tags }), by) }
+      return { ok: await commit(prev, bump(prev, { body, description: description.trim(), tags: change.tags ?? prev.tags }), by), span }
     })
   },
 

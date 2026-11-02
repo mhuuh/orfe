@@ -241,7 +241,7 @@ test('Plain on flattens old steps in the request, and off brings them back', asy
   await expect(page.getByText(/^Reply 3 /)).toBeVisible()
   const sent = api.chats[2].messages
   expect(sent.map((m) => m.role)).toEqual(['user', 'assistant', 'user'])
-  expect(sent[1].content).toBe(`(Wrote the note Harbour.)\n\nReply 2 from ${MODEL_A}`)
+  expect(sent[1].content).toBe(`(Wrote the note chat/harbour.)\n\nReply 2 from ${MODEL_A}`)
   // The chat still shows what happened.
   await expect(line).toBeVisible()
 

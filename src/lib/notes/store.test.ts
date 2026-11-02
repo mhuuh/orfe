@@ -219,7 +219,110 @@ describe('edit', () => {
     const text = 'keep\n' + 'x'.repeat(100)
     await create(shared('a'), text)
     const n = okNote(await notes.edit(shared('a'), { oldText: 'x'.repeat(100), newText: '', expectedVersion: 1 }, model()))
-    expect(n.body).toBe('keep\n')
+    expect(n.body).toBe('keep')
+  })
+
+  describe('old text with line numbers from notes_read', () => {
+    const LIST = 'Milk\nBread\nApples'
+    const edit = (oldText: string, newText: string) => notes.edit(shared('a'), { oldText, newText, expectedVersion: 1 }, model())
+
+    it('strips the numbers and tries again', async () => {
+      await create(shared('a'), LIST)
+      expect(okNote(await edit('2| Bread', 'Rye')).body).toBe('Milk\nRye\nApples')
+    })
+
+    it('strips them from each line, and takes a line break with them', async () => {
+      await create(shared('a'), LIST)
+      expect(okNote(await edit('1| Milk\n2| Bread\n', '')).body).toBe('Apples')
+    })
+
+    it('strips them from new text too, or they would land in the note', async () => {
+      await create(shared('a'), LIST)
+      expect(okNote(await edit('1| Milk\n2| Bread', '1| Oat milk\n2| Rye')).body).toBe('Oat milk\nRye\nApples')
+    })
+
+    it('leaves new text alone when old text matched as it was', async () => {
+      await create(shared('a'), LIST)
+      expect(okNote(await edit('Bread', '2| Rye')).body).toBe('Milk\n2| Rye\nApples')
+    })
+
+    it('text that truly holds such a prefix matches first', async () => {
+      await create(shared('a'), '1| one\none')
+      expect(okNote(await edit('1| one', 'two')).body).toBe('two\none')
+    })
+
+    it('still matches once, exactly', async () => {
+      await create(shared('a'), 'same\nsame')
+      expect(refusal(await edit('1| same', 'x'))).toMatch(/2 times/)
+      expect(refusal(await edit('1| Same', 'x'))).toMatch(/not found/)
+    })
+
+    it('a line number with nothing after it finds nothing', async () => {
+      await create(shared('a'), LIST)
+      expect(refusal(await edit('1| ', 'x'))).toMatch(/not found/)
+    })
+  })
+
+  describe('new text empty and old text a whole line', () => {
+    const cut = async (text: string, oldText: string) => {
+      await create(shared('a'), text)
+      return okNote(await notes.edit(shared('a'), { oldText, newText: '', expectedVersion: 1 }, model())).body
+    }
+
+    it.each([
+      ['the first line', 'Milk\nBread\nApples', 'Milk', 'Bread\nApples'],
+      ['a middle line', 'Milk\nBread\nApples', 'Bread', 'Milk\nApples'],
+      ['the last line', 'Milk\nBread\nApples', 'Apples', 'Milk\nBread'],
+      ['the only line', 'Milk', 'Milk', ''],
+      ['two whole lines', 'Milk\nBread\nApples', 'Milk\nBread', 'Apples'],
+    ])('removes %s and leaves no blank line', async (_name, text, oldText, want) => {
+      expect(await cut(text, oldText)).toBe(want)
+    })
+
+    it('a part of a line stays a plain cut', async () => {
+      expect(await cut('Milk two\nBread', ' two')).toBe('Milk\nBread')
+    })
+
+    it('old text with its own line break takes only that break', async () => {
+      expect(await cut('Milk\n\nBread', 'Milk\n')).toBe('\nBread')
+    })
+
+    it('a replace of a whole line keeps its line break', async () => {
+      await create(shared('a'), 'Milk\nBread')
+      expect(okNote(await notes.edit(shared('a'), { oldText: 'Milk', newText: 'Eggs', expectedVersion: 1 }, model())).body).toBe('Eggs\nBread')
+    })
+  })
+
+  describe('an append', () => {
+    it.each([['\nEggs'], ['\n\nEggs'], ['\r\nEggs']])('trims the line breaks at the start of %j, as the app adds its own', async (newText) => {
+      await create(shared('a'), 'Milk')
+      expect(okNote(await notes.edit(shared('a'), { newText, expectedVersion: 1 }, model())).body).toBe('Milk\nEggs')
+    })
+
+    it('adds no second break to a note that ends with one', async () => {
+      await create(shared('a'), 'Milk\n')
+      expect(okNote(await notes.edit(shared('a'), { newText: '\nEggs', expectedVersion: 1 }, model())).body).toBe('Milk\nEggs')
+    })
+
+    it('keeps blank lines inside the new text', async () => {
+      await create(shared('a'), 'Milk')
+      expect(okNote(await notes.edit(shared('a'), { newText: '\nEggs\n\nTea', expectedVersion: 1 }, model())).body).toBe('Milk\nEggs\n\nTea')
+    })
+
+    it('only line breaks change nothing, so that is refused', async () => {
+      await create(shared('a'), 'Milk')
+      expect(refusal(await notes.edit(shared('a'), { newText: '\n\n', expectedVersion: 1 }, model()))).toMatch(/changes nothing/)
+    })
+  })
+
+  it('refuses old text that equals new text, with a next step, and writes no version', async () => {
+    const n = await create(shared('a'), 'Bread')
+    const same = refusal(await notes.edit(shared('a'), { oldText: 'Bread', newText: 'Bread', expectedVersion: 1 }, model()))
+    expect(same).toMatch(/^Error:/)
+    expect(same).toContain('notes_read')
+    // Line numbers do not hide it.
+    expect(refusal(await notes.edit(shared('a'), { oldText: '1| Bread', newText: 'Bread', expectedVersion: 1 }, model()))).toBe(same)
+    expect(await notes.revisions(n.id)).toHaveLength(1)
   })
 
   it('checks the size cap on an edit, but not on a change of tags', async () => {
