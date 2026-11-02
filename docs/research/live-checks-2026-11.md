@@ -108,13 +108,13 @@ The interface is `ModelRule { keepReasoning?: true; noTools?: true; flattenAll?:
 
 ## Term index bench (2026-11-02): desktop with throttling, not a phone
 
-Task 16's `?bench` page, run on a production build under `vite preview`, in full Chromium, with the CPU throttled 6x through CDP. The machine is a 12-core desktop with 16 GB RAM. Mikael's phone run is still to come, and that run is the gate.
+Task 16's `?bench` page, run on a production build under `vite preview`, in full Chromium, with the CPU throttled 6x through CDP. The machine is a 12-core desktop with 16 GB RAM. Mikael's phone run is still to come, and that run is the gate. The section has two rounds: the first build, kept here with its failed runs, and the design after review, under "Second round". The second round is what ships.
 
 **What the numbers do not show.** The throttle slows page JavaScript. It does not slow the browser's IndexedDB process or the disk, so a phone can be slower than this on index writes and on reads from flash. The text is made up: a few hundred Finnish and English words, with some rare ones. The first noun in each list (`kissa`, `memory`) is far more common than any real word, on purpose.
 
-**Result of the final code: no query over 500 ms.** Min 34 ms, median 140 ms, max 300 ms over 20 queries.
+**Result of the first build: no query over 500 ms, but the queries were too easy.** Min 34 ms, median 140 ms, max 300 ms over 20 queries. Review found that the spec's multi-form queries were not in the set, and that those failed (786 and 925 ms). See "Second round".
 
-| Measure | Final code |
+| Measure | First build |
 |---|---|
 | Messages | 100,000 in 100 chats. Queries run in the longest chat, 20,000 messages |
 | Seed | 56.6 s |
@@ -132,7 +132,7 @@ Task 16's `?bench` page, run on a production build under `vite preview`, in full
 
 All 20 queries, in ms: the 153, and 115, ja 122, memory 223, project 97, window 93, kissa 223, koira 96, zebra 122, kissoille 300, talossa 140, kirjastossa 34, järvellä 98, ystävälle 82, metsästä 120, kirja 186, "kissa koira" 257, "memory project" 246, "talo järvi" 289, "kirja window" 285.
 
-**The first two designs failed the 500 ms line, and the final one passes because of what changed.** Plainly:
+**Runs of the first build.** The first two failed the 500 ms line:
 
 | Run | Index design | Shape | Queries (min / median / max) | Over 500 ms |
 |---|---|---|---|---|
@@ -142,13 +142,62 @@ All 20 queries, in ms: the 153, and 115, ja 122, memory 223, project 97, window 
 
 Runs 1 and 2 differ in the chat shape as well as the design, so the gap between them is not all from the design. Run 1 is the harsher shape. Filing terms under the chat also cut the index time from 1,268 s to 650 s.
 
-**What the 4,000 row limit costs.** A word that fills more than 4,000 rows in one chat is only partly read, so a search sees only some of the messages that hold it. The exact word comes first, and rare words never reach the limit. A chat of a few thousand messages barely touches it. In a very long chat, a two-word search of two common words can miss a message that holds both. `MAX_ROWS_PER_TOKEN` in `src/lib/search/termIndex.ts` changes it. Search time then grows with it, at about 18 microseconds per row under this throttle.
+**What the 4,000 row limit cost in this build.** With message ids as keys, the rows a capped word kept were a random sample, the same one on each search, and ties went by random id. Review measured this. The second round replaces it with the newest rows.
 
 **Keys in one read, not `startsWithAnyOf`.** Each token gets one `startsWith(...).primaryKeys()` read, and Dexie serves that with `getAllKeys`. `startsWithAnyOf` walks a cursor row by row. Raw IndexedDB under the same throttle, 80,000 rows: `getAllKeys` 1,383 ms, key cursor 6,945 ms. That is 5 times slower.
 
 **Other things to know.**
-- The index is large: 7.7 times the messages in this run, about 6.7 KB per message. 10,000 real messages would take about 66 MB. It is never backed up.
-- A pass runs once at each app start, in idle slices of 30 ms. With nothing to repair it reads every message and its row: 84 s of work at 100k here, so about 8 s of idle time at 10k.
+- The index was 7.7 times the messages in this run, about 6.7 KB per message. It is never backed up. The second round's numbers replace these.
+- A pass ran at each app start in this build. It no longer does.
 - A plain Playwright context keeps IndexedDB in memory and hit `QuotaExceededError` at about 70k messages. A persistent profile had no such limit, so the runs above use one. The page reports that error and still deletes its data. The phone stores on flash, so this should not happen there unless it is nearly full.
-- The full run took about 14 minutes here, not "a few minutes", so the page's warning says 20 minutes or more.
+- The full run took about 14 minutes here, not "a few minutes", so the page's warning says 20 minutes or more. In the second round it took 16 to 18 minutes.
 - The Finnish stemmer has limits. `kissoille` stems to `kiso`, and `kissa` to `kis`. A search for `kissa` finds `kissoille` through the prefix, but a search for `kissoille` does not find `kissa`. Words that change inside (`vesi`, `veden`) share no stem. The tool description should ask for several forms, as spec §10 says.
+
+### Second round: the design after review (still desktop with 6x throttle, not a phone)
+
+**Result: 3 of 24 queries are over 500 ms in the usual shape, and all three are multi-form queries.** Single words and two-word queries stay under 260 ms. Chat length does not matter: one chat of 100k messages gives about the same times as a 20k chat.
+
+The queries over 500 ms:
+
+| Query | 100 chats, longest 20k | One chat of 100k |
+|---|---|---|
+| `memory cache token model stream message search index` | 881 ms | 721 ms |
+| `the and of to in is that it` | 571 ms | 465 ms |
+| `kissa kissan kissoille kissoja kissat` | 526 ms | 469 ms |
+
+These are the worst case on purpose: `memory` and `kissa` are far more common here than any real word, and an 8-word query can read up to 24 tokens. A query of eight rare words reads almost nothing.
+
+| Measure | 100 chats, longest 20k | One chat of 100k | 20k messages at 1,600 characters |
+|---|---|---|---|
+| Seed | 59.0 s | 56.4 s | 19.0 s |
+| Index (full backfill) | 843 s | 952 s | 365 s |
+| Repair pass with nothing to do | 55.0 s | 53.0 s | 14.0 s |
+| Index size | 291.3 MB | 330.4 MB | 137.6 MB |
+| Size per message | 3.0 KB | 3.4 KB | 7.0 KB |
+| Message size | 74.2 MB | 71.1 MB | 53.9 MB |
+| Terms per message | 77 | 77 | 229 |
+| One `index` write, median / max | 18 / 28 ms | 23 / 31 ms | 27 / 35 ms |
+| Backfill slice at 30 ms budget, median / p90 / max | 27 / 33 / 108 ms | 31 / 42 / 103 ms | 26 / 36 / 113 ms |
+| One 500 KB message | 167 ms | 218 ms | 197 ms |
+| Queries, min / median / p90 / max | 52 / 181 / 526 / 881 ms | 84 / 167 / 465 / 721 ms | 31 / 155 / 344 / 742 ms |
+| Over 500 ms | 3 of 24 | 1 of 24 | 1 of 24 |
+| Longest page stall | 461 ms | 448 ms | 846 ms |
+| CSP violations | 0 | 0 | 0 |
+| Page was hidden | no | no | no |
+| Databases after the run | none | none | none |
+
+All 24 queries, 100 chats, in ms: the 119, and 96, ja 102, memory 182, project 108, window 106, kissa 185, koira 93, zebra 85, kissoille 247, talossa 134, kirjastossa 52, järvellä 105, ystävälle 95, metsästä 114, kirja 181, "kissa koira" 236, "memory project" 233, "talo järvi" 251, "kirja window" 245, then the four multi-form queries: `kissa`-forms 526, `talo`-forms 237, `the`-words 571, `memory`-words 881.
+
+**How big.** About 3 KB per message at 400 characters, 7 KB at 1,600. So 10,000 messages take about 30 MB at 400 characters and about 70 MB at 1,600. The first build's "66 MB" held only at 400 characters, and would be about 225 MB at 1,600. Review measured 2.64 KB in a smaller test. The numbers here come from `storage.estimate()`, which counts files before the database has compacted them.
+
+**The design, as built.**
+- `searchDocs: 'n, &messageId, conversationId, *terms'`. `n` is a number key from the message's time, newest lowest: `-createdAt * 1024`. A clash moves up by one, inside a rw transaction, so two writers can't pick the same number. A re-index keeps its `n`. Each index entry repeats the primary key, so a number in place of a 36-character id is what cut the size by more than half.
+- Terms stay filed under the chat, as `chatId:term`.
+- Each distinct token is read once. A query holds at most 8 words, and a form of a word counts as a word.
+- The cap of 4,000 rows per token now keeps the newest rows of a term, and ties go to the newest. The cost: past the cap, a very common word reaches only the newest 4,000 rows that hold it. A prefix spans several terms in term order, so there the exact word comes first and the rest follow by spelling, not by time.
+- Each token weighs `1 / (1 + log2(rows))`, and a token at the cap weighs the least. So a name beats the plain words beside it.
+- The stored hash holds a format tag. A change to `filed` or `tokens` bumps it, and a pass then rebuilds every row.
+- A slice charges 0.1 ms per term it writes, up front. Before, the budget saw only tokenising, and a real slice took a median of 209 ms. Now the median is 27 ms and the p90 33 ms. The maximum is still about 105 ms, and a send can wait that long.
+- A message stops at 2,000 tokens, which is about 12 KB of varied text. A 500 KB message then takes about 170 to 220 ms.
+- A chat delete is one collection delete by `conversationId`.
+- The pass at app start runs only if no pass ever finished, one stopped half way, a reply was cut off, the last pass is over a week old, or it was of an older format.

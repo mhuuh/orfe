@@ -43,6 +43,11 @@ describe('fakeText', () => {
     expect(seeds.some((t) => /\b(the|and|with)\b/.test(t))).toBe(true)
   })
 
+  it('can write longer text', () => {
+    expect(fakeText(1, 1600).length).toBeGreaterThanOrEqual(1600)
+    expect(fakeText(1, 1600).length).toBeLessThan(1660)
+  })
+
   it('gives the same text for the same seed', () => {
     expect(fakeText(7)).toBe(fakeText(7))
     expect(fakeText(7)).not.toBe(fakeText(8))

@@ -7,6 +7,7 @@ import css from './bench.module.css'
 const options = new URLSearchParams(location.search)
 const MESSAGES = Number(options.get('messages')) || 100_000
 const ONE_CHAT = options.has('oneChat')
+const CHARS = Number(options.get('chars')) || undefined
 const PHASES: Record<BenchProgress['phase'], string> = {
   seed: 'Writing messages',
   index: 'Indexing',
@@ -41,6 +42,7 @@ function Bench() {
       const result = await runBench({
         messages: MESSAGES,
         oneChat: ONE_CHAT,
+        chars: CHARS,
         onProgress: (p) => setStatus(`${PHASES[p.phase]}: ${p.done.toLocaleString('en-US')} of ${p.total.toLocaleString('en-US')}`),
       })
       setReport(reportText(result))

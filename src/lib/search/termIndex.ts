@@ -31,7 +31,10 @@ const FINISHED = 'search-backfill-finished'
 const WEEK_MS = 7 * 86_400_000
 /** Messages read in one transaction. */
 const BATCH = 25
-/** One backfill slice, in ms. */
+/**
+ * One backfill slice, in ms. It holds `messages`, so a send can wait that long. Measured at 100k
+ * messages under a 6x throttle: median 27 ms, p90 33 ms, max 108 ms.
+ */
 export const SLICE_BUDGET_MS = 30
 /**
  * What one term costs to write, in ms, under a 6x throttle. The deadline is checked while

@@ -111,13 +111,13 @@ function fakeWord(finnish: boolean, r: () => number): string {
 }
 
 /** About 400 characters. Most messages keep to one language, and some switch halfway, as Mikael does. */
-export function fakeText(seed: number): string {
+export function fakeText(seed: number, chars = TARGET_CHARS): string {
   const r = randomFrom(seed)
   let finnish = r() < 0.5
   const switches = r() < 0.2
   let text = ''
-  while (text.length < TARGET_CHARS) {
-    if (switches && text.length > TARGET_CHARS / 2) finnish = !finnish
+  while (text.length < chars) {
+    if (switches && text.length > chars / 2) finnish = !finnish
     const word = fakeWord(finnish, r)
     text += text === '' ? word : `${r() < 0.1 ? '. ' : ' '}${word}`
   }
@@ -231,8 +231,8 @@ async function fakeLongText(): Promise<string> {
   return text
 }
 
-export async function runBench(opts: { messages: number; oneChat?: boolean; onProgress(p: BenchProgress): void }): Promise<BenchResult> {
-  const { messages: total, oneChat = false, onProgress } = opts
+export async function runBench(opts: { messages: number; oneChat?: boolean; chars?: number; onProgress(p: BenchProgress): void }): Promise<BenchResult> {
+  const { messages: total, oneChat = false, chars, onProgress } = opts
   let hidden = document.visibilityState === 'hidden'
   const noteHidden = () => {
     if (document.visibilityState === 'hidden') hidden = true
@@ -251,7 +251,7 @@ export async function runBench(opts: { messages: number; oneChat?: boolean; onPr
     const start = await usedBytes()
     const seedMs = await timed(async () => {
       for (let done = 0; done < total; ) {
-        const batch = Array.from({ length: Math.min(SEED_BATCH, total - done) }, (_, i) => fakeMessage(done + i + 1, chats))
+        const batch = Array.from({ length: Math.min(SEED_BATCH, total - done) }, (_, i) => fakeMessage(done + i + 1, chats, fakeText(done + i + 1, chars)))
         await rows.bulkAdd(batch)
         done += batch.length
         onProgress({ phase: 'seed', done, total })
@@ -345,7 +345,7 @@ export function reportText(r: BenchResult): string {
   const slowest = r.queries.reduce((a, b) => (b.ms > a.ms ? b : a))
   const over = r.queries.filter((q) => q.ms > SLOW_MS).length
   return [
-    `ORFE term index bench: ${r.messages.toLocaleString('en-US')} messages in ${r.chats} chats`,
+    `ORFE term index bench: ${r.messages.toLocaleString('en-US')} messages in ${r.chats} chat${r.chats === 1 ? '' : 's'}`,
     `Queries run in the longest chat: ${r.longChat.toLocaleString('en-US')} messages`,
     `Seed: ${seconds(r.seedMs)}`,
     `Index: ${seconds(r.indexMs)}`,
