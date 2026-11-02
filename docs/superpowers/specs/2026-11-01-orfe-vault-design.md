@@ -226,7 +226,7 @@ Context bloat matters more than money here. Keeping a 2k note costs about $0.000
 3. **Strip soon.** A result over about 300 tokens becomes a one-line pointer once two user turns have passed since it ran. The pointer names the path or message ids. Stripping only re-pays what came after the result, so it is cheap near the end of the chat. This happens at render time, from the stored turn, so `result` always stays whole. Reasoned, not tested: see §15.
 4. **Tool text counts** toward the limit, so trims stay on time.
 
-A kept call and result pair stays a pair: only the result text shrinks.
+A kept call and result pair stays a pair: only the text shrinks. Big write arguments strip on the same schedule: each string value over the limit becomes a short marker, so the JSON stays valid, the cold check ignores arguments, and a pinned reply keeps both its results and its arguments whole. (my call)
 
 ## 10. History search ability
 

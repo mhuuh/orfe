@@ -1,6 +1,8 @@
 import { describeStep } from './abilities/registry'
+import { windowOf } from './context'
 import { ruleFor } from './modelRules'
 import type { OutMessage, OutPart, OutToolCall } from './openrouter'
+import { keptWhole, pointerFor, resultStays, shrinkArgs } from './retention'
 import type { ContentPart, Message, ToolPart } from './types'
 
 export interface RoundOptions {
@@ -9,6 +11,8 @@ export interface RoundOptions {
   toolsEnabled: boolean
   /** The reasoning_details of each round, by `ToolPart.round`. Pass only for the turn in flight. */
   reasoning?: unknown[][]
+  /** The call ids whose results render whole. Left out: all do, as in the turn in flight. */
+  kept?: Set<string>
 }
 
 /** What decides how stored steps go out. */
@@ -93,10 +97,28 @@ function storedRounds(s: StepContext): RoundOptions {
   return { modelId: s.modelId, toolsEnabled: s.toolsEnabled && !s.plain && !rule.flattenAll && !rule.noTools }
 }
 
-function toCall(part: ToolPart): OutToolCall {
+/** Whether a stored step goes out as a real call, so that its result is in the request. */
+export function sendsCall(s: StepContext): (part: ToolPart) => boolean {
+  const o = storedRounds(s)
+  return (part) => isCall(part, o)
+}
+
+/** A real call: whole, or with its big strings as markers. */
+function toCall(part: ToolPart, o: RoundOptions): OutToolCall {
   // Providers need a JSON object. Bad arguments from a weak model go out as an empty one.
   const args = typeof part.args === 'object' && part.args !== null && !Array.isArray(part.args) ? part.args : {}
-  return { id: part.callId, type: 'function', function: { name: part.name, arguments: JSON.stringify(args) } }
+  const sent = !o.kept || o.kept.has(part.callId) ? args : shrinkArgs(args)
+  return { id: part.callId, type: 'function', function: { name: part.name, arguments: JSON.stringify(sent) } }
+}
+
+/**
+ * The text a model reads for a real call: whole, a pointer, or the line for a call that never ended.
+ * With `isCall` and `toCall`, this is the one rule for what a step renders as. The request, the
+ * window count and the cold check all follow it, so they can't disagree.
+ */
+function resultText(part: ToolPart, o: RoundOptions): string {
+  if (part.status === 'running') return UNFINISHED
+  return resultStays(part, o.kept) ? part.result : pointerFor(part)
 }
 
 function render(content: ContentPart[], o: RoundOptions, media: MediaOptions): OutMessage[] {
@@ -124,11 +146,11 @@ function render(content: ContentPart[], o: RoundOptions, media: MediaOptions): O
     out.push({
       role: 'assistant',
       content: parts.length > 0 ? contentOf(parts) : null,
-      tool_calls: calls.map(toCall),
+      tool_calls: calls.map((c) => toCall(c, o)),
       ...(details && details.length > 0 ? { reasoning_details: details } : {}),
     })
     for (const c of calls) {
-      out.push({ role: 'tool', tool_call_id: c.callId, content: c.status === 'running' ? UNFINISHED : c.result })
+      out.push({ role: 'tool', tool_call_id: c.callId, content: resultText(c, o) })
     }
     parts = []
   }
@@ -138,15 +160,15 @@ function render(content: ContentPart[], o: RoundOptions, media: MediaOptions): O
 
 /**
  * The characters a stored step adds to a request, for the window count. Follows the same test as
- * `buildOutgoing`: a real call sends its name, arguments and result, and any other step sends one
- * flat line.
+ * `buildOutgoing`: a real call sends its name, arguments and result text, and any other step sends
+ * one flat line. `messages`: what the request is built from, since it decides what is stripped.
  */
-export function stepCounter(s: StepContext): (part: ToolPart) => number {
-  const o = storedRounds(s)
+export function stepCounter(s: StepContext, messages: Message[]): (part: ToolPart) => number {
+  const o = { ...storedRounds(s), kept: keptWhole(messages) }
   return (part) => {
     if (!isCall(part, o)) return describeStep(part).past.length
-    const { name, arguments: args } = toCall(part).function
-    return name.length + args.length + part.result.length
+    const { name, arguments: args } = toCall(part, o).function
+    return name.length + args.length + resultText(part, o).length
   }
 }
 
@@ -166,12 +188,11 @@ export function buildOutgoing(messages: Message[], opts: BuildOptions): OutMessa
     const cut = sorted.findIndex((m) => m.id === opts.upToId)
     if (cut >= 0) sorted = sorted.slice(0, cut)
   }
-  let start = opts.windowStartId === null ? -1 : sorted.findIndex((m) => m.id === opts.windowStartId)
-  if (start < 0) start = 0
-  const selected = sorted.filter((m, i) => i >= start || m.pinned)
+  const selected = windowOf(sorted, opts.windowStartId)
 
   const rule = ruleFor(opts.modelId)
-  const stored = storedRounds(opts)
+  // Counted over the cut, so a reroll strips by what it sends.
+  const stored = { ...storedRounds(opts), kept: keptWhole(sorted) }
 
   // drop dividers, map parts, drop empties, merge consecutive same-role
   // A reply with real calls stays apart as a block: a merge would break its call and tool pairs.

@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest'
 import { canonical, estimateTokens, fingerprint, isCold, planWindow, raisesLimit, ttlFor, viewWindow } from './context'
 import { hashText } from './hash'
-import { buildOutgoing, stepCounter } from './normalise'
+import { buildOutgoing, stepCounter, type StepContext } from './normalise'
 import type { OutMessage } from './openrouter'
 import type { ContentPart, ContextSetting, LastRequest, Message, Role, ToolPart } from './types'
 
@@ -26,8 +26,9 @@ function transcript(count: number, chars = 40): Message[] {
 }
 
 const tokens100: ContextSetting = { mode: 'tokens', limit: 100, trimTo: 0.7 }
-/** Every step by 'm/a' goes out as a real call. */
-const stepChars = stepCounter({ modelId: 'm/a', toolsEnabled: true, plain: false })
+/** Every step by 'm/a' goes out as a real call, whole: each one counts as new in the chat. */
+const counter = (s: StepContext) => (p: ToolPart) => stepCounter(s, [msg(1, 'assistant', [p])])(p)
+const stepChars = counter({ modelId: 'm/a', toolsEnabled: true, plain: false })
 const base = {
   stepChars,
   windowStartId: null,
@@ -142,12 +143,12 @@ describe('isCold', () => {
   })
 
   describe('with tools', () => {
-    const toolTurn = (result: string, reasoning?: unknown[]): OutMessage[] => [
+    const toolTurn = (result: string, reasoning?: unknown[], call = { id: 'c1', name: 'find', args: '{}' }): OutMessage[] => [
       { role: 'user', content: 'q' },
       {
         role: 'assistant',
         content: null,
-        tool_calls: [{ id: 'c1', type: 'function', function: { name: 'find', arguments: '{}' } }],
+        tool_calls: [{ id: call.id, type: 'function', function: { name: call.name, arguments: call.args } }],
         ...(reasoning ? { reasoning_details: reasoning } : {}),
       },
       { role: 'tool', tool_call_id: 'c1', content: result },
@@ -158,6 +159,19 @@ describe('isCold', () => {
       const stored = { ...last, ...fingerprint(toolTurn('a long result')) }
       const after: OutMessage[] = [...toolTurn('short pointer'), { role: 'user', content: 'more' }]
       expect(isCold(stored, { ...next, outgoing: after })).toBe(false)
+    })
+
+    it('changed call arguments do not change the canonical hash', () => {
+      const whole = toolTurn('r', undefined, { id: 'c1', name: 'find', args: '{"body":"long text"}' })
+      const stripped = toolTurn('r', undefined, { id: 'c1', name: 'find', args: '{"body":"(Stripped, 8000 characters.)"}' })
+      expect(fingerprint(stripped).prefixHash).toBe(fingerprint(whole).prefixHash)
+    })
+
+    it('a changed id or tool name in a call still reads cold', () => {
+      const stored = { ...last, ...fingerprint(toolTurn('r')) }
+      for (const call of [{ id: 'c9', name: 'find', args: '{}' }, { id: 'c1', name: 'other', args: '{}' }]) {
+        expect(isCold(stored, { ...next, outgoing: toolTurn('r', undefined, call) })).toBe(true)
+      }
     })
 
     it('dropped reasoning does not change the canonical hash', () => {
@@ -178,6 +192,9 @@ describe('isCold', () => {
       const out = toolTurn('r', [{ id: 'r0' }])
       canonical(out)
       expect(out).toEqual(toolTurn('r', [{ id: 'r0' }]))
+      const big = toolTurn('r', undefined, { id: 'c1', name: 'find', args: '{"a":1}' })
+      canonical(big)
+      expect(big).toEqual(toolTurn('r', undefined, { id: 'c1', name: 'find', args: '{"a":1}' }))
     })
 
     it('a different toolsHash reads cold', () => {
@@ -457,9 +474,9 @@ describe('tool text that is not sent', () => {
     ]).flat()
   const asked = (order: number) => msg(order, 'user', 'x'.repeat(40))
   const tokens32k: ContextSetting = { mode: 'tokens', limit: 32000, trimTo: 0.7 }
-  const plain = stepCounter({ modelId: 'm/a', toolsEnabled: false, plain: true })
-  const flat = stepCounter({ modelId: 'm/a', toolsEnabled: false, plain: false })
-  const otherModel = stepCounter({ modelId: 'm/b', toolsEnabled: true, plain: false })
+  const plain = counter({ modelId: 'm/a', toolsEnabled: false, plain: true })
+  const flat = counter({ modelId: 'm/a', toolsEnabled: false, plain: false })
+  const otherModel = counter({ modelId: 'm/b', toolsEnabled: true, plain: false })
 
   it('a real call counts name, arguments and result', () => {
     expect(estimateTokens(turns(1), null, 1, 0, stepChars)).toBe(Math.ceil((40 + 40 + 4 + 9 + RESULT) / 4))

@@ -1,8 +1,10 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { fallbackModelInfo, type ModelInfo } from '../catalog'
 import { buildIndex, INDEX_MAX_CHARS } from '../notes/index'
+import { hasStripMarker } from '../notes/rules'
 import { notes, YOU } from '../notes/store'
 import { buildOutgoing } from '../normalise'
+import { shrinkArgs } from '../retention'
 import { sendUserMessage } from '../send'
 import { db, storage } from '../storage'
 import { CAPABILITY_NOTE, systemFor } from '../system'
@@ -25,6 +27,7 @@ const ctx = (callId = 'c1', model = T.id): AbilityCtx => ({
   model,
   key: 'k',
   signal: new AbortController().signal,
+  wholeCopy: () => false,
 })
 const call = (name: string, args: unknown, callId?: string): Promise<string> => notesAbility.run(name, args, ctx(callId))
 const put = (path: string, description = `About ${path}`, body = 'Body text.') =>
@@ -855,5 +858,52 @@ describe('step words', () => {
       { system: null, windowStartId: null, inputModalities: [], blobUrl: () => undefined, modelId: 'm', toolsEnabled: true, plain: false },
     )
     expect(JSON.stringify(out)).toContain('Tried to write the note chat/harbour')
+  })
+})
+
+describe('the strip marker as note text', () => {
+  const MARKER = shrinkArgs('x'.repeat(8000)) as string
+  const REFUSAL = "Error: That is a placeholder, not the note's text. Use notes_read to get the text, then write again."
+
+  it('the marker that stripping makes is what the guard knows', () => {
+    expect(MARKER).toBe('(Stripped, 8000 characters.)')
+    expect(hasStripMarker(MARKER)).toBe(true)
+  })
+
+  it('notes_write refuses a body that holds the marker, and saves nothing', async () => {
+    expect(await call('notes_write', { path: 'chat/a', description: 'A', body: MARKER })).toBe(REFUSAL)
+    expect(await call('notes_write', { path: 'chat/a', description: 'A', body: `Intro.\n${MARKER}\nEnd.` })).toBe(REFUSAL)
+    expect(await notes.read(ref('chat/a'))).toBeUndefined()
+  })
+
+  it('notes_write refuses it on a replace too, and the note stays', async () => {
+    await put('chat/a')
+    const result = await call('notes_write', { path: 'chat/a', description: 'A', body: MARKER, expected_version: 1, shrink: true })
+    expect(result).toBe(REFUSAL)
+    expect((await notes.read(ref('chat/a')))?.body).toBe('Body text.')
+  })
+
+  it('notes_edit refuses new_text that holds the marker, and the note stays', async () => {
+    await put('chat/a')
+    const result = await call('notes_edit', { path: 'chat/a', expected_version: 1, old_text: 'Body', new_text: MARKER })
+    expect(result).toBe(REFUSAL)
+    expect(await call('notes_edit', { path: 'chat/a', expected_version: 1, new_text: MARKER })).toBe(REFUSAL)
+    expect((await notes.read(ref('chat/a')))?.version).toBe(1)
+  })
+
+  it('an edit of a note that already holds the marker still works', async () => {
+    await notes.write(ref('chat/a'), { body: `Mikael typed ${MARKER}.`, description: 'A' }, YOU)
+    const result = await call('notes_edit', { path: 'chat/a', expected_version: 1, new_text: 'More.' })
+    expect(result).toContain('Edited chat/a')
+  })
+
+  it('other words pass', async () => {
+    const result = await call('notes_write', { path: 'chat/a', description: 'A', body: 'Stripped, 80 characters. (Stripped, many characters.)' })
+    expect(result).toContain('Wrote chat/a')
+  })
+
+  it("Mikael's own write is not held back", async () => {
+    const result = await notes.write(ref('chat/a'), { body: MARKER, description: 'A' }, YOU)
+    expect('ok' in result).toBe(true)
   })
 })

@@ -69,7 +69,7 @@ export function Header({ conversationId, onMenu, onNotes }: Props) {
       system,
       ratio: conv.tokenRatio,
       overheadChars: tools?.json.length ?? 0,
-      stepChars: stepCounter({ modelId: model.id, toolsEnabled: tools !== null, plain: conv.plain }),
+      stepChars: stepCounter({ modelId: model.id, toolsEnabled: tools !== null, plain: conv.plain }, messages),
     })
     const meta = headerMeta({
       turns: messages.filter((m) => m.role === 'user').length,
