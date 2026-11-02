@@ -1,6 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { backupDue, exportBackup, importBackup } from './backup'
 import { fallbackModelInfo } from './catalog'
+import { searchIndex } from './search/termIndex'
 import { generate, isGenerating, stop } from './send'
 import { db, storage } from './storage'
 
@@ -40,7 +41,7 @@ describe('backup', () => {
     const s = await storage.getSettings()
     expect(s.streaming).toBe(false)
     expect(s.key).toBe('sk-or-other')
-    expect(await db.cache.count()).toBe(0)
+    expect(await storage.getCache('models')).toBeUndefined()
   })
 
   it('merge keeps rows that are not in the file', async () => {
@@ -111,6 +112,27 @@ describe('backup', () => {
     const c = await storage.getConversation('old1')
     expect(c?.context).toBeNull()
     expect(c?.tokenRatio).toBe(1)
+  })
+
+  it('leaves the term index out of the file, and ignores it in one', async () => {
+    const chat = await seed()
+    await db.searchDocs.put({ n: 1, messageId: 'm1', conversationId: chat.id, terms: ['kissa'], textHash: 'x' })
+    const file = await exportBackup()
+    expect(JSON.parse(await file.text()).tables).not.toHaveProperty('searchDocs')
+
+    await db.searchDocs.clear()
+    const row = { n: 2, messageId: 'm2', conversationId: chat.id, terms: ['koira'], textHash: 'x' }
+    const forged = new Blob([JSON.stringify({ format: 'orfe-backup', version: 1, exportedAt: 1, tables: { prompts: [], searchDocs: [row] } })])
+    await importBackup(forged, 'replace')
+    expect(await db.searchDocs.count()).toBe(0)
+  })
+
+  it('a restore brings the term index in line with the file', async () => {
+    const chat = await seed()
+    const m = await storage.appendMessage(chat.id, 'user', { id: 'v1', content: [{ type: 'text', text: 'kissa' }], status: 'done', createdAt: 1 })
+    const file = await exportBackup()
+    await importBackup(file, 'replace')
+    await vi.waitFor(async () => expect((await searchIndex.search(chat.id, 'kissa', 5)).map((h) => h.messageId)).toEqual([m.id]))
   })
 
   it('keeps the existing key after replace', async () => {

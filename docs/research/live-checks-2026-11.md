@@ -105,3 +105,136 @@ The interface is `ModelRule { keepReasoning?: true; noTools?: true; flattenAll?:
 6. **Strip soon stays on.** It passed on Anthropic and OpenAI. It did no worse than a normal turn on Gemini. On some DeepSeek hosts a strip costs the whole prompt, about 6,000 tokens. At deepseek-v4-flash prices ($0.091 per million input tokens uncached, $0.0182 cached), 6,400 missed tokens cost 6,400 x ($0.091 - $0.0182) / 1,000,000 = about $0.0005 extra per strip. Spec section 15 says to strip only at trims "if not". I judge the cost too small to add a rule for it. If Mikael disagrees, the rule needs a new field, because `ModelRule` has none for this.
 7. **Dropping reasoning after a finished tool turn is safe on all four.** The cost is a tail miss of roughly 80 to 170 tokens on Anthropic and OpenAI, and not distinguishable from keeping reasoning on Gemini and DeepSeek at their coarse cache step size (no error on any). In the app's live smoke test on Haiku 5.5, it cost about 11% of the Anthropic prefix once (1,964 of 2,214 tokens cached on the next send). Spec section 6 accepts this as a tail miss.
 8. **Treat HTTP 200 with `finish_reason: content_filter` and no content as a failure.** (Not a `ModelRule`; it belongs in the send loop.)
+
+## Term index bench (2026-11-02): desktop with throttling, not a phone
+
+Task 16's `?bench` page, run on a production build under `vite preview`, in full Chromium, with the CPU throttled 6x through CDP. The machine is a 12-core desktop with 16 GB RAM. Mikael's phone run is still to come, and that run is the gate. The section has three rounds: the first build, kept here with its failed runs, the design after review under "Second round", and two last changes under "Third round". The third round is what ships.
+
+**What the numbers do not show.** The throttle slows page JavaScript. It does not slow the browser's IndexedDB process or the disk, so a phone can be slower than this on index writes and on reads from flash. The text is made up: a few hundred Finnish and English words, with some rare ones. The first noun in each list (`kissa`, `memory`) is far more common than any real word, on purpose.
+
+**Result of the first build: no query over 500 ms, but the queries were too easy.** Min 34 ms, median 140 ms, max 300 ms over 20 queries. Review found that the spec's multi-form queries were not in the set, and that those failed (786 and 925 ms). See "Second round".
+
+| Measure | First build |
+|---|---|
+| Messages | 100,000 in 100 chats. Queries run in the longest chat, 20,000 messages |
+| Seed | 56.6 s |
+| Index (a full backfill) | 653 s |
+| Repair pass with nothing to do | 84.1 s |
+| Index size | 657.7 MB (messages: 85.1 MB) |
+| Terms per message | about 77 |
+| One `index` write | min 13 ms, median 20 ms, max 45 ms |
+| Queries | min 34 ms, median 140 ms, max 300 ms. Slowest: `kissoille` |
+| Longest stall of the page during the run | 489 ms (timer tick check) |
+| CSP violations | 0, with a `securitypolicyviolation` listener on |
+| Hosts contacted | localhost only |
+| Databases after the run | none: `orfe-bench` is gone and `orfe` was never opened |
+| Normal load | 0 requests for the bench chunk, with the service worker active |
+
+All 20 queries, in ms: the 153, and 115, ja 122, memory 223, project 97, window 93, kissa 223, koira 96, zebra 122, kissoille 300, talossa 140, kirjastossa 34, järvellä 98, ystävälle 82, metsästä 120, kirja 186, "kissa koira" 257, "memory project" 246, "talo järvi" 289, "kirja window" 285.
+
+**Runs of the first build.** The first two failed the 500 ms line:
+
+| Run | Index design | Shape | Queries (min / median / max) | Over 500 ms |
+|---|---|---|---|---|
+| 1 | Plain terms, plus a read of all the chat's ids | all 100k in one chat | 1,535 / 3,639 / 12,524 ms | 20 of 20 |
+| 2 | Terms filed under the chat | 100 chats, longest 20k | 49 / 596 / 2,782 ms | 10 of 20 |
+| 3 | Run 2, plus at most 4,000 rows read per token | 100 chats, longest 20k | 34 / 140 / 300 ms | 0 of 20 |
+
+Runs 1 and 2 differ in the chat shape as well as the design, so the gap between them is not all from the design. Run 1 is the harsher shape. Filing terms under the chat also cut the index time from 1,268 s to 650 s.
+
+**What the 4,000 row limit cost in this build.** With message ids as keys, the rows a capped word kept were a random sample, the same one on each search, and ties went by random id. Review measured this. The second round replaces it with the newest rows.
+
+**Keys in one read, not `startsWithAnyOf`.** Each token gets one `startsWith(...).primaryKeys()` read, and Dexie serves that with `getAllKeys`. `startsWithAnyOf` walks a cursor row by row. Raw IndexedDB under the same throttle, 80,000 rows: `getAllKeys` 1,383 ms, key cursor 6,945 ms. That is 5 times slower.
+
+**Other things to know.**
+- The index was 7.7 times the messages in this run, about 6.7 KB per message. It is never backed up. The second round's numbers replace these.
+- A pass ran at each app start in this build. It no longer does.
+- A plain Playwright context keeps IndexedDB in memory and hit `QuotaExceededError` at about 70k messages. A persistent profile had no such limit, so the runs above use one. The page reports that error and still deletes its data. The phone stores on flash, so this should not happen there unless it is nearly full.
+- The full run took about 14 minutes here, not "a few minutes", so the page's warning says 20 minutes or more. In the second round it took 16 to 18 minutes.
+- The Finnish stemmer has limits. `kissoille` stems to `kiso`, and `kissa` to `kis`. A search for `kissa` finds `kissoille` through the prefix, but a search for `kissoille` does not find `kissa`. Words that change inside (`vesi`, `veden`) share no stem. The tool description should ask for several forms, as spec §10 says.
+
+### Second round: the design after review (still desktop with 6x throttle, not a phone)
+
+**Result of this round: 3 of 24 queries are over 500 ms in the usual shape, and all three are multi-form queries.** The third round brings these under. Single words and two-word queries stay under 260 ms. Chat length does not matter: one chat of 100k messages gives about the same times as a 20k chat.
+
+The queries over 500 ms:
+
+| Query | 100 chats, longest 20k | One chat of 100k |
+|---|---|---|
+| `memory cache token model stream message search index` | 881 ms | 721 ms |
+| `the and of to in is that it` | 571 ms | 465 ms |
+| `kissa kissan kissoille kissoja kissat` | 526 ms | 469 ms |
+
+These are the worst case on purpose: `memory` and `kissa` are far more common here than any real word, and an 8-word query can read up to 24 tokens. A query of eight rare words reads almost nothing.
+
+| Measure | 100 chats, longest 20k | One chat of 100k | 20k messages at 1,600 characters |
+|---|---|---|---|
+| Seed | 59.0 s | 56.4 s | 19.0 s |
+| Index (full backfill) | 843 s | 952 s | 365 s |
+| Repair pass with nothing to do | 55.0 s | 53.0 s | 14.0 s |
+| Index size | 291.3 MB | 330.4 MB | 137.6 MB |
+| Size per message | 3.0 KB | 3.4 KB | 7.0 KB |
+| Message size | 74.2 MB | 71.1 MB | 53.9 MB |
+| Terms per message | 77 | 77 | 229 |
+| One `index` write, median / max | 18 / 28 ms | 23 / 31 ms | 27 / 35 ms |
+| Backfill slice at 30 ms budget, median / p90 / max | 27 / 33 / 108 ms | 31 / 42 / 103 ms | 26 / 36 / 113 ms |
+| One 500 KB message | 167 ms | 218 ms | 197 ms |
+| Queries, min / median / p90 / max | 52 / 181 / 526 / 881 ms | 84 / 167 / 465 / 721 ms | 31 / 155 / 344 / 742 ms |
+| Over 500 ms | 3 of 24 | 1 of 24 | 1 of 24 |
+| Longest page stall | 461 ms | 448 ms | 846 ms |
+| CSP violations | 0 | 0 | 0 |
+| Page was hidden | no | no | no |
+| Databases after the run | none | none | none |
+
+All 24 queries, 100 chats, in ms: the 119, and 96, ja 102, memory 182, project 108, window 106, kissa 185, koira 93, zebra 85, kissoille 247, talossa 134, kirjastossa 52, järvellä 105, ystävälle 95, metsästä 114, kirja 181, "kissa koira" 236, "memory project" 233, "talo järvi" 251, "kirja window" 245, then the four multi-form queries: `kissa`-forms 526, `talo`-forms 237, `the`-words 571, `memory`-words 881.
+
+**How big.** About 3 KB per message at 400 characters, 7 KB at 1,600. So 10,000 messages take about 30 MB at 400 characters and about 70 MB at 1,600. The first build's "66 MB" held only at 400 characters, and would be about 225 MB at 1,600. Review measured 2.64 KB in a smaller test. The numbers here come from `storage.estimate()`, which counts files before the database has compacted them.
+
+**The design, as built.**
+- `searchDocs: 'n, &messageId, conversationId, *terms'`. `n` is a number key from the message's time, newest lowest: `-createdAt * 1024`. A clash moves up by one, inside a rw transaction, so two writers can't pick the same number. A re-index keeps its `n`. Each index entry repeats the primary key, so a number in place of a 36-character id is what cut the size by more than half.
+- Terms stay filed under the chat, as `chatId:term`.
+- Each distinct token is read once. A query holds at most 8 words, and a form of a word counts as a word.
+- The cap of 4,000 rows per token now keeps the newest rows of a term, and ties go to the newest. The cost: past the cap, a very common word reaches only the newest 4,000 rows that hold it. A prefix spans several terms in term order, so there the exact word comes first and the rest follow by spelling, not by time.
+- Each token weighs `1 / (1 + log2(rows))`, and a token at the cap weighs the least. So a name beats the plain words beside it.
+- The stored hash holds a format tag. A change to `filed` or `tokens` bumps it, and a pass then rebuilds every row.
+- A slice charges 0.1 ms per term it writes, up front. Before, the budget saw only tokenising, and a real slice took a median of 209 ms. Now the median is 27 ms and the p90 33 ms. The maximum is still about 105 ms, and a send can wait that long.
+- A message stops at 2,000 tokens, which is about 12 KB of varied text. A 500 KB message then takes about 170 to 220 ms.
+- A chat delete is one collection delete by `conversationId`.
+- The pass at app start runs only if no pass ever finished, one stopped half way, a reply was cut off, the last pass is over a week old, or it was of an older format.
+
+### Third round: a key limit per search, and the clock after the read (still desktop with 6x throttle, not a phone)
+
+**Result: no query over 500 ms, 0 of 24.** Min 42 ms, median 187 ms, p90 408 ms, max 432 ms. Slowest: `the and of to in is that it`. One run: 100k messages in 100 chats, queries in the longest chat, 20k messages.
+
+| Query | Second round | Third round |
+|---|---|---|
+| `memory cache token model stream message search index` | 881 ms | 408 ms |
+| `the and of to in is that it` | 571 ms | 432 ms |
+| `kissa kissan kissoille kissoja kissat` | 526 ms | 425 ms |
+| `talo talon talossa taloon talot taloja` | 237 ms | 232 ms |
+
+| Measure | Third round |
+|---|---|
+| Seed | 57.8 s |
+| Index (full backfill) | 824.5 s |
+| Repair pass with nothing to do, at 100 ms slices | 54.4 s |
+| Index size | 311.3 MB (messages: 78.4 MB) |
+| One `index` write, median / max | 19 / 25 ms |
+| Backfill slice while writing, at 30 ms budget, median / p90 / max | 31 / 37 / 118 ms |
+| Clean pass at 30 ms | 985 messages, 14 slices, 70 per slice, median 40 ms, max 49 ms a slice |
+| One 500 KB message | 184 ms |
+| Longest page stall | 2,544 ms, cause not found |
+| CSP violations | 0 |
+| Hosts contacted | localhost only |
+| Databases after the run | none |
+| Page was hidden | no |
+
+All 24 queries, in ms: the 128, and 117, ja 117, memory 202, project 118, window 106, kissa 207, koira 105, zebra 107, kissoille 265, talossa 135, kirjastossa 42, järvellä 105, ystävälle 91, metsästä 109, kirja 187, "kissa koira" 237, "memory project" 238, "talo järvi" 253, "kirja window" 256, then the four multi-form queries in the table above.
+
+**The key limit.** A search reads at most 24,000 keys, shared between its tokens, and never over 4,000 for one token. The time of a search is almost all key reads, at about 16 microseconds per key under this throttle. The cost: in a query with many tokens, a capped word reaches only its newest 2,000 to 3,000 rows. The re-review measured what that does to the top 25 at this limit: `memory cache ...` kept 17 of 25, `kissa kissan ...` 14 of 25, and `the and of ...` and `talo talon ...` 25 of 25. Queries of one or two words read under 24,000 keys, so they do not change.
+
+**The clock after the read.** A slice is now the batch read plus at most the budget. Before, a read that used up the 30 ms left the slice one message, so a clean pass read the same 25 messages again and again. With a controlled clock, a 31 ms read took 60 slices for 60 messages, and now takes 3 or fewer. The clean pass line above is on the bench so that the phone run shows this.
+
+**Two more rules.** A stored place holds its format, and a place of another format is ignored. A message with no usable `createdAt` gets `n` from time 0, so a hand-edited backup can't stop a pass.
+
+**Known and left as it is.** In a very long chat, reads of `messages` can queue behind a chat delete: `index` holds `messages` while it waits for `removeChat`, 5.5 s for a 20k chat here, about 0.5 s at 2,000 messages. So a reply sent right after such a delete can start late.

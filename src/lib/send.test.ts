@@ -3,7 +3,8 @@ import { fallbackModelInfo, type ModelInfo } from './catalog'
 import { db, newId, storage } from './storage'
 import { setAbilitiesForTest, toolsFor, type Ability } from './abilities/registry'
 import { setModelRulesForTest } from './modelRules'
-import { computeCold, deleteChat, deleteMessage, deleteVersion, errorText, generate, MAX_ROUNDS, okStep, patchVersion, isGenerating, recoverInterrupted, replacePromptRef, restoreChat, restoreMessage, restoreVersion, sendUserMessage, setAbility, setAlreadyDoneForTest, setPlain, setPrompt, setToolUndone, stop, undoReplyWrites } from './send'
+import { searchIndex } from './search/termIndex'
+import { backfillAtStart, backfillSoon, computeCold, deleteChat, deleteMessage, deleteVersion, editMessage, errorText, flipVersion, generate, MAX_ROUNDS, okStep, patchVersion, isGenerating, recoverInterrupted, replacePromptRef, restoreChat, restoreMessage, restoreVersion, sendUserMessage, setAbility, setAlreadyDoneForTest, setPlain, setPrompt, setToolUndone, stop, undoReplyWrites } from './send'
 import { notes, YOU } from './notes/store'
 import { CAPABILITY_NOTE, systemFor } from './system'
 import { fingerprint } from './context'
@@ -2559,5 +2560,247 @@ describe('trust gate', () => {
     await generate(convId, { kind: 'continue', messageId: m.id }, T)
     expect(ran).toEqual([])
     expect((await steps())[1]).toMatchObject({ status: 'done', result: 'stored result' })
+  })
+})
+
+describe('term index', () => {
+  const found = async (query: string) => (await searchIndex.search(convId, query, 10)).map((h) => h.messageId)
+  /** A send does not wait for index writes, so a test does. */
+  const finds = (query: string, ...ids: string[]) => vi.waitFor(async () => expect(await found(query)).toEqual(ids))
+  const quiet = () => vi.spyOn(console, 'error').mockImplementation(() => {})
+  const pause = () => new Promise((resolve) => setTimeout(resolve, 20))
+  /** Gives each chunk of a stream its own read, with time passing between them. */
+  function slowStream(lines: string[], gapMs: number, signal?: AbortSignal): Response {
+    let now = Date.now()
+    const body = new ReadableStream<Uint8Array>({
+      start(c) {
+        signal?.addEventListener('abort', () => c.error(new DOMException('stopped', 'AbortError')))
+      },
+      async pull(c) {
+        const line = lines.shift()
+        if (line === undefined) {
+          if (!signal) c.close()
+          return signal && new Promise(() => {})
+        }
+        vi.setSystemTime((now += gapMs))
+        c.enqueue(enc.encode(line))
+      },
+    })
+    return new Response(body, { status: 200, headers: { 'content-type': 'text/event-stream' } })
+  }
+
+  afterEach(() => {
+    vi.restoreAllMocks()
+  })
+
+  it('indexes a user send', async () => {
+    await sendUserMessage(convId, 'kissa', { reply: false })
+    await finds('kissa', (await lastMsg()).id)
+  })
+
+  it('indexes a reply once, at its end, not on each stream write', async () => {
+    vi.useFakeTimers({ toFake: ['Date'] })
+    const words = Array.from({ length: 5 }, () => ev({ choices: [{ delta: { content: 'koira ' } }] }))
+    stubFetch(() => slowStream([...words, ...reply('koira').slice(1)], 1000))
+    const put = vi.spyOn(db.messages, 'put')
+    const index = vi.spyOn(searchIndex, 'index')
+    await generate(convId, { kind: 'new' }, A)
+    const m = await lastMsg()
+    await finds('koira', m.id)
+    expect(put.mock.calls.length).toBeGreaterThan(3)
+    expect(index.mock.calls.filter(([id]) => id === m.id)).toHaveLength(1)
+  })
+
+  it('indexes what a stopped reply kept', async () => {
+    vi.useFakeTimers({ toFake: ['Date'] })
+    vi.stubGlobal('fetch', async (_u: string, init: RequestInit) => slowStream([ev({ choices: [{ delta: { content: 'koira' } }] })], 1000, init.signal!))
+    const run = generate(convId, { kind: 'new' }, A)
+    await pause()
+    stop(convId)
+    await run
+    expect((await lastMsg()).versions[0].status).toBe('stopped')
+    await finds('koira', (await lastMsg()).id)
+  })
+
+  it('a reroll replaces the old text', async () => {
+    stubFetch(() => sse(reply('kissa')), () => sse(reply('koira')))
+    await generate(convId, { kind: 'new' }, A)
+    const m = await lastMsg()
+    await finds('kissa', m.id)
+    await generate(convId, { kind: 'reroll', messageId: m.id }, A)
+    await finds('koira', m.id)
+    await finds('kissa')
+  })
+
+  it('an edit and a version flip follow the active text', async () => {
+    await sendUserMessage(convId, 'kissa', { reply: false })
+    const m = await lastMsg()
+    await finds('kissa', m.id)
+    await editMessage(m.id, 'koira')
+    await finds('koira', m.id)
+    await finds('kissa')
+    await flipVersion(m.id, 0)
+    await finds('kissa', m.id)
+    await finds('koira')
+  })
+
+  it('a deleted message leaves the index, and its undo brings it back', async () => {
+    await sendUserMessage(convId, 'kissa', { reply: false })
+    const m = await lastMsg()
+    await finds('kissa', m.id)
+    const snapshot = await deleteMessage(m.id)
+    await finds('kissa')
+    await restoreMessage(snapshot!)
+    await finds('kissa', m.id)
+  })
+
+  it('a deleted version leaves the index, and its undo brings it back', async () => {
+    await sendUserMessage(convId, 'kissa', { reply: false })
+    const m = await lastMsg()
+    await editMessage(m.id, 'koira')
+    await finds('koira', m.id)
+    const snapshot = await deleteVersion(m.id)
+    await finds('koira')
+    await finds('kissa', m.id)
+    await restoreVersion(snapshot!)
+    await finds('koira', m.id)
+    await finds('kissa')
+  })
+
+  it('a deleted chat leaves the index, and its undo brings it back', async () => {
+    await sendUserMessage(convId, 'kissa', { reply: false })
+    const m = await lastMsg()
+    await finds('kissa', m.id)
+    const snapshot = await deleteChat(convId)
+    await vi.waitFor(async () => expect(await db.searchDocs.count()).toBe(0))
+    await restoreChat(snapshot!)
+    await finds('kissa', m.id)
+  })
+
+  it('deleting a chat makes one index call, not one per message', async () => {
+    for (const t of ['kissa', 'koira', 'lintu']) await sendUserMessage(convId, t, { reply: false })
+    await finds('lintu', (await lastMsg()).id)
+    const index = vi.spyOn(searchIndex, 'index')
+    const removeChat = vi.spyOn(searchIndex, 'removeChat')
+    await deleteChat(convId)
+    expect(removeChat).toHaveBeenCalledTimes(1)
+    expect(removeChat).toHaveBeenCalledWith(convId)
+    expect(index).not.toHaveBeenCalled()
+  })
+
+  it('a chat delete does not wait for the index', async () => {
+    vi.spyOn(searchIndex, 'removeChat').mockReturnValue(new Promise(() => {}))
+    expect(await deleteChat(convId)).not.toBeNull()
+  })
+
+  it('a failed chat delete in the index logs and asks for a pass', async () => {
+    const error = quiet()
+    await sendUserMessage(convId, 'kissa', { reply: false })
+    await finds('kissa', (await lastMsg()).id)
+    vi.spyOn(searchIndex, 'removeChat').mockRejectedValue(new Error('disk full'))
+    await deleteChat(convId)
+    await vi.waitFor(() => expect(error).toHaveBeenCalledWith('index failed', expect.any(Error)))
+    await vi.waitFor(async () => expect(await db.searchDocs.count()).toBe(0))
+  })
+
+  describe('at app start', () => {
+    it('runs a pass when one is due', async () => {
+      vi.spyOn(searchIndex, 'passDue').mockResolvedValue(true)
+      const backfill = vi.spyOn(searchIndex, 'backfill').mockResolvedValue(true)
+      await backfillAtStart(0)
+      await vi.waitFor(() => expect(backfill).toHaveBeenCalled())
+    })
+
+    it('runs a pass when a reply was cut off, even if none is due', async () => {
+      vi.spyOn(searchIndex, 'passDue').mockResolvedValue(false)
+      const backfill = vi.spyOn(searchIndex, 'backfill').mockResolvedValue(true)
+      await backfillAtStart(1)
+      await vi.waitFor(() => expect(backfill).toHaveBeenCalled())
+    })
+
+    it('runs no pass otherwise', async () => {
+      vi.spyOn(searchIndex, 'passDue').mockResolvedValue(false)
+      const backfill = vi.spyOn(searchIndex, 'backfill').mockResolvedValue(true)
+      await backfillAtStart(0)
+      await pause()
+      expect(backfill).not.toHaveBeenCalled()
+    })
+
+    it('logs and goes on if it cannot tell', async () => {
+      const error = quiet()
+      vi.spyOn(searchIndex, 'passDue').mockRejectedValue(new Error('closed'))
+      await backfillAtStart(0)
+      expect(error).toHaveBeenCalledWith('backfill failed', expect.any(Error))
+    })
+  })
+
+  it('an index error never breaks a send', async () => {
+    const error = quiet()
+    vi.spyOn(searchIndex, 'index').mockRejectedValue(new Error('disk full'))
+    vi.spyOn(searchIndex, 'backfill').mockResolvedValue(true)
+    stubFetch(() => sse(reply('koira')))
+    await sendUserMessage(convId, 'kissa', { reply: true, model: A })
+    expect((await lastMsg()).versions[0].status).toBe('done')
+    await vi.waitFor(() => expect(error).toHaveBeenCalledWith('index failed', expect.any(Error)))
+  })
+
+  it('an index error asks for a pass, which repairs the gap', async () => {
+    quiet()
+    vi.spyOn(searchIndex, 'index').mockRejectedValueOnce(new Error('disk full'))
+    await sendUserMessage(convId, 'kissa', { reply: false })
+    await finds('kissa', (await lastMsg()).id)
+  })
+
+  it('a pass fills in messages from before the index', async () => {
+    await sendUserMessage(convId, 'kissa', { reply: false })
+    const m = await lastMsg()
+    await finds('kissa', m.id)
+    await db.searchDocs.clear()
+    backfillSoon()
+    await finds('kissa', m.id)
+  })
+
+  it('a pass does not run during a reply, and goes on at its end', async () => {
+    await sendUserMessage(convId, 'kissa', { reply: false })
+    const m = await lastMsg()
+    await finds('kissa', m.id)
+    await db.searchDocs.clear()
+
+    let finish = (): void => {}
+    vi.stubGlobal('fetch', async () => {
+      await new Promise<void>((resolve) => (finish = resolve))
+      return sse(reply('koira'))
+    })
+    const backfill = vi.spyOn(searchIndex, 'backfill')
+    const run = generate(convId, { kind: 'new' }, A)
+    await vi.waitFor(() => expect(isGenerating(convId)).toBe(true))
+    backfillSoon()
+    await pause()
+    expect(backfill).not.toHaveBeenCalled()
+
+    finish()
+    await run
+    await finds('kissa', m.id)
+    expect(backfill).toHaveBeenCalled()
+  })
+
+  it('a pass asked for during a pass runs whole after it', async () => {
+    const answers = [false, true, true]
+    const backfill = vi.spyOn(searchIndex, 'backfill').mockImplementation(async () => answers.shift() ?? true)
+    backfillSoon()
+    backfillSoon()
+    backfillSoon()
+    await vi.waitFor(() => expect(answers).toEqual([]))
+    await pause()
+    expect(backfill).toHaveBeenCalledTimes(3)
+  })
+
+  it('a pass that fails stops and logs', async () => {
+    const error = quiet()
+    const backfill = vi.spyOn(searchIndex, 'backfill').mockRejectedValue(new Error('disk full'))
+    backfillSoon()
+    await vi.waitFor(() => expect(error).toHaveBeenCalledWith('backfill failed', expect.any(Error)))
+    await pause()
+    expect(backfill).toHaveBeenCalledTimes(1)
   })
 })

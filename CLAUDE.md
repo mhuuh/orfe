@@ -13,7 +13,8 @@ An OpenRouter chat PWA that runs on Mikael's Android phone. Live at https://mhuu
 - `npm run build` runs `tsc -b` + vite build, including the PWA service worker.
 
 ## Shape
-- `src/lib/` is pure logic: `storage.ts` (the only Dexie seam), `openrouter.ts` (API + SSE), `normalise.ts` (send-time message shaping), `catalog.ts` (models, stale-while-revalidate cache), `send.ts` (generate/reroll/continue/stop; one AbortController per chat), `appUpdate.ts` (applies service-worker updates only when idle), `system.ts` (system message: prompt + capability note), `context.ts` (rolling window planner, cold-cache detection by request fingerprint, `viewWindow` for the UI).
+- `src/lib/` is pure logic: `storage.ts` (the only Dexie seam), `openrouter.ts` (API + SSE), `normalise.ts` (send-time message shaping), `catalog.ts` (models, stale-while-revalidate cache), `send.ts` (generate/reroll/continue/stop; one AbortController per chat), `appUpdate.ts` (applies service-worker updates only when idle), `system.ts` (system message: prompt + capability note), `context.ts` (rolling window planner, cold-cache detection by request fingerprint, `viewWindow` for the UI), `search/` (`tokens.ts`: raw word plus Finnish and English Snowball stems; `termIndex.ts`: the `SearchIndex` term index, a Dexie seam like `storage.ts`).
+- `src/bench/` is the `?bench` page: `main.tsx` imports it only for that query string, on its own `orfe-bench` database. The service worker precache leaves it out (`globIgnores` in `vite.config.ts`).
 - `src/ui/` is React components. Writes to a Message always re-read inside a `db.transaction('rw', db.messages, …)`; never write back a live-query copy.
 - No backend. The key lives in IndexedDB and is only sent to openrouter.ai.
 

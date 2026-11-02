@@ -7,10 +7,11 @@ import { buildIndex } from './notes/index'
 import { notes, writeResult, type UndoReport } from './notes/store'
 import { mergeReasoning, streamChat, type ChatRequest, type OutMessage, type StreamEvent } from './openrouter'
 import { wholeInWindow } from './retention'
+import { searchIndex, SLICE_BUDGET_MS } from './search/termIndex'
 import { db, newId, storage } from './storage'
 import { systemFor, systemText } from './system'
 import type { ContentPart, Conversation, LastRequest, Message, Reasoning, ToolPart, Usage, Version } from './types'
-import { settled, settledVersion, STOPPED, withoutActiveVersion, withVersionAt } from './versions'
+import { editedVersion, settled, settledVersion, STOPPED, withActive, withNewVersion, withoutActiveVersion, withVersionAt } from './versions'
 
 /**
  * Tool rounds in one run. The last one gets ROUND_LIMIT instead of running, so the model answers.
@@ -94,6 +95,63 @@ export function stop(conversationId: string): void {
   controllers.get(conversationId)?.abort()
 }
 
+/** Passes still to run. Never above 2: a pass that is running, and one whole pass after it. */
+let passes = 0
+let sliceWaiting = false
+
+/** Asks for the next slice when the page is idle. A reply holds it back: `generate` calls this at its end. */
+function nextSlice(): void {
+  if (passes === 0 || sliceWaiting || isAnyGenerating()) return
+  sliceWaiting = true
+  const run = () => void backfillSlice()
+  if (typeof requestIdleCallback === 'function') requestIdleCallback(run)
+  else setTimeout(run)
+}
+
+async function backfillSlice(): Promise<void> {
+  try {
+    // A reply may have started since this slice was asked for.
+    if (!isAnyGenerating() && (await searchIndex.backfill(SLICE_BUDGET_MS))) passes--
+  } catch (e) {
+    console.error('backfill failed', e)
+    passes = 0
+  }
+  sliceWaiting = false
+  nextSlice()
+}
+
+/** Runs a pass over all messages when idle. It fills in old messages and repairs any gap the index has. */
+export function backfillSoon(): void {
+  passes = Math.min(passes + 1, 2)
+  nextSlice()
+}
+
+/**
+ * The pass at app start. Normal writes sync themselves and a failure asks for a pass, so a start
+ * needs one only if a pass is due or a reply was cut off (`recovered`: chats that lost a reply).
+ */
+export async function backfillAtStart(recovered: number): Promise<void> {
+  try {
+    if (recovered > 0 || (await searchIndex.passDue())) backfillSoon()
+  } catch (e) {
+    console.error('backfill failed', e)
+  }
+}
+
+function indexFailed(e: unknown): void {
+  console.error('index failed', e)
+  backfillSoon()
+}
+
+/**
+ * Brings the message's index row in line with what is stored. Called when a message settles, not on
+ * each stream write: tokenising a stream every 200 ms would slow the phone. Not awaited, and it never
+ * throws: a send must not wait on the index or fail with it.
+ */
+function syncIndex(messageId: string): void {
+  searchIndex.index(messageId).catch(indexFailed)
+}
+
 /** The visible OK on a step that waits. A tap for any other step does nothing. */
 export function okStep(conversationId: string, callId: string): void {
   const wait = waits.get(conversationId)
@@ -113,7 +171,7 @@ export interface ChatSnapshot {
  */
 export async function deleteChat(id: string): Promise<ChatSnapshot | null> {
   stop(id)
-  return db.transaction('rw', db.conversations, db.messages, db.notes, db.noteRevisions, async () => {
+  const snapshot = await db.transaction('rw', db.conversations, db.messages, db.notes, db.noteRevisions, async () => {
     const conversation = await storage.getConversation(id)
     if (!conversation) return null
     const messages = (await storage.listMessages(id)).map(settled)
@@ -122,6 +180,8 @@ export async function deleteChat(id: string): Promise<ChatSnapshot | null> {
     await notes.trashShelf(id, notesDeletedAt)
     return { conversation, messages, notesDeletedAt }
   })
+  if (snapshot) searchIndex.removeChat(id).catch(indexFailed)
+  return snapshot
 }
 
 export async function restoreChat(s: ChatSnapshot): Promise<void> {
@@ -130,6 +190,8 @@ export async function restoreChat(s: ChatSnapshot): Promise<void> {
     await db.messages.bulkPut(s.messages)
     await notes.restoreShelf(s.conversation.id, s.notesDeletedAt)
   })
+  // A chat can be long, so its rows come back in idle slices.
+  backfillSoon()
 }
 
 export async function recoverInterrupted(): Promise<number> {
@@ -158,12 +220,13 @@ export async function sendUserMessage(
   text: string,
   opts: { reply: boolean; model?: ModelInfo },
 ): Promise<void> {
-  await storage.appendMessage(conversationId, 'user', {
+  const m = await storage.appendMessage(conversationId, 'user', {
     id: newId(),
     content: [{ type: 'text', text }],
     status: 'done',
     createdAt: Date.now(),
   })
+  syncIndex(m.id)
   if (!opts.reply) return
   const c = await storage.getConversation(conversationId)
   if (!c) return
@@ -340,13 +403,15 @@ export interface MessageSnapshot {
 export async function deleteMessage(id: string): Promise<MessageSnapshot | null> {
   const m = await db.messages.get(id)
   if (m?.versions.some((v) => v.status === 'streaming')) await streamEnded(m.conversationId)
-  return withNotes(async () => {
+  const snapshot = await withNotes(async () => {
     const found = await db.messages.get(id)
     if (!found) return null
     const report = await undoReplyWrites(id, found.versions)
     const removed = await storage.deleteMessage(id)
     return removed ? { message: settled(removed), report } : null
   })
+  syncIndex(id)
+  return snapshot
 }
 
 export async function restoreMessage(s: MessageSnapshot): Promise<void> {
@@ -354,6 +419,7 @@ export async function restoreMessage(s: MessageSnapshot): Promise<void> {
     await storage.restoreMessage(s.message)
     await redoReplyWrites(s.message.id, s.report)
   })
+  syncIndex(s.message.id)
 }
 
 export interface VersionSnapshot {
@@ -368,7 +434,7 @@ export interface VersionSnapshot {
  * is the only version. A step that another version also holds is not this version's to undo.
  */
 export async function deleteVersion(id: string): Promise<VersionSnapshot | null> {
-  return withNotes(async () => {
+  const snapshot = await withNotes(async () => {
     const m = await db.messages.get(id)
     const cut = m && withoutActiveVersion(m)
     if (!cut) return null
@@ -380,6 +446,8 @@ export async function deleteVersion(id: string): Promise<VersionSnapshot | null>
     await db.messages.put(cut.message)
     return { messageId: id, removed: settledVersion(removed), index: cut.index, report }
   })
+  syncIndex(id)
+  return snapshot
 }
 
 export async function restoreVersion(s: VersionSnapshot): Promise<void> {
@@ -395,6 +463,19 @@ export async function restoreVersion(s: VersionSnapshot): Promise<void> {
     })
     await redoReplyWrites(s.messageId, s.report)
   })
+  syncIndex(s.messageId)
+}
+
+/** Saves edited text as a new active version. */
+export async function editMessage(id: string, text: string): Promise<void> {
+  await storage.mutateMessage(id, (m) => withNewVersion(m, editedVersion(m.versions[m.activeVersion], text)))
+  syncIndex(id)
+}
+
+/** Makes another version the active one. */
+export async function flipVersion(id: string, index: number): Promise<void> {
+  await storage.mutateMessage(id, (m) => withActive(m, index))
+  syncIndex(id)
 }
 
 export async function generate(conversationId: string, target: GenerateTarget, model: ModelInfo): Promise<void> {
@@ -413,6 +494,7 @@ export async function generate(conversationId: string, target: GenerateTarget, m
         console.error(e)
       }
     }
+    nextSlice()
   }
 }
 
@@ -641,27 +723,31 @@ async function startReply(
     messageId = target.messageId
   }
 
-  await run({
-    conversation,
-    stream: settings.streaming,
-    key: settings.key,
-    messageId,
-    version,
-    history,
-    startId: plan.startId,
-    base,
-    continues,
-    textReply,
-    tools,
-    enabled,
-    model,
-    effort,
-    cacheControl,
-    estimate,
-    initial,
-    roundReasoning,
-    controller,
-  })
+  try {
+    await run({
+      conversation,
+      stream: settings.streaming,
+      key: settings.key,
+      messageId,
+      version,
+      history,
+      startId: plan.startId,
+      base,
+      continues,
+      textReply,
+      tools,
+      enabled,
+      model,
+      effort,
+      cacheControl,
+      estimate,
+      initial,
+      roundReasoning,
+      controller,
+    })
+  } finally {
+    syncIndex(messageId)
+  }
 }
 
 /**

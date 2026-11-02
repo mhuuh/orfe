@@ -10,13 +10,14 @@ import './styles/base.css'
 import { App } from './App'
 import { DEFAULT_SETTINGS, storage } from './lib/storage'
 import { requestPersist } from './lib/backup'
-import { recoverInterrupted } from './lib/send'
+import { backfillAtStart, recoverInterrupted } from './lib/send'
 import { applyUpdateIfIdle, setUpdatePending } from './lib/appUpdate'
 import { applyTheme } from './ui/theme'
 
 async function start() {
+  let recovered = 0
   try {
-    await recoverInterrupted()
+    recovered = await recoverInterrupted()
   } catch (e) {
     console.error('recoverInterrupted failed', e)
   }
@@ -31,6 +32,7 @@ async function start() {
       <App />
     </StrictMode>,
   )
+  void backfillAtStart(recovered)
 }
 
 /**
@@ -55,6 +57,19 @@ function registerServiceWorker() {
   })
 }
 
-void start()
-registerServiceWorker()
-void requestPersist()
+// The bench page runs in place of the app: it must not touch the real database, and a normal load
+// never fetches its chunk (the service worker's precache leaves it out too).
+if (new URLSearchParams(location.search).has('bench')) {
+  const root = document.getElementById('root')!
+  // The bench is not precached, so it can fail to load offline.
+  import('./bench/bench').then(
+    ({ mountBench }) => mountBench(root),
+    () => {
+      root.textContent = "Couldn't load the bench. Check the connection and open this page again."
+    },
+  )
+} else {
+  void start()
+  registerServiceWorker()
+  void requestPersist()
+}

@@ -1,12 +1,12 @@
 import { db } from './db'
-import { isAnyGenerating } from './send'
+import { backfillSoon, isAnyGenerating } from './send'
 import { storage } from './storage'
 import type { Settings } from './types'
 
 const FORMAT = 'orfe-backup'
 const VERSION = 1
 const DAY = 86_400_000
-/** Tables that rebuild by themselves. `searchDocs` is a later table: a name with no table is harmless. */
+/** Tables that rebuild by themselves. */
 const SKIP = new Set(['cache', 'searchDocs'])
 /** Settings fields that belong to this phone. A file never sets or reads them. */
 const LOCAL_ONLY = ['key', 'lastBackupAt'] as const
@@ -66,7 +66,7 @@ export async function importBackup(file: Blob, mode: 'merge' | 'replace'): Promi
   if (isAnyGenerating()) throw new Error('Wait for the reply to finish, then restore.')
   const data = await parse(file)
   const tables = kept()
-  return db.transaction('rw', tables, async () => {
+  const result = await db.transaction('rw', tables, async () => {
     const own = await storage.getSettings()
     let added = 0
     for (const t of tables) {
@@ -94,6 +94,9 @@ export async function importBackup(file: Blob, mode: 'merge' | 'replace'): Promi
     }
     return { added }
   })
+  // The term index is not in the file. A pass rebuilds what the restore changed.
+  backfillSoon()
+  return result
 }
 
 export const backupFileName = (now = Date.now()) => `orfe-backup-${new Date(now).toISOString().slice(0, 10)}.json`
