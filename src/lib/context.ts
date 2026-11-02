@@ -54,19 +54,19 @@ export function ttlFor(modelId: string, anthropicCacheHour: boolean): number {
 }
 
 /**
- * The request as the cold check sees it. Tool content becomes the call id, so a result that shrinks
- * at render time does not read as cold. reasoning_details go, because a turn in flight sends them
- * and the same turn sends none once it is finished. Both normally cost only the tail.
+ * The request as the cold check sees it. Tool content becomes the call id, and a call loses its
+ * arguments, so a step that shrinks at render time does not read as cold. Its id and name stay, so
+ * a changed step does. reasoning_details go, because a turn in flight sends them and the same turn
+ * sends none once it is finished. All of these normally cost only the tail.
  * Other messages stay as they are, so a hash stored before tools existed still matches.
  */
 export function canonical(outgoing: OutMessage[]): OutMessage[] {
   return outgoing.map((m) => {
     if (m.role === 'tool') return { ...m, content: m.tool_call_id }
-    if (m.role === 'assistant' && m.reasoning_details !== undefined) {
-      const { reasoning_details: _dropped, ...rest } = m
-      return rest
-    }
-    return m
+    if (m.role !== 'assistant' || (m.reasoning_details === undefined && !m.tool_calls)) return m
+    const { reasoning_details: _dropped, ...rest } = m
+    if (!rest.tool_calls) return rest
+    return { ...rest, tool_calls: rest.tool_calls.map((c) => ({ ...c, function: { ...c.function, arguments: '' } })) }
   })
 }
 

@@ -154,6 +154,12 @@ export function needsOk(toolName: string, enabled: Ability[], reply: ToolPart[])
   return reply.some((p) => (p.status === 'done' || p.status === 'error') && abilityOf(p.name)?.traits.untrusted)
 }
 
+/** Whether calling this tool again only reads. A tool that nothing here knows may have changed something. */
+export function readsOnly(toolName: string): boolean {
+  const ability = abilityOf(toolName)
+  return ability !== undefined && !writesNotes(toolName) && !ability.traits.outward
+}
+
 /** What a stripped result held. Falls back to the past line, so any tool has words. */
 export function pointerWords(part: ToolPart): string {
   try {

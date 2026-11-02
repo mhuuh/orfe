@@ -2,7 +2,7 @@ import { describeStep } from './abilities/registry'
 import { windowOf } from './context'
 import { ruleFor } from './modelRules'
 import type { OutMessage, OutPart, OutToolCall } from './openrouter'
-import { keptWhole, pointerFor } from './retention'
+import { keptWhole, pointerFor, resultStays, shrinkArgs } from './retention'
 import type { ContentPart, Message, ToolPart } from './types'
 
 export interface RoundOptions {
@@ -103,20 +103,22 @@ export function sendsCall(s: StepContext): (part: ToolPart) => boolean {
   return (part) => isCall(part, o)
 }
 
-function toCall(part: ToolPart): OutToolCall {
+/** A real call: whole, or with its big strings as markers. */
+function toCall(part: ToolPart, o: RoundOptions): OutToolCall {
   // Providers need a JSON object. Bad arguments from a weak model go out as an empty one.
   const args = typeof part.args === 'object' && part.args !== null && !Array.isArray(part.args) ? part.args : {}
-  return { id: part.callId, type: 'function', function: { name: part.name, arguments: JSON.stringify(args) } }
+  const sent = !o.kept || o.kept.has(part.callId) ? args : shrinkArgs(args)
+  return { id: part.callId, type: 'function', function: { name: part.name, arguments: JSON.stringify(sent) } }
 }
 
 /**
  * The text a model reads for a real call: whole, a pointer, or the line for a call that never ended.
- * With `isCall`, this is the one rule for what a step renders as. The request, the window count and
- * the cold check all follow it, so they can't disagree.
+ * With `isCall` and `toCall`, this is the one rule for what a step renders as. The request, the
+ * window count and the cold check all follow it, so they can't disagree.
  */
 function resultText(part: ToolPart, o: RoundOptions): string {
   if (part.status === 'running') return UNFINISHED
-  return !o.kept || o.kept.has(part.callId) ? part.result : pointerFor(part)
+  return resultStays(part, o.kept) ? part.result : pointerFor(part)
 }
 
 function render(content: ContentPart[], o: RoundOptions, media: MediaOptions): OutMessage[] {
@@ -144,7 +146,7 @@ function render(content: ContentPart[], o: RoundOptions, media: MediaOptions): O
     out.push({
       role: 'assistant',
       content: parts.length > 0 ? contentOf(parts) : null,
-      tool_calls: calls.map(toCall),
+      tool_calls: calls.map((c) => toCall(c, o)),
       ...(details && details.length > 0 ? { reasoning_details: details } : {}),
     })
     for (const c of calls) {
@@ -165,7 +167,7 @@ export function stepCounter(s: StepContext, messages: Message[]): (part: ToolPar
   const o = { ...storedRounds(s), kept: keptWhole(messages) }
   return (part) => {
     if (!isCall(part, o)) return describeStep(part).past.length
-    const { name, arguments: args } = toCall(part).function
+    const { name, arguments: args } = toCall(part, o).function
     return name.length + args.length + resultText(part, o).length
   }
 }

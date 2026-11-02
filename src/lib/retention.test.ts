@@ -56,7 +56,8 @@ function chat(later: number, step: ToolPart = stepOf('c1')): Message[] {
 const ON = { modelId: 'm/a', toolsEnabled: true, plain: false }
 const opts = { ...ON, system: null, windowStartId: null, inputModalities: [], blobUrl: () => undefined }
 const toolMessage = (out: OutMessage[]): OutMessage | undefined => out.find((m) => m.role === 'tool')
-const callMessage = (out: OutMessage[]) => out.find((m) => m.role === 'assistant' && m.tool_calls !== undefined) as Extract<OutMessage, { role: 'assistant' }>
+const callMessage = (out: OutMessage[]) =>
+  out.find((m) => m.role === 'assistant' && m.tool_calls !== undefined) as Extract<OutMessage, { role: 'assistant' }>
 const lastRequest = (out: OutMessage[]) => ({ model: 'm/a', provider: null, toolsHash: null, ...fingerprint(out), at: 0 })
 
 describe('keptWhole', () => {
@@ -100,6 +101,116 @@ describe('keptWhole', () => {
   it('counts only what the request holds, so a reroll of an old turn sees the steps before it whole', () => {
     const messages = chat(3)
     expect(toolMessage(buildOutgoing(messages, { ...opts, upToId: 'm7' }))?.content).toBe(READ)
+  })
+})
+
+describe('a pinned reply', () => {
+  const pinned = (later: number): Message[] => {
+    const messages = chat(later)
+    messages[1] = { ...messages[1], pinned: true }
+    return messages
+  }
+
+  it('keeps its results whole, however old', () => {
+    expect(keptWhole(pinned(9)).has('c1')).toBe(true)
+    expect(toolMessage(buildOutgoing(pinned(9), opts))?.content).toBe(READ)
+  })
+
+  it('counts whole too', () => {
+    const size = (messages: Message[]) => estimateTokens(messages, null, 1, 0, stepCounter(ON, messages))
+    expect(size(pinned(9)) - size(chat(9))).toBe(Math.ceil((READ.length - POINTER.length) / 4))
+  })
+
+  it('keeps a repeat read at "unchanged"', () => {
+    expect(wholeInWindow(pinned(9), null, PATH, 7, 1, sendsCall(ON))).toBe(true)
+  })
+})
+
+describe('big write arguments', () => {
+  const BODY = 'b'.repeat(8000)
+  const MARKER = '(Stripped, 8000 characters.)'
+  const writeStep = (body = BODY): ToolPart =>
+    stepOf('w1', 'Wrote chat/big. It is at version 1.', {
+      name: 'notes_write',
+      args: { path: 'chat/big', description: 'Big', body, new: true },
+    })
+  const argsSent = (out: OutMessage[]): Record<string, unknown> =>
+    JSON.parse(callMessage(out).tool_calls?.[0].function.arguments as string) as Record<string, unknown>
+
+  it('an 8,000 character write strips on the same schedule as a result', () => {
+    expect(keptWhole(chat(2, writeStep())).has('w1')).toBe(true)
+    expect(argsSent(buildOutgoing(chat(2, writeStep()), opts)).body).toBe(BODY)
+    expect(keptWhole(chat(3, writeStep())).has('w1')).toBe(false)
+    expect(argsSent(buildOutgoing(chat(3, writeStep()), opts)).body).toBe(MARKER)
+  })
+
+  it('the arguments stay valid JSON, with the id, the name and the short fields', () => {
+    const out = buildOutgoing(chat(3, writeStep()), opts)
+    expect(callMessage(out).tool_calls?.[0]).toMatchObject({ id: 'w1', function: { name: 'notes_write' } })
+    expect(argsSent(out)).toEqual({ path: 'chat/big', description: 'Big', body: MARKER, new: true })
+    expect(toolMessage(out)?.content).toBe('Wrote chat/big. It is at version 1.')
+  })
+
+  it('reaches strings at any depth, and keeps the key order', () => {
+    const args = { a: 'x', list: ['y', BODY], deep: { body: BODY, n: 1 } }
+    const out = buildOutgoing(chat(3, stepOf('c1', 'ok', { name: 'notes_write', args })), opts)
+    const sent = JSON.stringify({ a: 'x', list: ['y', MARKER], deep: { body: MARKER, n: 1 } })
+    expect(callMessage(out).tool_calls?.[0].function.arguments).toBe(sent)
+  })
+
+  it('stripping reads warm', () => {
+    const before = buildOutgoing(chat(2, writeStep()), opts)
+    const after = buildOutgoing(chat(3, writeStep()), opts)
+    expect(callMessage(before).tool_calls).not.toEqual(callMessage(after).tool_calls)
+    const next = { model: 'm/a', provider: null, toolsHash: null, outgoing: after, now: 1, ttlMs: 1000 }
+    expect(isCold(lastRequest(before), next)).toBe(false)
+  })
+
+  it('the count follows what is sent', () => {
+    const messages = chat(3, writeStep())
+    const out = buildOutgoing(messages, opts)
+    const call = callMessage(out).tool_calls?.[0].function
+    const sent = (call?.name.length ?? 0) + (call?.arguments.length ?? 0) + String(toolMessage(out)?.content).length
+    expect(stepCounter(ON, messages)(writeStep())).toBe(sent)
+    expect(sent).toBeLessThan(200)
+  })
+
+  it('a pinned reply keeps its arguments whole', () => {
+    const messages = chat(3, writeStep())
+    messages[1] = { ...messages[1], pinned: true }
+    expect(keptWhole(messages).has('w1')).toBe(true)
+    expect(argsSent(buildOutgoing(messages, opts)).body).toBe(BODY)
+  })
+
+  it('a small write never strips', () => {
+    const small = writeStep('b'.repeat(STRIP_MIN_CHARS))
+    expect(keptWhole(chat(9, small)).has('w1')).toBe(true)
+    expect(argsSent(buildOutgoing(chat(9, small), opts)).body).toBe('b'.repeat(STRIP_MIN_CHARS))
+  })
+
+  it('a flat step sends no arguments, so nothing changes', () => {
+    const flat = (later: number) => buildOutgoing(chat(later, writeStep()), { ...opts, modelId: 'm/b' })
+    expect(flat(3)[1]).toEqual(flat(1)[1])
+  })
+
+  it('the turn in flight keeps its arguments whole', () => {
+    const out = renderRounds([writeStep()], { modelId: 'm/a', toolsEnabled: true })
+    expect(argsSent(out).body).toBe(BODY)
+  })
+
+  it('the stored arguments never change', () => {
+    const step = writeStep()
+    const messages = chat(3, step)
+    buildOutgoing(messages, opts)
+    stepCounter(ON, messages)(step)
+    expect((step.args as { body: string }).body).toBe(BODY)
+  })
+
+  it('a small result on a step with big arguments stays whole, and still counts as a copy', () => {
+    const read = stepOf('c1', `${HEADER}\n\n1| short`, { args: { path: PATH, note: BODY } })
+    expect(keptWhole(chat(3, read)).has('c1')).toBe(false)
+    expect(toolMessage(buildOutgoing(chat(3, read), opts))?.content).toBe(read.result)
+    expect(wholeInWindow(chat(3, read), null, PATH, 7, 1, sendsCall(ON))).toBe(true)
   })
 })
 
@@ -203,8 +314,29 @@ describe('pointerFor', () => {
     expect(pointerFor(search)).toBe("(Looked in notes for 'river': found 12 notes. Stripped. notes_search reopens it.)")
   })
 
-  it('works for a tool nothing knows', () => {
-    expect(pointerFor(stepOf('c1', BIG, { name: 'old_tool', args: {} }))).toBe('(Used old_tool. Stripped. old_tool reopens it.)')
+  it('a write says nothing about reopening, so no model repeats it', () => {
+    const part = stepOf('c1', BIG, { name: 'notes_edit', args: { path: PATH } })
+    expect(pointerFor(part)).toBe(`(Edited the note ${PATH}. Stripped.)`)
+  })
+
+  it('a tool nothing knows may have changed something, so its pointer says nothing about reopening', () => {
+    expect(pointerFor(stepOf('c1', BIG, { name: 'old_tool', args: {} }))).toBe('(Used old_tool. Stripped.)')
+  })
+
+  it('an outward tool says nothing about reopening', () => {
+    setAbilitiesForTest([
+      {
+        id: 'x',
+        title: 'X',
+        summary: 'x',
+        tools: [{ name: 'x_send', description: 'x', parameters: {} }],
+        run: async () => 'ok',
+        describe: () => ({ running: 'x', done: 'x', past: '(Sent x.)' }),
+        traits: { outward: true },
+      },
+    ])
+    expect(pointerFor(stepOf('c1', BIG, { name: 'x_send', args: {} }))).toBe('(Sent x. Stripped.)')
+    setAbilitiesForTest()
   })
 
   it('an ability can give its own words, and a failing one falls back', () => {
@@ -278,7 +410,7 @@ describe('wholeInWindow', () => {
       stepOf('c1', 'Error: no.', { status: 'error' }),
       stepOf('c1', `${version7}: x`, { status: 'stopped' }),
       stepOf('c1', `${version7}: x`, { name: 'notes_search' }),
-      stepOf('c1', `${PATH} is unchanged since your last read, see above. It is at version 7.`),
+      stepOf('c1', `${PATH} is unchanged since your last read, see above. It is at version 7. If it is no longer above, call notes_read again.`),
     ]
     for (const c of cases) expect(whole(chat(1, c))).toBe(false)
   })
@@ -415,9 +547,9 @@ describe('repeat reads in a real reply', () => {
     expect((await lastStep()).result).not.toContain(UNCHANGED)
   })
 
-  it('a copy outside the window returns in full', async () => {
+  it('a line whose copy left the window says to read again, and the next read returns the note', async () => {
     await write(LONG)
-    stub()
+    const f = stub()
     await say('one')
     await say('two')
     expect((await lastStep()).result).toContain(UNCHANGED)
@@ -425,6 +557,9 @@ describe('repeat reads in a real reply', () => {
     await storage.updateConversation(convId, { windowStartMessageId: second.id, windowStartOrder: second.order })
     // The only line left in the window says "unchanged", and that is no copy.
     await say('three')
+    const sent = bodyOf(f, 4).messages.filter((m) => m.role === 'tool')
+    expect(sent).toHaveLength(1)
+    expect(sent[0].content).toBe(`${P} is unchanged since your last read, see above. It is at version 1. If it is no longer above, call notes_read again.`)
     expect((await lastStep()).result).toContain('end')
     expect((await lastStep()).result).not.toContain(UNCHANGED)
   })
@@ -449,7 +584,7 @@ describe('repeat reads in a real reply', () => {
     const wholeCopy = vi.fn(() => true)
     const result = await notesAbility.run('notes_read', { path: P }, { ...ctx, wholeCopy })
     expect(wholeCopy).toHaveBeenCalledWith('chat/new', 2, 1)
-    expect(result).toBe('chat/new is unchanged since your last read, see above. It is at version 2.')
+    expect(result).toBe('chat/new is unchanged since your last read, see above. It is at version 2. If it is no longer above, call notes_read again.')
   })
 
   it('a Continue sends the steps of its reply whole', async () => {

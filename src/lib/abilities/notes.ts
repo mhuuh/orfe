@@ -197,7 +197,7 @@ export function readOf(part: ToolPart): { path: string; version: number; page: n
 
 function readNote(n: Note, asked: string, page: number, ctx: AbilityCtx): string {
   if (ctx.wholeCopy(shownPath(n), n.version, page)) {
-    return `${shownPath(n)} is unchanged since your last read, see above. ${atVersion(n)}`
+    return `${shownPath(n)} is unchanged since your last read, see above. ${atVersion(n)} If it is no longer above, call notes_read again.`
   }
   const moved = asked.toLowerCase() !== shownPath(n).toLowerCase()
   const header = [

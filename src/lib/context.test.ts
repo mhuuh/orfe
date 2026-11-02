@@ -143,12 +143,12 @@ describe('isCold', () => {
   })
 
   describe('with tools', () => {
-    const toolTurn = (result: string, reasoning?: unknown[]): OutMessage[] => [
+    const toolTurn = (result: string, reasoning?: unknown[], call = { id: 'c1', name: 'find', args: '{}' }): OutMessage[] => [
       { role: 'user', content: 'q' },
       {
         role: 'assistant',
         content: null,
-        tool_calls: [{ id: 'c1', type: 'function', function: { name: 'find', arguments: '{}' } }],
+        tool_calls: [{ id: call.id, type: 'function', function: { name: call.name, arguments: call.args } }],
         ...(reasoning ? { reasoning_details: reasoning } : {}),
       },
       { role: 'tool', tool_call_id: 'c1', content: result },
@@ -159,6 +159,19 @@ describe('isCold', () => {
       const stored = { ...last, ...fingerprint(toolTurn('a long result')) }
       const after: OutMessage[] = [...toolTurn('short pointer'), { role: 'user', content: 'more' }]
       expect(isCold(stored, { ...next, outgoing: after })).toBe(false)
+    })
+
+    it('changed call arguments do not change the canonical hash', () => {
+      const whole = toolTurn('r', undefined, { id: 'c1', name: 'find', args: '{"body":"long text"}' })
+      const stripped = toolTurn('r', undefined, { id: 'c1', name: 'find', args: '{"body":"(Stripped, 8000 characters.)"}' })
+      expect(fingerprint(stripped).prefixHash).toBe(fingerprint(whole).prefixHash)
+    })
+
+    it('a changed id or tool name in a call still reads cold', () => {
+      const stored = { ...last, ...fingerprint(toolTurn('r')) }
+      for (const call of [{ id: 'c9', name: 'find', args: '{}' }, { id: 'c1', name: 'other', args: '{}' }]) {
+        expect(isCold(stored, { ...next, outgoing: toolTurn('r', undefined, call) })).toBe(true)
+      }
     })
 
     it('dropped reasoning does not change the canonical hash', () => {
@@ -179,6 +192,9 @@ describe('isCold', () => {
       const out = toolTurn('r', [{ id: 'r0' }])
       canonical(out)
       expect(out).toEqual(toolTurn('r', [{ id: 'r0' }]))
+      const big = toolTurn('r', undefined, { id: 'c1', name: 'find', args: '{"a":1}' })
+      canonical(big)
+      expect(big).toEqual(toolTurn('r', undefined, { id: 'c1', name: 'find', args: '{"a":1}' }))
     })
 
     it('a different toolsHash reads cold', () => {
