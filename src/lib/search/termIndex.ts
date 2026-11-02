@@ -22,6 +22,12 @@ const PLACE = 'search-backfill'
 const BATCH = 25
 /** Under this length a token matches whole. A prefix of two letters reads half the index. */
 const MIN_PREFIX = 3
+/**
+ * The most rows one token reads, so that no word can make a search slow. Rows come in term order, so
+ * the exact word comes before longer words. A word this common in one chat says little: past this
+ * limit a search sees only part of its messages. A rare word never reaches it.
+ */
+export const MAX_ROWS_PER_TOKEN = 4000
 
 /**
  * The text of the active version, as stored. Strip and plain change what goes out, not what is
@@ -30,8 +36,14 @@ const MIN_PREFIX = 3
  */
 const textOf = (m: Message): string => versionText(m.versions[m.activeVersion])
 
+/**
+ * A term as the index holds it, filed under its chat. A search then reads only its own chat's rows.
+ * Without this it read the rows of every chat. See docs/research/live-checks-2026-11.md.
+ */
+const filed = (conversationId: string, term: string): string => `${conversationId}:${term}`
+
 function docFor(m: Message, text: string): SearchDoc | null {
-  const terms = tokens(text)
+  const terms = tokens(text).map((t) => filed(m.conversationId, t))
   return terms.length === 0 ? null : { messageId: m.id, conversationId: m.conversationId, terms, textHash: hashText(text) }
 }
 
@@ -73,9 +85,10 @@ export function createSearchIndex(store: Dexie): SearchIndex {
     })
 
   /** The ids of rows that hold this token. Keys only: much cheaper than reading the rows. */
-  const holders = (token: string): Promise<string[]> => {
+  const holders = (conversationId: string, token: string): Promise<string[]> => {
     const terms = docs.where('terms')
-    return (token.length < MIN_PREFIX ? terms.equals(token) : terms.startsWith(token)).primaryKeys()
+    const term = filed(conversationId, token)
+    return (token.length < MIN_PREFIX ? terms.equals(term) : terms.startsWith(term)).limit(MAX_ROWS_PER_TOKEN).primaryKeys()
   }
 
   return {
@@ -89,16 +102,12 @@ export function createSearchIndex(store: Dexie): SearchIndex {
     remove: (messageId) => docs.delete(messageId),
     async search(conversationId, query, limit) {
       const asked = [...new Set(wordsOf(query))].map(wordTokens)
-      if (asked.length === 0) return []
-      const inChat = new Set(await docs.where('conversationId').equals(conversationId).primaryKeys())
       const scores = new Map<string, number>()
       for (const word of asked) {
         // A word's tokens share its point, so a whole word beats a stem that only starts the same.
         const share = 1 / word.length
         for (const token of word) {
-          for (const id of new Set(await holders(token))) {
-            if (inChat.has(id)) scores.set(id, (scores.get(id) ?? 0) + share)
-          }
+          for (const id of new Set(await holders(conversationId, token))) scores.set(id, (scores.get(id) ?? 0) + share)
         }
       }
       return [...scores]

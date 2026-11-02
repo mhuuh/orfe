@@ -78,6 +78,7 @@ export interface Message {
 export interface SearchDoc {
   messageId: string
   conversationId: string
+  /** Each term starts with the chat id. See `filed` in search/termIndex.ts. */
   terms: string[]
   /** Of the indexed text. A backfill pass uses it to see that a row is out of date. */
   textHash: string

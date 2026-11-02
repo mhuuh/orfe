@@ -2,7 +2,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { db, newId, storage } from '../storage'
 import type { ContentPart, Message } from '../types'
 import { editedVersion, withActive, withNewVersion } from '../versions'
-import { createSearchIndex, searchIndex } from './termIndex'
+import { createSearchIndex, MAX_ROWS_PER_TOKEN, searchIndex } from './termIndex'
 
 let chat: string
 
@@ -115,6 +115,25 @@ describe('search', () => {
     expect(await found('kissa')).toEqual([])
   })
 
+  it('files each term under its chat, so a search reads no row of another chat', async () => {
+    await indexed('kissa')
+    const [row] = await db.searchDocs.toArray()
+    expect(row.terms.length).toBeGreaterThan(0)
+    for (const term of row.terms) expect(term.startsWith(`${chat}:`)).toBe(true)
+    const everyRow = vi.spyOn(db.table('searchDocs'), 'where')
+    await searchIndex.search(chat, 'kissa', 5)
+    expect(everyRow.mock.calls.map(([index]) => index)).not.toContain('conversationId')
+  })
+
+  it('reads a bounded number of rows for a common word, the exact word first', async () => {
+    const row = (id: string, term: string) => ({ messageId: id, conversationId: chat, terms: [`${chat}:${term}`], textHash: 'x' })
+    const common = Array.from({ length: MAX_ROWS_PER_TOKEN + 50 }, (_, i) => row(`a${i}`, 'kissalla'))
+    await db.searchDocs.bulkPut([...common, row('z-rare', 'kissa')])
+    const hits = await searchIndex.search(chat, 'kissa', MAX_ROWS_PER_TOKEN * 2)
+    expect(hits).toHaveLength(MAX_ROWS_PER_TOKEN)
+    expect(hits.map((h) => h.messageId)).toContain('z-rare')
+  })
+
   it('stops at the limit', async () => {
     await indexed('kissa yksi')
     await indexed('kissa kaksi')
@@ -202,7 +221,7 @@ describe('backfill', () => {
 
   it('takes away rows whose message is gone, at any place in the walk', async () => {
     for (let i = 0; i < 40; i++) await indexed(`kissa ${i}`)
-    for (const id of ['0', 'zzzz']) await db.searchDocs.put({ messageId: id, conversationId: chat, terms: ['haamu'], textHash: 'x' })
+    for (const id of ['0', 'zzzz']) await db.searchDocs.put({ messageId: id, conversationId: chat, terms: [`${chat}:haamu`], textHash: 'x' })
     await pass()
     expect(await found('haamu')).toEqual([])
     expect(await db.searchDocs.count()).toBe(40)
