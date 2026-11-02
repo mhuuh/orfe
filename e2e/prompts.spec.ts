@@ -1,4 +1,12 @@
 import { expect, signIn, test } from './fixtures'
+import type { Page } from '@playwright/test'
+
+/** Whether a waiting app update may reload the page now. */
+const idle = (page: Page): Promise<boolean> =>
+  page.evaluate(async () => {
+    const url = '/orfe/src/lib/appUpdate.ts'
+    return ((await import(/* @vite-ignore */ url)) as typeof import('../src/lib/appUpdate')).isIdle()
+  })
 
 test('Back with edits shows the unsaved row and keeps the sheet open', async ({ page }) => {
   await signIn(page)
@@ -49,4 +57,25 @@ test('Back with edits shows the unsaved row and keeps the sheet open', async ({ 
   await page.goBack()
   await expect(page.getByRole('dialog')).toHaveCount(0)
   expect(page.url()).toBe(chat)
+})
+
+test('an unsaved prompt edit holds back an app update', async ({ page }) => {
+  await signIn(page)
+  await page.getByRole('button', { name: /^Prompt:/ }).click()
+  await page.getByRole('button', { name: 'New prompt' }).click()
+  await page.getByLabel('Prompt name').fill('Editor')
+  await expect.poll(() => idle(page)).toBe(false)
+  await page.getByLabel('Prompt text').fill('You are a strict copy editor.')
+  await page.getByRole('button', { name: 'Save' }).click()
+  const list = page.getByRole('dialog', { name: 'Prompt' })
+  await expect(list.getByRole('button', { name: 'Edit Editor' })).toBeVisible()
+  await expect.poll(() => idle(page)).toBe(true)
+
+  await list.getByRole('button', { name: 'Edit Editor' }).click()
+  await page.getByLabel('Prompt text').fill('Half a thought')
+  await expect.poll(() => idle(page)).toBe(false)
+  await page.goBack()
+  await page.getByRole('button', { name: 'Discard' }).click()
+  await expect(list.getByRole('button', { name: 'Edit Editor' })).toBeVisible()
+  await expect.poll(() => idle(page)).toBe(true)
 })

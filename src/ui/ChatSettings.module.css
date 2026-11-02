@@ -113,6 +113,32 @@
   text-align: right;
 }
 
+/* A whole row that opens something, like "This chat's notes". */
+.link {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--s3);
+  width: 100%;
+  min-height: 44px;
+  padding: 0;
+  border: 0;
+  background: none;
+  color: var(--ink);
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+  -webkit-tap-highlight-color: transparent;
+}
+.link:focus-visible {
+  outline: 2px solid var(--ink);
+  outline-offset: 2px;
+}
+.chev {
+  font: 400 13px/20px var(--font-mono);
+  color: var(--mute);
+}
+
 /* Reset context window: a plain row, under the context fields when a start is stored. */
 .reset {
   margin-top: var(--s2);

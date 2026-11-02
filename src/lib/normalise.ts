@@ -11,15 +11,22 @@ export interface RoundOptions {
   reasoning?: unknown[][]
 }
 
-export interface BuildOptions {
+/** What decides how stored steps go out. */
+export interface StepContext {
+  modelId: string
+  /** False: every step flattens to text. */
+  toolsEnabled: boolean
+  /** A plain chat sends every step as a flat line, as with tools off. Off brings the real calls back. */
+  plain: boolean
+}
+
+export interface BuildOptions extends StepContext {
   system: string | null
   windowStartId: string | null
   /** Exclude this message and everything after it (reroll). */
   upToId?: string
   inputModalities: string[]
   blobUrl: (blobId: string) => string | undefined
-  modelId: string
-  toolsEnabled: boolean
 }
 
 type MediaOptions = Pick<BuildOptions, 'inputModalities' | 'blobUrl'>
@@ -80,6 +87,12 @@ function isCall(part: ContentPart, o: RoundOptions): part is ToolPart {
   return part.type === 'tool' && o.toolsEnabled && part.model === o.modelId && CALL_NAME.test(part.name)
 }
 
+/** How stored steps render. A plain chat or a model rule can turn real calls off. */
+function storedRounds(s: StepContext): RoundOptions {
+  const rule = ruleFor(s.modelId)
+  return { modelId: s.modelId, toolsEnabled: s.toolsEnabled && !s.plain && !rule.flattenAll && !rule.noTools }
+}
+
 function toCall(part: ToolPart): OutToolCall {
   // Providers need a JSON object. Bad arguments from a weak model go out as an empty one.
   const args = typeof part.args === 'object' && part.args !== null && !Array.isArray(part.args) ? part.args : {}
@@ -124,6 +137,20 @@ function render(content: ContentPart[], o: RoundOptions, media: MediaOptions): O
 }
 
 /**
+ * The characters a stored step adds to a request, for the window count. Follows the same test as
+ * `buildOutgoing`: a real call sends its name, arguments and result, and any other step sends one
+ * flat line.
+ */
+export function stepCounter(s: StepContext): (part: ToolPart) => number {
+  const o = storedRounds(s)
+  return (part) => {
+    if (!isCall(part, o)) return describeStep(part).past.length
+    const { name, arguments: args } = toCall(part).function
+    return name.length + args.length + part.result.length
+  }
+}
+
+/**
  * One reply as messages: text before a round goes on that round's `assistant` message, then one
  * `tool` message per call. Text after the last round is a last `assistant` message. Serves stored
  * turns and the turn in flight.
@@ -144,10 +171,7 @@ export function buildOutgoing(messages: Message[], opts: BuildOptions): OutMessa
   const selected = sorted.filter((m, i) => i >= start || m.pinned)
 
   const rule = ruleFor(opts.modelId)
-  const stored: RoundOptions = {
-    modelId: opts.modelId,
-    toolsEnabled: opts.toolsEnabled && !rule.flattenAll && !rule.noTools,
-  }
+  const stored = storedRounds(opts)
 
   // drop dividers, map parts, drop empties, merge consecutive same-role
   // A reply with real calls stays apart as a block: a merge would break its call and tool pairs.

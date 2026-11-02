@@ -1,6 +1,18 @@
-import { describe, expect, it } from 'vitest'
+import { afterEach, describe, expect, it } from 'vitest'
+import { setAbilitiesForTest, type Ability } from '../lib/abilities/registry'
 import type { Prompt } from '../lib/types'
-import { promptRows, variantParent } from './PromptSheet'
+import { promptRows, storedAbilities, variantParent } from './PromptSheet'
+
+describe('storedAbilities', () => {
+  afterEach(() => setAbilitiesForTest())
+
+  it('stores a set only when a switch is off, so a prompt with all on stays without one', () => {
+    setAbilitiesForTest([{ id: 'a' }, { id: 'b' }] as unknown as Ability[])
+    expect(storedAbilities({})).toBeUndefined()
+    expect(storedAbilities({ a: true, b: true })).toBeUndefined()
+    expect(storedAbilities({ a: false })).toEqual({ a: false })
+  })
+})
 
 const p = (id: string, name: string, parentId: string | null = null): Prompt => ({
   id,

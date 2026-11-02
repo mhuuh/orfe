@@ -3,10 +3,12 @@ import { fallbackModelInfo, type ModelInfo } from './catalog'
 import { db, newId, storage } from './storage'
 import { setAbilitiesForTest, toolsFor, type Ability } from './abilities/registry'
 import { setModelRulesForTest } from './modelRules'
-import { computeCold, deleteChat, errorText, generate, MAX_ROUNDS, patchVersion, isGenerating, recoverInterrupted, replacePromptRef, restoreChat, sendUserMessage, setAlreadyDoneForTest, setPrompt, stop } from './send'
+import { computeCold, deleteChat, deleteMessage, deleteVersion, errorText, generate, MAX_ROUNDS, okStep, patchVersion, isGenerating, recoverInterrupted, replacePromptRef, restoreChat, restoreMessage, restoreVersion, sendUserMessage, setAbility, setAlreadyDoneForTest, setPlain, setPrompt, setToolUndone, stop, undoReplyWrites } from './send'
+import { notes, YOU } from './notes/store'
 import { CAPABILITY_NOTE, systemFor } from './system'
 import { fingerprint } from './context'
 import type { ToolPart, Version } from './types'
+import { editedVersion, withActive, withNewVersion } from './versions'
 
 const enc = new TextEncoder()
 const ev = (o: unknown) => `data: ${JSON.stringify(o)}\n\n`
@@ -78,6 +80,10 @@ const bodyOf = (f: ReturnType<typeof stubFetch>, i: number) =>
     tool_choice?: string
   }
 
+/** The line a Continue adds. Spelled out, so a change to it shows here. */
+const LINE = 'Continue exactly where you stopped. Do not repeat what you already wrote. Do not repeat a tool call that already ran.'
+const USER_LINE = { role: 'user', content: LINE }
+
 let convId: string
 async function setup() {
   await storage.setSettings({ key: 'sk-test' })
@@ -87,7 +93,7 @@ async function setup() {
 const lastMsg = async () => (await storage.listMessages(convId)).at(-1)!
 
 beforeEach(async () => {
-  await Promise.all([db.conversations.clear(), db.messages.clear(), db.settings.clear(), db.cache.clear(), db.prompts.clear()])
+  await Promise.all(db.tables.map((t) => t.clear()))
   await setup()
 })
 afterEach(() => {
@@ -145,13 +151,13 @@ describe('generate', () => {
     ])
   })
 
-  it('continue: new version starts with old text and request ends with assistant prefill', async () => {
+  it('continue: new version starts with old text and the request ends on a user line', async () => {
     const f = stubFetch(() => sse(reply('Once upon')), () => sse(reply(' a time')))
     await sendUserMessage(convId, 'story', { reply: true, model: A })
     const target = await lastMsg()
     await generate(convId, { kind: 'continue', messageId: target.id }, A)
     const body = bodyOf(f, 1)
-    expect(body.messages.at(-1)).toEqual({ role: 'assistant', content: 'Once upon' })
+    expect(body.messages.slice(-2)).toEqual([{ role: 'assistant', content: 'Once upon' }, USER_LINE])
     const after = (await storage.listMessages(convId)).find((m) => m.id === target.id)!
     expect(after.versions).toHaveLength(2)
     expect(after.versions[0].content).toEqual([{ type: 'text', text: 'Once upon' }])
@@ -476,7 +482,7 @@ describe('generate', () => {
 async function coldNow(m: ModelInfo = A): Promise<boolean> {
   const c = (await storage.getConversation(convId))!
   const s = await storage.getSettings()
-  const { system, prompt } = await systemFor(c)
+  const { system, prompt } = await systemFor(c, m)
   return computeCold({
     lastRequest: c.lastRequest,
     messages: await storage.listMessages(convId),
@@ -484,6 +490,7 @@ async function coldNow(m: ModelInfo = A): Promise<boolean> {
     windowStartId: c.windowStartMessageId,
     model: m,
     toolsHash: toolsFor(c, prompt, m)?.hash ?? null,
+    plain: c.plain,
     anthropicCacheHour: s.anthropicCacheHour,
     now: Date.now(),
   })
@@ -836,14 +843,58 @@ describe('tool loop', () => {
     expect(v.content.at(-1)).toEqual({ type: 'text', text: 'Answer' })
   })
 
-  it('calls after the limit are stored as errors and the reply ends done', async () => {
+  it('a model that ignores the limit ends interrupted with a note, and its calls stay stored', async () => {
     let n = 0
     const f = vi.fn(async () => sse(asks([`c${++n}`, 'echo', '{}'])))
     vi.stubGlobal('fetch', f)
     await sendUserMessage(convId, 'go', { reply: true, model: T })
     expect(f).toHaveBeenCalledTimes(9)
+    expect(bodyOf(f as never, 8).tool_choice).toBe('auto')
     expect((await steps()).at(-1)).toMatchObject({ callId: 'c9', round: 8, status: 'error', result: 'Round limit reached. Answer now.' })
-    expect((await activeVersion()).status).toBe('done')
+    const v = await activeVersion()
+    expect(v.status).toBe('interrupted')
+    expect(v.error).toBe('The model used all its steps without an answer.')
+    expect(v.finishReason).toBe('tool_calls')
+  })
+
+  it('text in the last request is an answer, so that reply ends done', async () => {
+    let n = 0
+    vi.stubGlobal('fetch', vi.fn(async () => (++n <= MAX_ROUNDS ? sse(asks([`c${n}`, 'echo', '{}'])) : sse([ev({ choices: [{ delta: { content: 'Answer' } }] }), ...asks(['late', 'echo', '{}'])]))))
+    await sendUserMessage(convId, 'go', { reply: true, model: T })
+    const v = await activeVersion()
+    expect(v.status).toBe('done')
+    expect(v.error).toBeUndefined()
+  })
+
+  it('Continue after that starts a fresh count of rounds', async () => {
+    let n = 0
+    let ran = 0
+    setAbilitiesForTest([
+      ability(async () => {
+        ran++
+        return 'x'
+      }),
+    ])
+    const out = vi.fn(async () => sse(asks([`c${++n}`, 'echo', '{}'])))
+    vi.stubGlobal('fetch', out)
+    await sendUserMessage(convId, 'go', { reply: true, model: T })
+    const m = await lastMsg()
+    const ranBefore = ran
+    const stored = (await steps()).length
+
+    n = 100
+    const back = vi.fn(async () => (++n <= 100 + MAX_ROUNDS - 1 ? sse(asks([`c${n}`, 'echo', '{}'])) : sse(reply('Answer'))))
+    vi.stubGlobal('fetch', back)
+    await generate(convId, { kind: 'continue', messageId: m.id }, T)
+    // Seven rounds run, as in a new reply.
+    expect(ran - ranBefore).toBe(MAX_ROUNDS - 1)
+    const v = await activeVersion()
+    expect(v.status).toBe('done')
+    expect(v.error).toBeUndefined()
+    expect(v.content.at(-1)).toEqual({ type: 'text', text: 'Answer' })
+    expect((await steps()).length).toBe(stored + MAX_ROUNDS - 1)
+    // Round numbers go on, so the reasoning of each round stays apart.
+    expect((await steps()).at(-1)?.round).toBe(15)
   })
 
   it('sends reasoning_details inside the loop', async () => {
@@ -925,7 +976,7 @@ describe('tool loop', () => {
     const f = stubFetch(() => sse(asks(['c1', 'echo', '{}'])), () => sse(reply('ok')))
     await sendUserMessage(convId, 'go', { reply: true, model: T })
     const c = (await storage.getConversation(convId))!
-    const { prompt } = await systemFor(c)
+    const { prompt } = await systemFor(c, T)
     expect(c.lastRequest!.toolsHash).toBe(toolsFor(c, prompt, T)!.hash)
     const fp = fingerprint(bodyOf(f, 1).messages as never)
     expect(c.lastRequest!.prefixCount).toBe(fp.prefixCount)
@@ -1095,7 +1146,7 @@ describe('tool loop', () => {
   })
 
   it('with no abilities, a request is what it was before tools', async () => {
-    setAbilitiesForTest()
+    setAbilitiesForTest([])
     const f = stubFetch(() => sse(reply('ok')))
     await sendUserMessage(convId, 'go', { reply: true, model: T })
     expect(Object.keys(bodyOf(f, 0)).sort()).toEqual(['messages', 'model', 'session_id', 'stream'])
@@ -1246,6 +1297,216 @@ describe('tool loop: Continue', () => {
     expect((await activeVersion()).status).toBe('stopped')
   })
 
+  /** A tool that writes one chat-shelf note, like `notes_write`. */
+  const writes = (onWrite?: () => void) =>
+    ability(async (_n, _a, ctx) => {
+      await notes.write(
+        { path: 'chat/todo', conversationId: ctx.conversationId },
+        { body: `from ${ctx.callId}`, description: 'A line', isNew: true },
+        { writer: ctx.model, messageId: ctx.messageId, callId: ctx.callId },
+      )
+      onWrite?.()
+      return 'written now'
+    })
+  const todo = () => ({ path: 'chat/todo', conversationId: convId })
+
+  it('the real lookup finds a write from its revision, with path and version', async () => {
+    setAbilitiesForTest([writes()])
+    const m = await cutOff([open('c1', 0)])
+    await notes.write(
+      { path: 'shared/lists/insects', conversationId: convId },
+      { body: 'moth', description: 'A line' },
+      { writer: T.id, messageId: m.id, callId: 'c1' },
+    )
+    const f = stubFetch(() => sse(reply('Finished')))
+    await generate(convId, { kind: 'continue', messageId: m.id }, T)
+    const [part] = await steps()
+    expect(part.status).toBe('done')
+    expect(part.result).toContain('shared/lists/insects')
+    expect(part.result).toContain('version 1')
+    expect(bodyOf(f, 0).messages.find((x) => x.tool_call_id === 'c1')?.content).toBe(part.result)
+    expect(await notes.read(todo())).toBeUndefined()
+  })
+
+  it('the real lookup ignores the same id on another message', async () => {
+    setAbilitiesForTest([writes()])
+    await notes.write(
+      { path: 'shared/old', conversationId: convId },
+      { body: 'x', description: 'A line' },
+      { writer: T.id, messageId: 'other', callId: 'c1' },
+    )
+    stubFetch(() => sse(reply('Finished')))
+    const m = await cutOff([open('c1', 0)])
+    await generate(convId, { kind: 'continue', messageId: m.id }, T)
+    expect((await steps())[0]).toMatchObject({ status: 'done', result: 'written now' })
+    expect(await notes.byCall('c1', m.id)).toBeDefined()
+  })
+
+  it('an open part on a reroll is not taken for a write of an older version', async () => {
+    setAbilitiesForTest([writes()])
+    stubFetch(
+      () => sse(asks(['call_0', 'echo', '{}'])),
+      () => sse(reply('one')),
+      () => sse(asks(['call_0', 'echo', '{}'])),
+      () => sse(reply('two')),
+    )
+    await sendUserMessage(convId, 'go', { reply: true, model: T })
+    const m = await lastMsg()
+    expect(await notes.byCall('call_0', m.id)).toBeDefined()
+    await notes.remove(todo(), YOU)
+
+    // The model reuses the id on the reroll. The new part must not share it.
+    await generate(convId, { kind: 'reroll', messageId: m.id }, T)
+    const [part] = await steps()
+    expect(part.callId).not.toBe('call_0')
+    expect(await notes.read(todo())).toBeDefined()
+
+    // Now say the phone locked before that write landed: Continue must run it.
+    const row = await notes.byCall(part.callId, m.id)
+    await db.noteRevisions.delete(row!.id)
+    await notes.remove(todo(), YOU)
+    await storage.mutateMessage(m.id, (x) => ({
+      ...x,
+      versions: x.versions.map((v, i) =>
+        i === x.activeVersion ? { ...v, status: 'interrupted' as const, content: [{ ...part, status: 'running' as const, result: '' }] } : v,
+      ),
+    }))
+    stubFetch(() => sse(reply('Finished')))
+    await generate(convId, { kind: 'continue', messageId: m.id }, T)
+    expect((await steps())[0]).toMatchObject({ callId: part.callId, status: 'done', result: 'written now' })
+    expect(await notes.byCall(part.callId, m.id)).toBeDefined()
+  })
+
+  it('a reroll does not take the id of an open part on an older version', async () => {
+    const ran: string[] = []
+    setAbilitiesForTest([
+      ability(async (_n, _a, ctx) => {
+        ran.push(ctx.callId)
+        await notes.write(
+          { path: `chat/run-${ran.length}`, conversationId: ctx.conversationId },
+          { body: 'text', description: 'A line' },
+          { writer: ctx.model, messageId: ctx.messageId, callId: ctx.callId },
+        )
+        return 'written now'
+      }),
+    ])
+    const m = await cutOff([open('call_0', 0)])
+    stubFetch(() => sse(asks(['call_0', 'echo', '{}'])), () => sse(reply('two')))
+    await generate(convId, { kind: 'reroll', messageId: m.id }, T)
+    expect((await steps())[0].callId).not.toBe('call_0')
+
+    // Flip back to the first version and Continue: its open call still has to run.
+    await storage.mutateMessage(m.id, (x) => ({ ...x, activeVersion: 0 }))
+    stubFetch(() => sse(reply('Finished')))
+    await generate(convId, { kind: 'continue', messageId: m.id }, T)
+    expect(ran).toHaveLength(2)
+    expect(ran[1]).toBe('call_0')
+    expect((await steps())[0]).toMatchObject({ callId: 'call_0', status: 'done', result: 'written now' })
+  })
+
+  it('a reroll does not take the id of a write from a deleted version', async () => {
+    setAbilitiesForTest([writes()])
+    stubFetch(() => sse(asks(['call_0', 'echo', '{}'])), () => sse(reply('one')))
+    await sendUserMessage(convId, 'go', { reply: true, model: T })
+    const m = await lastMsg()
+    await storage.mutateMessage(m.id, (x) => ({ ...x, versions: x.versions.map((v) => ({ ...v, content: [] })) }))
+    await notes.remove(todo(), YOU)
+    stubFetch(() => sse(asks(['call_0', 'echo', '{}'])), () => sse(reply('two')))
+    await generate(convId, { kind: 'reroll', messageId: m.id }, T)
+    expect((await steps())[0].callId).not.toBe('call_0')
+  })
+
+  it('a write that lands just before Stop does not read as stopped', async () => {
+    setAbilitiesForTest([writes(() => stop(convId))])
+    const f = stubFetch(() => sse(asks(['c1', 'echo', '{}'])), () => sse(reply('no')))
+    await sendUserMessage(convId, 'go', { reply: true, model: T })
+    expect(f).toHaveBeenCalledTimes(1)
+    const [part] = await steps()
+    expect(part.status).toBe('done')
+    expect(part.result).toContain('chat/todo')
+    expect((await activeVersion()).status).toBe('stopped')
+  })
+
+  /** An old version with an open call whose write landed, and a reroll that undid that write. */
+  async function undoneOpenCall() {
+    const m = await cutOff([open('c1', 0)])
+    await notes.write(todo(), { body: 'first', description: 'A line' }, { writer: T.id, messageId: m.id, callId: 'c1' })
+    stubFetch(() => sse(reply('New')))
+    await generate(convId, { kind: 'reroll', messageId: m.id }, T)
+    expect(await notes.read(todo())).toBeUndefined()
+    await storage.mutateMessage(m.id, (x) => ({ ...x, activeVersion: 0 }))
+    return m
+  }
+
+  it('an undone write counts as not done, so the call runs again on Continue', async () => {
+    setAbilitiesForTest([writes()])
+    const m = await undoneOpenCall()
+    stubFetch(() => sse(reply('Finished')))
+    await generate(convId, { kind: 'continue', messageId: m.id }, T)
+    const [part] = await steps()
+    expect(part).toMatchObject({ callId: 'c1', status: 'done', result: 'written now', undone: false })
+    expect((await notes.read(todo()))?.body).toBe('from c1')
+    // The older copy of the step must not say undone about a write that now stands.
+    const [first] = (await lastMsg()).versions
+    expect(first.content[0]).toMatchObject({ callId: 'c1', undone: false })
+  })
+
+  it('Stop does not call an undone write done', async () => {
+    setAbilitiesForTest([writes()])
+    const m = await undoneOpenCall()
+    vi.stubGlobal('fetch', () => {
+      throw new Error('no request')
+    })
+    const p = generate(convId, { kind: 'continue', messageId: m.id }, T)
+    stop(convId)
+    await p
+    expect((await steps())[0]).toMatchObject({ status: 'stopped', result: 'Stopped by the user.' })
+  })
+
+  it('a call that Stop cut before its write stays stopped', async () => {
+    setAbilitiesForTest([
+      ability(async () => {
+        stop(convId)
+        return 'no write'
+      }),
+    ])
+    stubFetch(() => sse(asks(['c1', 'echo', '{}'])))
+    await sendUserMessage(convId, 'go', { reply: true, model: T })
+    expect((await steps())[0]).toMatchObject({ status: 'stopped', result: 'Stopped by the user.' })
+  })
+
+  it('Stop before a Continue starts keeps a write that had landed', async () => {
+    setAbilitiesForTest([writes()])
+    const m = await cutOff([open('c1', 0), open('c2', 0)])
+    await notes.write(
+      { path: 'shared/a', conversationId: convId },
+      { body: 'x', description: 'A line' },
+      { writer: T.id, messageId: m.id, callId: 'c1' },
+    )
+    const f = stubFetch(() => sse(reply('no')))
+    const p = generate(convId, { kind: 'continue', messageId: m.id }, T)
+    stop(convId)
+    await p
+    expect(f).not.toHaveBeenCalled()
+    expect(await steps()).toMatchObject([
+      { callId: 'c1', status: 'done' },
+      { callId: 'c2', status: 'stopped', result: 'Stopped by the user.' },
+    ])
+  })
+
+  it('a failed lookup at Stop is a readable result, not a stopped one', async () => {
+    setAlreadyDoneForTest(async () => {
+      stop(convId)
+      throw new Error('database gone')
+    })
+    stubFetch(() => sse(reply('no')))
+    const m = await cutOff([open('c1', 0)])
+    await generate(convId, { kind: 'continue', messageId: m.id }, T)
+    const [part] = await steps()
+    expect(part.status).toBe('error')
+    expect(part.result).toMatch(/^Error: /)
+  })
+
   it('a new call cannot take an id from the reply it continues', async () => {
     const f = stubFetch(() => sse(asks(['c1', 'echo', '{}'])), () => sse(reply('ok')))
     const m = await cutOff([step('c1', 0)])
@@ -1271,12 +1532,12 @@ describe('tool loop: Continue', () => {
     expect(bodyOf(f, 1).messages.filter((x) => x.tool_calls).map((x) => x.tool_calls!.map((c) => c.id))).toEqual([['c1'], ['c2'], ['c3']])
   })
 
-  it('counts the rounds of the old version toward the limit', async () => {
-    const f = stubFetch(() => sse(asks(['late', 'echo', '{}'])))
+  it('does not count the rounds of the old version toward the limit', async () => {
+    const f = stubFetch(() => sse(asks(['late', 'echo', '{}'])), () => sse(reply('Done')))
     const m = await cutOff([step('c1', MAX_ROUNDS - 1)])
     await generate(convId, { kind: 'continue', messageId: m.id }, T)
-    expect(f).toHaveBeenCalledTimes(1)
-    expect((await steps()).at(-1)).toMatchObject({ callId: 'late', status: 'error' })
+    expect(f).toHaveBeenCalledTimes(2)
+    expect((await steps()).at(-1)).toMatchObject({ callId: 'late', status: 'done', round: MAX_ROUNDS })
     expect((await activeVersion()).status).toBe('done')
   })
 
@@ -1298,11 +1559,11 @@ describe('tool loop: Continue', () => {
     expect(sent.some((x) => x.reasoning_details)).toBe(false)
   })
 
-  it('a partial text after the steps goes out as a prefill, and the new text joins it', async () => {
+  it('a partial text after the steps goes out with the line after it, and the new text joins it', async () => {
     const f = stubFetch(() => sse(reply(' more')))
     const m = await cutOff([step('c1', 0), { type: 'text', text: 'partial' }])
     await generate(convId, { kind: 'continue', messageId: m.id }, T)
-    expect(bodyOf(f, 0).messages.at(-1)).toEqual({ role: 'assistant', content: 'partial' })
+    expect(bodyOf(f, 0).messages.slice(-2)).toEqual([{ role: 'assistant', content: 'partial' }, USER_LINE])
     expect((await activeVersion()).content.at(-1)).toEqual({ type: 'text', text: 'partial more' })
   })
 
@@ -1326,7 +1587,8 @@ describe('tool loop: Continue', () => {
     await generate(convId, { kind: 'continue', messageId: m.id }, model('o/other', { tools: true }))
     const sent = bodyOf(f, 0)
     expect(sent.messages.some((x) => x.role === 'tool')).toBe(false)
-    expect(sent.messages.at(-1)).toEqual({ role: 'assistant', content: '(Used echo.)' })
+    // Flat steps end on an assistant message, so this needs the line too.
+    expect(sent.messages.slice(-2)).toEqual([{ role: 'assistant', content: '(Used echo.)' }, USER_LINE])
     expect((await steps())[0].model).toBe(T.id)
   })
 
@@ -1336,7 +1598,7 @@ describe('tool loop: Continue', () => {
     await storage.appendMessage(convId, 'assistant', doneVersion('first'))
     const m = await storage.appendMessage(convId, 'assistant', doneVersion('second'))
     await generate(convId, { kind: 'continue', messageId: m.id }, T)
-    expect(bodyOf(f, 0).messages.at(-1)).toEqual({ role: 'assistant', content: 'first\n\nsecond' })
+    expect(bodyOf(f, 0).messages.slice(-2)).toEqual([{ role: 'assistant', content: 'first\n\nsecond' }, USER_LINE])
     expect((await activeVersion()).content).toEqual([{ type: 'text', text: 'second more' }])
   })
 
@@ -1346,8 +1608,140 @@ describe('tool loop: Continue', () => {
     const m = await storage.appendMessage(convId, 'assistant', doneVersion('Once'))
     await generate(convId, { kind: 'continue', messageId: m.id }, T)
     const sent = bodyOf(f, 1).messages
-    expect(sent.map((x) => x.role)).toEqual(['system', 'user', 'assistant', 'tool'])
+    expect(sent.map((x) => x.role)).toEqual(['system', 'user', 'assistant', 'user', 'assistant', 'tool'])
     expect(sent[2].content).toBe('Once')
+    expect(sent[3]).toEqual(USER_LINE)
+  })
+
+  describe('a request never ends on an assistant message', () => {
+    const raw = (f: ReturnType<typeof stubFetch>, i: number) => (f.mock.calls[i] as unknown as [string, RequestInit])[1].body as string
+    /** The messages of request `i`, as bytes, with the closing bracket off, so a longer one starts with it. */
+    const head = (f: ReturnType<typeof stubFetch>, i: number) => JSON.stringify((JSON.parse(raw(f, i)) as { messages: unknown[] }).messages).slice(0, -1)
+    const stored = async () => JSON.stringify(await storage.listMessages(convId))
+
+    /** A finished text reply. */
+    async function textReply() {
+      await storage.appendMessage(convId, 'user', doneVersion('go'))
+      return storage.appendMessage(convId, 'assistant', { ...doneVersion('Blue'), model: T.id })
+    }
+
+    /** Sends one turn from a chat at rest, so that `lastRequest` holds a real request. */
+    async function finishedReply(...responses: Array<() => Response>) {
+      const f = stubFetch(...responses)
+      await sendUserMessage(convId, 'go', { reply: true, model: T })
+      return { f, m: await lastMsg() }
+    }
+
+    it('the line is the last message on a finished text reply, and it is never stored', async () => {
+      const f = stubFetch(() => sse(reply('.')))
+      const m = await textReply()
+      await generate(convId, { kind: 'continue', messageId: m.id }, T)
+      expect(bodyOf(f, 0).messages.map((x) => x.role)).toEqual(['system', 'user', 'assistant', 'user'])
+      expect(bodyOf(f, 0).messages.at(-1)).toEqual(USER_LINE)
+      expect(await stored()).not.toContain('Continue exactly')
+      expect((await storage.listMessages(convId)).map((x) => x.role)).toEqual(['user', 'assistant'])
+      expect((await activeVersion()).content).toEqual([{ type: 'text', text: 'Blue.' }])
+    })
+
+    it('a reply on a tool turn with text at the end gets the line too', async () => {
+      const f = stubFetch(() => sse(reply('')))
+      const m = await cutOff([step('c1', 0), { type: 'text', text: 'Saved.' }], { status: 'done' })
+      await generate(convId, { kind: 'continue', messageId: m.id }, T)
+      expect(bodyOf(f, 0).messages.map((x) => x.role)).toEqual(['system', 'user', 'assistant', 'tool', 'assistant', 'user'])
+      expect(bodyOf(f, 0).messages.at(-1)).toEqual(USER_LINE)
+    })
+
+    it('a Continue that ends on a tool message adds nothing', async () => {
+      const f = stubFetch(() => sse(reply('Answer')))
+      const m = await cutOff([step('c1', 0)])
+      await generate(convId, { kind: 'continue', messageId: m.id }, T)
+      expect(bodyOf(f, 0).messages.map((x) => x.role)).toEqual(['system', 'user', 'assistant', 'tool'])
+      expect(raw(f, 0)).not.toContain('Continue exactly')
+      expect(await coldNow(T)).toBe(false)
+    })
+
+    it('a model may answer a finished reply with nothing: that is done, and the reply stays', async () => {
+      stubFetch(() => sse([ev({ choices: [{ delta: {}, finish_reason: 'stop' }] }), usageChunk(), 'data: [DONE]\n\n']))
+      const m = await textReply()
+      await generate(convId, { kind: 'continue', messageId: m.id }, T)
+      const v = await activeVersion()
+      expect(v.status).toBe('done')
+      expect(v.error).toBeUndefined()
+      expect(v.content).toEqual([{ type: 'text', text: 'Blue' }])
+    })
+
+    it('a short word joins the reply, and that is done', async () => {
+      stubFetch(() => sse(reply(' Done.')))
+      const m = await textReply()
+      await generate(convId, { kind: 'continue', messageId: m.id }, T)
+      const v = await activeVersion()
+      expect(v.status).toBe('done')
+      expect(v.content).toEqual([{ type: 'text', text: 'Blue Done.' }])
+    })
+
+    it('the next send after a text reply is warm, and sends no line', async () => {
+      const { f, m } = await finishedReply(() => sse(reply('Blue')), () => sse(reply(' sky')), () => sse(reply('ok')))
+      await generate(convId, { kind: 'continue', messageId: m.id }, T)
+      await storage.appendMessage(convId, 'user', doneVersion('next'))
+      expect(await coldNow(T)).toBe(false)
+      await generate(convId, { kind: 'new' }, T)
+      expect(raw(f, 2)).not.toContain('Continue exactly')
+      expect(bodyOf(f, 2).messages.map((x) => x.content).slice(-3)).toEqual(['go', 'Blue sky', 'next'])
+    })
+
+    it('the next send after a tool turn is warm', async () => {
+      const { m } = await finishedReply(() => sse(asks(['c1', 'echo', '{}'])), () => sse(reply('Saved')), () => sse(reply('.')))
+      await generate(convId, { kind: 'continue', messageId: m.id }, T)
+      await storage.appendMessage(convId, 'user', doneVersion('next'))
+      expect(await coldNow(T)).toBe(false)
+    })
+
+    it('the next send after a Continue that ran tool rounds is warm', async () => {
+      const { m } = await finishedReply(
+        () => sse(reply('Blue')),
+        () => sse(asks(['c1', 'echo', '{}'])),
+        () => sse(reply('Saved')),
+      )
+      await generate(convId, { kind: 'continue', messageId: m.id }, T)
+      await storage.appendMessage(convId, 'user', doneVersion('next'))
+      expect(await coldNow(T)).toBe(false)
+    })
+
+    it('rounds stay exact prefixes, with the line in each, and base stays frozen', async () => {
+      const { f, m } = await finishedReply(
+        () => sse(reply('Blue')),
+        () => sse([ev({ choices: [{ delta: { content: ' sky' } }] }), ...asks(['c1', 'echo', '{}'])]),
+        () => sse(asks(['c2', 'echo', '{}'])),
+        () => sse(reply('Done')),
+      )
+      await generate(convId, { kind: 'continue', messageId: m.id }, T)
+      expect(f).toHaveBeenCalledTimes(4)
+      for (const i of [1, 2, 3]) expect(raw(f, i)).toContain('Continue exactly')
+      expect(head(f, 2).startsWith(head(f, 1))).toBe(true)
+      expect(head(f, 3).startsWith(head(f, 2))).toBe(true)
+      expect(bodyOf(f, 3).messages.map((x) => x.role)).toEqual(['system', 'user', 'assistant', 'user', 'assistant', 'tool', 'assistant', 'tool'])
+      // The old text stays apart in the request. In storage the new text joins it.
+      expect(bodyOf(f, 3).messages[2].content).toBe('Blue')
+      expect(bodyOf(f, 3).messages[4].content).toBe(' sky')
+      expect((await activeVersion()).content[0]).toEqual({ type: 'text', text: 'Blue sky' })
+      expect(await stored()).not.toContain('Continue exactly')
+    })
+
+    it('a Continue that ended on a tool message keeps exact prefixes with no line', async () => {
+      const f = stubFetch(() => sse(asks(['c2', 'echo', '{}'])), () => sse(reply('Done')))
+      const m = await cutOff([step('c1', 0)])
+      await generate(convId, { kind: 'continue', messageId: m.id }, T)
+      expect(head(f, 1).startsWith(head(f, 0))).toBe(true)
+      expect(raw(f, 1)).not.toContain('Continue exactly')
+    })
+
+    it('a step that flattens in this run does not leave the request on an assistant message', async () => {
+      const bad = 'bad name'
+      const f = stubFetch(() => sse(asks(['c2', bad, '{}'])), () => sse(reply('Done')))
+      const m = await cutOff([step('c1', 0)])
+      await generate(convId, { kind: 'continue', messageId: m.id }, T)
+      expect(bodyOf(f, 1).messages.at(-1)).toEqual(USER_LINE)
+    })
   })
 
   it('a reply with nothing before it still follows a user turn', async () => {
@@ -1355,6 +1749,406 @@ describe('tool loop: Continue', () => {
     const m = await storage.appendMessage(convId, 'assistant', { id: newId(), content: [step('c1', 0)], status: 'interrupted', model: T.id, createdAt: 1 })
     await generate(convId, { kind: 'continue', messageId: m.id }, T)
     expect(bodyOf(f, 0).messages.map((x) => x.role)).toEqual(['system', 'user', 'assistant', 'tool'])
+  })
+})
+
+describe('rerolls, deletes and edits', () => {
+  const ref = (path: string) => ({ path, conversationId: convId })
+  const noteArgs = (path: string) => JSON.stringify({ path, description: 'The harbour', body: 'Boats' })
+  const answer = (id: string, ...paths: string[]) => asks(...paths.map((p, i): [string, string, string] => [`${id}${i}`, 'notes_write', noteArgs(p)]))
+  const rejected = () => new Response('{"error":{"message":"busy"}}', { status: 429 })
+  const stepsOf = (v: Version) => v.content.filter((p): p is ToolPart => p.type === 'tool')
+  /** The steps of the first version of the last message. */
+  const firstSteps = async () => stepsOf((await lastMsg()).versions[0])
+
+  /** A finished reply that wrote these paths, with call ids w0, w1… */
+  async function written(...paths: string[]) {
+    stubFetch(() => sse(answer('w', ...paths)), () => sse(reply('Done')))
+    await sendUserMessage(convId, 'go', { reply: true, model: T })
+    return lastMsg()
+  }
+
+  /** Requests hang until Stop. */
+  function hangingFetch() {
+    vi.stubGlobal(
+      'fetch',
+      (_u: string, init: RequestInit) =>
+        new Promise((_res, rej) => init.signal!.addEventListener('abort', () => rej(new DOMException('aborted', 'AbortError')))),
+    )
+  }
+
+  it('a reroll undoes chat-shelf writes before the request goes out', async () => {
+    const m = await written('chat/harbour')
+    expect(await notes.read(ref('chat/harbour'))).toBeDefined()
+    let atRequest: unknown = 'not asked'
+    const f = vi.fn(async () => {
+      atRequest = await notes.read(ref('chat/harbour'))
+      return sse(reply('New'))
+    })
+    vi.stubGlobal('fetch', f)
+    await generate(convId, { kind: 'reroll', messageId: m.id }, T)
+    expect(atRequest).toBeUndefined()
+    // The index in the system text was rebuilt after the undo.
+    expect(JSON.stringify(bodyOf(f as never, 0).messages)).not.toContain('harbour')
+    expect(await firstSteps()).toMatchObject([{ callId: 'w0', undone: true }])
+    expect((await activeVersion()).content).toEqual([{ type: 'text', text: 'New' }])
+  })
+
+  it('a reroll keeps shared-shelf writes', async () => {
+    const m = await written('shared/harbour', 'chat/tide')
+    stubFetch(() => sse(reply('New')))
+    await generate(convId, { kind: 'reroll', messageId: m.id }, T)
+    expect(await notes.read(ref('shared/harbour'))).toBeDefined()
+    expect(await notes.read(ref('chat/tide'))).toBeUndefined()
+    const [shared, chat] = await firstSteps()
+    expect(shared.undone).toBeUndefined()
+    expect(chat.undone).toBe(true)
+  })
+
+  it('a failed reroll puts the writes back', async () => {
+    const m = await written('chat/harbour')
+    stubFetch(rejected)
+    await generate(convId, { kind: 'reroll', messageId: m.id }, T)
+    expect((await activeVersion()).status).toBe('error')
+    expect(await notes.read(ref('chat/harbour'))).toBeDefined()
+    expect((await firstSteps())[0].undone).toBe(false)
+  })
+
+  it('a reroll stopped with no output puts the writes back', async () => {
+    const m = await written('chat/harbour')
+    hangingFetch()
+    const p = generate(convId, { kind: 'reroll', messageId: m.id }, T)
+    await vi.waitFor(async () => expect((await lastMsg()).versions).toHaveLength(2))
+    stop(convId)
+    await p
+    expect((await activeVersion()).status).toBe('stopped')
+    expect(await notes.read(ref('chat/harbour'))).toBeDefined()
+  })
+
+  it('a reroll stopped with output keeps the undo', async () => {
+    const m = await written('chat/harbour')
+    vi.stubGlobal('fetch', async () => {
+      let sent = false
+      return new Response(
+        new ReadableStream<Uint8Array>({
+          pull(c) {
+            if (!sent) {
+              sent = true
+              c.enqueue(enc.encode(ev({ choices: [{ delta: { content: 'part' } }] })))
+              return
+            }
+            stop(convId)
+            throw new DOMException('aborted', 'AbortError')
+          },
+        }),
+        { status: 200 },
+      )
+    })
+    await generate(convId, { kind: 'reroll', messageId: m.id }, T)
+    expect((await activeVersion()).status).toBe('stopped')
+    expect(await notes.read(ref('chat/harbour'))).toBeUndefined()
+  })
+
+  it('Retry after a failed reroll undoes the writes that came back', async () => {
+    const m = await written('chat/harbour')
+    stubFetch(rejected)
+    await generate(convId, { kind: 'reroll', messageId: m.id }, T)
+    stubFetch(() => sse(reply('New')))
+    await generate(convId, { kind: 'reroll', messageId: m.id }, T)
+    expect(await notes.read(ref('chat/harbour'))).toBeUndefined()
+    expect((await firstSteps())[0].undone).toBe(true)
+  })
+
+  it('a failed reroll puts back only what it undid', async () => {
+    const m = await written('chat/harbour')
+    const rev = await notes.byCall('w0', m.id)
+    await notes.revert(rev!.id, YOU)
+    await setToolUndone(m.id, 'w0', true)
+    stubFetch(rejected)
+    await generate(convId, { kind: 'reroll', messageId: m.id }, T)
+    expect(await notes.read(ref('chat/harbour'))).toBeUndefined()
+    expect((await firstSteps())[0].undone).toBe(true)
+  })
+
+  it('a failed reroll does not bring back a version deleted meanwhile', async () => {
+    const m = await written('chat/harbour')
+    hangingFetch()
+    const p = generate(convId, { kind: 'reroll', messageId: m.id }, T)
+    await vi.waitFor(async () => expect((await lastMsg()).versions).toHaveLength(2))
+    await storage.mutateMessage(m.id, (x) => withActive(x, 0))
+    await deleteVersion(m.id)
+    stop(convId)
+    await p
+    expect(await notes.read(ref('chat/harbour'))).toBeUndefined()
+  })
+
+  it('a note changed later stays, and the part says so', async () => {
+    const m = await written('chat/harbour')
+    await notes.write(ref('chat/harbour'), { body: 'Mine now', description: 'The harbour', expectedVersion: 1 }, YOU)
+    stubFetch(() => sse(reply('New')))
+    await generate(convId, { kind: 'reroll', messageId: m.id }, T)
+    expect((await notes.read(ref('chat/harbour')))?.body).toBe('Mine now')
+    expect(await firstSteps()).toMatchObject([{ callId: 'w0', kept: true }])
+    expect((await firstSteps())[0].undone).toBeUndefined()
+  })
+
+  it('a failed reroll takes the kept mark away again', async () => {
+    const m = await written('chat/harbour')
+    await notes.write(ref('chat/harbour'), { body: 'Mine now', description: 'The harbour', expectedVersion: 1 }, YOU)
+    stubFetch(rejected)
+    await generate(convId, { kind: 'reroll', messageId: m.id }, T)
+    expect((await firstSteps())[0].kept).toBe(false)
+  })
+
+  it('undoReplyWrites reports the calls and marks each version that holds them', async () => {
+    const m = await written('chat/harbour', 'shared/tide')
+    await storage.mutateMessage(m.id, (x) => withNewVersion(x, editedVersion(x.versions[0], 'Edited')))
+    expect(await undoReplyWrites(m.id, [m.versions[0]])).toEqual({ undone: ['w0'], kept: [] })
+    const after = await lastMsg()
+    expect(after.versions.map((v) => stepsOf(v)[0].undone)).toEqual([true, true])
+  })
+
+  it('deleting a message undoes its writes; toast Undo restores them', async () => {
+    const m = await written('chat/harbour', 'shared/tide')
+    const snapshot = await deleteMessage(m.id)
+    expect((await storage.listMessages(convId)).some((x) => x.id === m.id)).toBe(false)
+    expect(await notes.read(ref('chat/harbour'))).toBeUndefined()
+    expect(await notes.read(ref('shared/tide'))).toBeDefined()
+
+    await restoreMessage(snapshot!)
+    expect((await lastMsg()).id).toBe(m.id)
+    expect(await notes.read(ref('chat/harbour'))).toBeDefined()
+    expect((await firstSteps())[0].undone).toBe(false)
+  })
+
+  it('a delete of a message that is gone does nothing', async () => {
+    expect(await deleteMessage('nope')).toBeNull()
+  })
+
+  it('Undo leaves a write undone when the note changed in between', async () => {
+    const m = await written('chat/harbour')
+    const snapshot = await deleteMessage(m.id)
+    await notes.write(ref('chat/harbour'), { body: 'A new one', description: 'The harbour', isNew: true }, YOU)
+    await restoreMessage(snapshot!)
+    expect((await firstSteps())[0].undone).toBe(true)
+    expect((await notes.read(ref('chat/harbour')))?.body).toBe('A new one')
+  })
+
+  it('deleting a message mid-stream waits, so a late write does not stay', async () => {
+    let started = false
+    setAbilitiesForTest([
+      ability(async (_n, _a, ctx) => {
+        started = true
+        await new Promise((res) => ctx.signal.addEventListener('abort', res))
+        await notes.write(ref('chat/late'), { body: 'x', description: 'A line' }, { writer: ctx.model, messageId: ctx.messageId, callId: ctx.callId })
+        return 'written now'
+      }),
+    ])
+    stubFetch(() => sse(asks(['c1', 'echo', '{}'])))
+    await sendUserMessage(convId, 'go', { reply: false })
+    const p = generate(convId, { kind: 'new' }, T)
+    await vi.waitFor(() => expect(started).toBe(true))
+    const m = await lastMsg()
+    await deleteMessage(m.id)
+    await p
+    expect(isGenerating(convId)).toBe(false)
+    expect(await notes.read(ref('chat/late'))).toBeUndefined()
+  })
+
+  it('a chat brought back after a delete does not run a stopped call on Continue', async () => {
+    const ran: string[] = []
+    let started = false
+    setAbilitiesForTest([
+      ability(async (...args) => {
+        ran.push(args[2].callId)
+        return hangs(() => (started = true))(...args)
+      }),
+    ])
+    stubFetch(() => sse(asks(['c1', 'echo', '{}'])), () => sse(reply('Finished')))
+    await sendUserMessage(convId, 'go', { reply: false })
+    const p = generate(convId, { kind: 'new' }, T)
+    await vi.waitFor(() => expect(started).toBe(true))
+    const snapshot = await deleteChat(convId)
+    await p
+    await restoreChat(snapshot!)
+    expect(await steps()).toMatchObject([{ callId: 'c1', status: 'stopped', result: 'Stopped by the user.' }])
+    await generate(convId, { kind: 'continue', messageId: (await lastMsg()).id }, T)
+    expect(ran).toEqual(['c1'])
+  })
+
+  it('deleting one version undoes only that version', async () => {
+    const m = await written('chat/one')
+    stubFetch(() => sse(answer('x', 'chat/two')), () => sse(reply('New')))
+    await generate(convId, { kind: 'reroll', messageId: m.id }, T)
+    await notes.redoCalls(['w0'], m.id)
+    await setToolUndone(m.id, 'w0', false)
+    expect(await notes.read(ref('chat/one'))).toBeDefined()
+
+    const snapshot = await deleteVersion(m.id)
+    expect((await lastMsg()).versions).toHaveLength(1)
+    expect(await notes.read(ref('chat/two'))).toBeUndefined()
+    expect(await notes.read(ref('chat/one'))).toBeDefined()
+
+    await restoreVersion(snapshot!)
+    const after = await lastMsg()
+    expect(after.versions).toHaveLength(2)
+    expect(after.activeVersion).toBe(1)
+    expect(await notes.read(ref('chat/two'))).toBeDefined()
+    expect((await steps())[0].undone).toBe(false)
+  })
+
+  it('deleting a version keeps a write that another version holds', async () => {
+    const m = await written('chat/harbour')
+    await storage.mutateMessage(m.id, (x) => withNewVersion(x, editedVersion(x.versions[0], 'Edited')))
+    await deleteVersion(m.id)
+    expect(await notes.read(ref('chat/harbour'))).toBeDefined()
+    expect((await firstSteps())[0].undone).toBeUndefined()
+  })
+
+  it('deleting the only version does nothing', async () => {
+    const m = await written('chat/harbour')
+    expect(await deleteVersion(m.id)).toBeNull()
+    expect(await notes.read(ref('chat/harbour'))).toBeDefined()
+  })
+
+  it('Edit leaves ToolParts and revisions alone', async () => {
+    const m = await written('chat/harbour')
+    const note = await notes.read(ref('chat/harbour'))
+    const before = await notes.revisions(note!.id)
+    await storage.mutateMessage(m.id, (x) => withNewVersion(x, editedVersion(x.versions[0], 'Edited')))
+    const after = await lastMsg()
+    expect(stepsOf(after.versions[1])).toEqual(stepsOf(after.versions[0]))
+    expect(await notes.revisions(note!.id)).toEqual(before)
+    expect(await notes.read(ref('chat/harbour'))).toEqual(note)
+  })
+
+  it('a reroll of an edited reply undoes the writes it kept', async () => {
+    const m = await written('chat/harbour')
+    await storage.mutateMessage(m.id, (x) => withNewVersion(x, editedVersion(x.versions[0], 'Edited')))
+    stubFetch(() => sse(reply('New')))
+    await generate(convId, { kind: 'reroll', messageId: m.id }, T)
+    expect(await notes.read(ref('chat/harbour'))).toBeUndefined()
+    expect((await firstSteps())[0].undone).toBe(true)
+  })
+
+  it('flipping to an old version shows its writes as undone', async () => {
+    const m = await written('chat/harbour')
+    stubFetch(() => sse(reply('New')))
+    await generate(convId, { kind: 'reroll', messageId: m.id }, T)
+    await storage.mutateMessage(m.id, (x) => withActive(x, 0))
+    expect(await steps()).toMatchObject([{ callId: 'w0', undone: true }])
+    // A flip alone redoes nothing. A tap on the line does.
+    expect(await notes.read(ref('chat/harbour'))).toBeUndefined()
+    expect(await notes.redoCalls(['w0'], m.id)).toEqual({ redone: ['w0'], kept: [] })
+    expect(await notes.read(ref('chat/harbour'))).toBeDefined()
+  })
+
+  it('a tap marks each version that holds the call, on a Continue copy too', async () => {
+    const m = await written('chat/harbour')
+    stubFetch(() => sse(reply('More')))
+    await generate(convId, { kind: 'continue', messageId: m.id }, T)
+    await setToolUndone(m.id, 'w0', true)
+    const after = await lastMsg()
+    expect(after.versions).toHaveLength(2)
+    expect(after.versions.map((v) => stepsOf(v)[0].undone)).toEqual([true, true])
+    await setToolUndone(m.id, 'w0', false)
+    expect((await lastMsg()).versions.map((v) => stepsOf(v)[0].undone)).toEqual([false, false])
+  })
+
+  it('a Continue from an empty try undoes the writes, as a reroll does', async () => {
+    const m = await written('chat/harbour')
+    stubFetch(rejected)
+    await generate(convId, { kind: 'reroll', messageId: m.id }, T)
+    expect(await notes.read(ref('chat/harbour'))).toBeDefined()
+
+    let atRequest: unknown = 'not asked'
+    vi.stubGlobal('fetch', async () => {
+      atRequest = await notes.read(ref('chat/harbour'))
+      return sse(reply('New'))
+    })
+    await generate(convId, { kind: 'continue', messageId: m.id }, T)
+    expect(atRequest).toBeUndefined()
+    expect(await notes.read(ref('chat/harbour'))).toBeUndefined()
+    expect((await firstSteps())[0].undone).toBe(true)
+  })
+
+  it('a Continue from an empty try that gives no output puts the writes back', async () => {
+    const m = await written('chat/harbour')
+    stubFetch(rejected)
+    await generate(convId, { kind: 'reroll', messageId: m.id }, T)
+    await generate(convId, { kind: 'continue', messageId: m.id }, T)
+    expect(await notes.read(ref('chat/harbour'))).toBeDefined()
+    expect((await firstSteps())[0].undone).toBe(false)
+  })
+
+  it('a Continue from a version with output keeps its writes', async () => {
+    const m = await written('chat/harbour')
+    stubFetch(() => sse(reply('More')))
+    await generate(convId, { kind: 'continue', messageId: m.id }, T)
+    expect(await notes.read(ref('chat/harbour'))).toBeDefined()
+    expect((await firstSteps())[0].undone).toBeUndefined()
+  })
+
+  it('an Edit that fills an empty try leaves the writes alone', async () => {
+    const m = await written('chat/harbour')
+    stubFetch(rejected)
+    await generate(convId, { kind: 'reroll', messageId: m.id }, T)
+    await storage.mutateMessage(m.id, (x) => withNewVersion(x, editedVersion(x.versions[x.activeVersion], 'Typed')))
+    expect(await notes.read(ref('chat/harbour'))).toBeDefined()
+    expect((await firstSteps())[0].undone).toBe(false)
+  })
+
+  it('a version toast Undo takes the flags of a held call from its sibling', async () => {
+    const m = await written('chat/harbour')
+    await storage.mutateMessage(m.id, (x) => withNewVersion(x, editedVersion(x.versions[0], 'Edited')))
+    const snapshot = await deleteVersion(m.id)
+    const rev = await notes.byCall('w0', m.id)
+    await notes.revert(rev!.id, YOU)
+    await setToolUndone(m.id, 'w0', true)
+
+    await restoreVersion(snapshot!)
+    const after = await lastMsg()
+    expect(after.versions.map((v) => stepsOf(v)[0].undone)).toEqual([true, true])
+  })
+
+  it('a throw after the undo puts the writes back', async () => {
+    const m = await written('chat/harbour')
+    const list = vi.spyOn(notes, 'list').mockRejectedValueOnce(new Error('database gone'))
+    await expect(generate(convId, { kind: 'reroll', messageId: m.id }, T)).rejects.toThrow('database gone')
+    list.mockRestore()
+    expect(await notes.read(ref('chat/harbour'))).toBeDefined()
+    expect((await firstSteps())[0].undone).toBe(false)
+    expect(isGenerating(convId)).toBe(false)
+  })
+
+  it('a warm reroll rebuilds the index, so it lists no note it undid', async () => {
+    const m = await written('chat/harbour')
+    await storage.updateConversation(convId, { notesIndex: 'Notes: chat/harbour' })
+    const c = (await storage.getConversation(convId))!
+    const { system, prompt } = await systemFor(c, T)
+    const toolsHash = toolsFor(c, prompt, T)?.hash ?? null
+    const sent = [{ role: 'system' as const, content: system! }, { role: 'user' as const, content: 'go' }]
+    const lastRequest = { model: T.id, provider: null, toolsHash, ...fingerprint(sent), at: Date.now() }
+    await storage.updateConversation(convId, { lastRequest })
+    const cut = (await storage.listMessages(convId)).filter((x) => x.order < m.order)
+    expect(computeCold({ lastRequest, messages: cut, system, windowStartId: null, model: T, toolsHash, plain: false, anthropicCacheHour: false, now: Date.now() })).toBe(false)
+
+    const f = stubFetch(() => sse(reply('New')))
+    await generate(convId, { kind: 'reroll', messageId: m.id }, T)
+    expect(JSON.stringify(bodyOf(f, 0).messages)).not.toContain('chat/harbour')
+  })
+
+  it("a Continue that changes model keeps each part's own model", async () => {
+    const m = await written('chat/harbour')
+    const U = model('u/tools', { tools: true })
+    stubFetch(() => sse(answer('y', 'chat/tide')), () => sse(reply('More')))
+    await generate(convId, { kind: 'continue', messageId: m.id }, U)
+    const after = await lastMsg()
+    expect(after.versions[after.activeVersion].model).toBe(U.id)
+    expect(await steps()).toMatchObject([
+      { callId: 'w0', model: T.id },
+      { callId: 'y0', model: U.id },
+    ])
   })
 })
 
@@ -1402,5 +2196,368 @@ describe('replacePromptRef', () => {
     await storage.updateConversation(convId, { systemPromptRef: 'p2' })
     expect(await replacePromptRef(convId, null, 'p1')).toBe(false)
     expect((await storage.getConversation(convId))!.systemPromptRef).toBe('p2')
+  })
+})
+
+/** The tool names in request `i`. */
+const toolNames = (f: ReturnType<typeof stubFetch>, i: number) =>
+  ((bodyOf(f, i).tools ?? []) as { function: { name: string } }[]).map((t) => t.function.name)
+
+describe('abilities in settings', () => {
+  const go = (text: string) => sendUserMessage(convId, text, { reply: true, model: T })
+
+  beforeEach(() => setAbilitiesForTest([ability(undefined, 'one'), ability(undefined, 'two')]))
+
+  it('a switch changes the tool list and the next request reads cold', async () => {
+    const f = stubFetch(() => sse(reply('ok')))
+    await go('first')
+    expect(toolNames(f, 0)).toEqual(['one', 'two'])
+    expect(await coldNow(T)).toBe(false)
+
+    await setAbility(convId, 'one', false)
+    expect((await storage.getConversation(convId))!.abilities).toEqual({ one: false })
+    expect(await coldNow(T)).toBe(true)
+
+    await go('second')
+    expect(toolNames(f, 1)).toEqual(['two'])
+    expect(await coldNow(T)).toBe(false)
+  })
+
+  it('a chat with a prompt default follows it until the chat sets its own', async () => {
+    const f = stubFetch(() => sse(reply('ok')))
+    const saved = { name: 'Chef', parentId: null, text: 'You are a chef.' }
+    const p = await storage.savePrompt({ ...saved, abilities: { one: false } })
+    await setPrompt(convId, p.id)
+    await go('first')
+    expect(toolNames(f, 0)).toEqual(['two'])
+
+    // A chat with no set of its own follows the prompt.
+    await storage.savePrompt({ ...saved, id: p.id, abilities: { two: false } })
+    await go('second')
+    expect(toolNames(f, 1)).toEqual(['one'])
+
+    // The first switch keeps what the chat followed, so the other switch reads the same.
+    await setAbility(convId, 'one', true)
+    expect((await storage.getConversation(convId))!.abilities).toEqual({ one: true, two: false })
+    await storage.savePrompt({ ...saved, id: p.id, abilities: { one: false } })
+    await go('third')
+    expect(toolNames(f, 2)).toEqual(['one'])
+  })
+
+  it('a plain chat sends no tools, no index, no instructions, no summary block and no capability note', async () => {
+    setAbilitiesForTest()
+    const f = stubFetch(() => sse(reply('ok')))
+    await notes.write(
+      { path: 'shared/harbour', conversationId: convId },
+      { body: 'Boats.', description: 'The harbour', isNew: true },
+      YOU,
+    )
+    await storage.updateConversation(convId, { capabilityNote: true, summaryBlock: 'The story so far.' })
+    await go('first')
+    expect(bodyOf(f, 0).tools).toBeDefined()
+    expect(JSON.stringify(bodyOf(f, 0).messages[0])).toContain('harbour')
+
+    const p = await storage.savePrompt({ name: 'Chef', parentId: null, text: 'You are a chef.' })
+    await setPrompt(convId, p.id)
+    await setPlain(convId, true)
+    await go('second')
+    const sent = bodyOf(f, 1)
+    expect(Object.keys(sent).sort()).toEqual(['messages', 'model', 'session_id', 'stream'])
+    expect(sent.messages).toEqual([
+      { role: 'system', content: 'You are a chef.' },
+      { role: 'user', content: 'first' },
+      { role: 'assistant', content: 'ok' },
+      { role: 'user', content: 'second' },
+    ])
+
+    // With no prompt there is no system message at all.
+    await setPrompt(convId, null)
+    await go('third')
+    expect(bodyOf(f, 2).messages[0]).toEqual({ role: 'user', content: 'first' })
+  })
+
+  it('a call that a plain chat gets anyway finds no tool', async () => {
+    const f = stubFetch(() => sse(asks(['c1', 'one', '{}'])), () => sse(reply('Fine')))
+    await setPlain(convId, true)
+    await go('first')
+    expect(bodyOf(f, 0)).not.toHaveProperty('tools')
+    expect((await steps())[0].status).toBe('error')
+    expect((await steps())[0].result).toContain('You have no tools in this chat.')
+  })
+
+  it('turning plain on flattens old steps in the request, and off brings them back as calls', async () => {
+    const f = stubFetch(() => sse(asks(['c1', 'one', '{}'])), () => sse(reply('Done')), () => sse(reply('Fine')))
+    await go('first')
+    const stored = (await steps()).map((p) => p.callId)
+
+    await setPlain(convId, true)
+    await go('second')
+    expect(bodyOf(f, 2).messages).toEqual([
+      { role: 'user', content: 'first' },
+      { role: 'assistant', content: '(Used one.)\n\nDone' },
+      { role: 'user', content: 'second' },
+    ])
+    expect((await storage.listMessages(convId)).at(1)!.versions[0].content.filter((p) => p.type === 'tool')).toHaveLength(stored.length)
+    // The next plain request extends this one.
+    expect(await coldNow(T)).toBe(false)
+
+    await setPlain(convId, false)
+    expect(await coldNow(T)).toBe(true)
+    await go('third')
+    const back = bodyOf(f, 3).messages
+    expect(back.find((m) => m.tool_calls)?.tool_calls?.[0].id).toBe('c1')
+    expect(back.find((m) => m.role === 'tool')?.tool_call_id).toBe('c1')
+    expectValid(back)
+  })
+
+  it('a tool-only reply in a plain chat leaves a valid request, and the fingerprint holds', async () => {
+    const f = stubFetch(
+      () => sse(asks(['c1', 'one', '{}'])),
+      () => sse([finish('stop'), usageChunk(), DONE]),
+      () => sse(reply('Fine')),
+      () => sse(reply('Good')),
+    )
+    await go('first')
+    await setPlain(convId, true)
+    await go('second')
+    expect(bodyOf(f, 2).messages).toEqual([
+      { role: 'user', content: 'first' },
+      { role: 'assistant', content: '(Used one.)' },
+      { role: 'user', content: 'second' },
+    ])
+    expect(await coldNow(T)).toBe(false)
+
+    await go('third')
+    expect(bodyOf(f, 3).messages.map((m) => m.content)).toEqual(['first', '(Used one.)', 'second', 'Fine', 'third'])
+    expect(await coldNow(T)).toBe(false)
+  })
+
+  it('a plain chat with big old steps sends every message: a flat line is small, so nothing trims', async () => {
+    const f = stubFetch(() => sse(reply('ok')))
+    for (let i = 0; i < 18; i++) {
+      await storage.appendMessage(convId, 'user', doneVersion(`question ${i}`))
+      await storage.appendMessage(convId, 'assistant', {
+        id: newId(),
+        content: [step(`c${i}`, 0, { name: 'one', result: 'r'.repeat(8000) }), { type: 'text', text: `answer ${i}` }],
+        status: 'done',
+        model: T.id,
+        createdAt: 1,
+      })
+    }
+    await setPlain(convId, true)
+    await go('last')
+    expect(bodyOf(f, 0).messages[0]).toEqual({ role: 'user', content: 'question 0' })
+    expect((await storage.getConversation(convId))!.windowStartMessageId).toBeNull()
+  })
+
+  it('Continue in a plain chat sends old steps flat, and a call made up in this run still gets its answer', async () => {
+    const f = stubFetch(() => sse(asks(['c2', 'made_up', '{}'])), () => sse(reply('Fine')))
+    await storage.appendMessage(convId, 'user', doneVersion('go'))
+    const m = await storage.appendMessage(convId, 'assistant', {
+      id: newId(),
+      content: [step('c1', 0, { name: 'one' }), { type: 'text', text: 'So far' }],
+      status: 'interrupted',
+      model: T.id,
+      createdAt: 1,
+    })
+    await setPlain(convId, true)
+    await generate(convId, { kind: 'continue', messageId: m.id }, T)
+    expect(bodyOf(f, 0).messages).toEqual([
+      { role: 'user', content: 'go' },
+      { role: 'assistant', content: '(Used one.)\n\nSo far' },
+      USER_LINE,
+    ])
+    const second = JSON.stringify(bodyOf(f, 1).messages)
+    expect(second).toContain('(Used one.)')
+    expect(second).toContain('(Tried made_up. It failed.)')
+    expect(bodyOf(f, 1).messages.at(-1)).toEqual(USER_LINE)
+  })
+
+  it('turning plain off brings back the switches as they were, and the next request reads cold', async () => {
+    const f = stubFetch(() => sse(reply('ok')))
+    await setAbility(convId, 'one', false)
+    await go('first')
+    expect(toolNames(f, 0)).toEqual(['two'])
+
+    await setPlain(convId, true)
+    expect(await coldNow(T)).toBe(true)
+    await go('second')
+    expect(bodyOf(f, 1)).not.toHaveProperty('tools')
+    expect(bodyOf(f, 1).messages[0].role).toBe('user')
+    expect((await storage.getConversation(convId))!.abilities).toEqual({ one: false })
+
+    await setPlain(convId, false)
+    expect(await coldNow(T)).toBe(true)
+    await go('third')
+    expect(toolNames(f, 2)).toEqual(['two'])
+    expect(bodyOf(f, 2).messages[0]).toEqual({ role: 'system', content: CAPABILITY_NOTE })
+  })
+})
+
+describe('trust gate', () => {
+  /** The tools that really ran, in order. */
+  let ran: string[]
+  const tool = (name: string, extra: Partial<Ability>): Ability => ({
+    ...ability(async () => {
+      ran.push(name)
+      return `${name} ran`
+    }, name),
+    ...extra,
+  })
+  const go = () => sendUserMessage(convId, 'go', { reply: true, model: T })
+  const waitsFor = (callId: string) => vi.waitFor(async () => expect((await activeVersion()).waitingFor).toBe(callId))
+  /** A reply that a run left behind, with `content` as its steps. */
+  async function leftBehind(content: Version['content'], extra: Partial<Version> = {}) {
+    await storage.appendMessage(convId, 'user', doneVersion('go'))
+    return storage.appendMessage(convId, 'assistant', { id: newId(), content, status: 'interrupted', model: T.id, createdAt: 1, ...extra })
+  }
+  const webThenOpenSave = () => [step('c1', 0, { name: 'web' }), step('c2', 0, { name: 'save', status: 'running', result: '' })]
+
+  beforeEach(() => {
+    ran = []
+    setAbilitiesForTest([
+      tool('web', { traits: { untrusted: true } }),
+      tool('save', { writes: ['save'] }),
+      tool('post', { traits: { outward: true } }),
+      tool('look', {}),
+    ])
+  })
+
+  it('after untrusted content a note write waits for OK', async () => {
+    const f = stubFetch(() => sse(asks(['c1', 'web', '{}'], ['c2', 'save', '{}'])), () => sse(reply('Done')))
+    const running = go()
+    await waitsFor('c2')
+    expect(ran).toEqual(['web'])
+    expect((await steps())[1].status).toBe('running')
+    expect((await activeVersion()).status).toBe('streaming')
+    expect(f).toHaveBeenCalledTimes(1)
+
+    okStep(convId, 'c2')
+    await running
+    expect(ran).toEqual(['web', 'save'])
+    const v = await activeVersion()
+    expect(v.waitingFor).toBeUndefined()
+    expect(v.status).toBe('done')
+    expect(f).toHaveBeenCalledTimes(2)
+  })
+
+  it('an outward tool waits too, a later round counts, and a plain read does not wait', async () => {
+    stubFetch(
+      () => sse(asks(['c1', 'web', '{}'])),
+      () => sse(asks(['c2', 'look', '{}'], ['c3', 'post', '{}'])),
+      () => sse(reply('Done')),
+    )
+    const running = go()
+    await waitsFor('c3')
+    expect(ran).toEqual(['web', 'look'])
+    okStep(convId, 'c3')
+    await running
+    expect(ran).toEqual(['web', 'look', 'post'])
+  })
+
+  it('a write whose ability is switched off does not ask: it fails at once', async () => {
+    const f = stubFetch(() => sse(reply('Fine')))
+    await setAbility(convId, 'save', false)
+    const m = await leftBehind(webThenOpenSave())
+    await generate(convId, { kind: 'continue', messageId: m.id }, T)
+    expect(ran).toEqual([])
+    expect((await steps())[1]).toMatchObject({ status: 'error' })
+    expect((await steps())[1].result).toContain('no tool called "save"')
+    expect(f).toHaveBeenCalledTimes(1)
+  })
+
+  it('a write before the untrusted content does not wait, and a new reply starts clean', async () => {
+    stubFetch(
+      () => sse(asks(['c1', 'save', '{}'], ['c2', 'web', '{}'])),
+      () => sse(reply('Done')),
+      () => sse(asks(['c3', 'save', '{}'])),
+      () => sse(reply('Done')),
+    )
+    await go()
+    expect(ran).toEqual(['save', 'web'])
+    await go()
+    expect(ran).toEqual(['save', 'web', 'save'])
+  })
+
+  it('an untrusted call that was stopped gave nothing to read, so nothing waits', async () => {
+    stubFetch(() => sse(reply('Done')))
+    const m = await leftBehind([
+      step('c1', 0, { name: 'web', status: 'stopped', result: 'Stopped by the user.' }),
+      step('c2', 0, { name: 'save', status: 'running', result: '' }),
+    ])
+    await generate(convId, { kind: 'continue', messageId: m.id }, T)
+    expect(ran).toEqual(['save'])
+  })
+
+  it('an OK for another step does nothing', async () => {
+    stubFetch(() => sse(asks(['c1', 'web', '{}'], ['c2', 'save', '{}'])), () => sse(reply('Done')))
+    const running = go()
+    await waitsFor('c2')
+    okStep(convId, 'other')
+    okStep('other chat', 'c2')
+    await new Promise((r) => setTimeout(r, 20))
+    expect(ran).toEqual(['web'])
+    okStep(convId, 'c2')
+    await running
+  })
+
+  it('Stop ends the wait: the step never runs and the next request is valid', async () => {
+    const f = stubFetch(
+      () => sse(asks(['c1', 'web', '{}'], ['c2', 'save', '{}'], ['c3', 'save', '{}'])),
+      () => sse(reply('Fine')),
+    )
+    const running = go()
+    await waitsFor('c2')
+    stop(convId)
+    await running
+    expect(ran).toEqual(['web'])
+    expect(isGenerating(convId)).toBe(false)
+    const v = await activeVersion()
+    expect(v.status).toBe('stopped')
+    expect(v.waitingFor).toBeUndefined()
+    expect((await steps()).map((p) => p.status)).toEqual(['done', 'stopped', 'stopped'])
+
+    await sendUserMessage(convId, 'next', { reply: true, model: T })
+    expectValid(bodyOf(f, 1).messages)
+  })
+
+  it('deleting the chat during the wait ends the reply', async () => {
+    stubFetch(() => sse(asks(['c1', 'web', '{}'], ['c2', 'save', '{}'])))
+    const running = go()
+    await waitsFor('c2')
+    await deleteChat(convId)
+    await running
+    expect(ran).toEqual(['web'])
+    expect(isGenerating(convId)).toBe(false)
+  })
+
+  it('a lock during the wait is not a dead end: Continue asks again', async () => {
+    const f = stubFetch(() => sse(reply('Done')))
+    // What a lost run leaves. Startup then marks it interrupted.
+    const m = await leftBehind(webThenOpenSave(), { status: 'streaming', waitingFor: 'c2' })
+    await recoverInterrupted()
+    expect((await activeVersion()).status).toBe('interrupted')
+
+    const again = generate(convId, { kind: 'continue', messageId: m.id }, T)
+    await vi.waitFor(async () => {
+      const v = await activeVersion()
+      expect(v.status).toBe('streaming')
+      expect(v.waitingFor).toBe('c2')
+    })
+    expect(ran).toEqual([])
+    expect(f).not.toHaveBeenCalled()
+    okStep(convId, 'c2')
+    await again
+    expect(ran).toEqual(['save'])
+    expect((await activeVersion()).status).toBe('done')
+  })
+
+  it('Continue does not ask again for a write that landed before the lock', async () => {
+    setAlreadyDoneForTest(async () => 'stored result')
+    stubFetch(() => sse(reply('Done')))
+    const m = await leftBehind(webThenOpenSave())
+    await generate(convId, { kind: 'continue', messageId: m.id }, T)
+    expect(ran).toEqual([])
+    expect((await steps())[1]).toMatchObject({ status: 'done', result: 'stored result' })
   })
 })

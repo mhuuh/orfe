@@ -1,0 +1,294 @@
+/* The mockup's note phone: a full page on bg, margins 20. */
+.page {
+  min-height: 100%;
+  display: flex;
+  flex-direction: column;
+}
+.head {
+  position: sticky;
+  top: 0;
+  z-index: 1;
+  flex: none;
+  display: flex;
+  align-items: center;
+  gap: var(--s3);
+  padding: var(--s4) 20px var(--s3);
+  background: var(--bg);
+}
+.back,
+.more {
+  position: relative;
+  flex: none;
+  padding: 0;
+  border: 0;
+  background: none;
+  font: inherit;
+  cursor: pointer;
+  -webkit-tap-highlight-color: transparent;
+}
+/* 44 px hit areas around the small marks of the mockup, whatever the size of the glyph. */
+.back::after,
+.more::after {
+  content: '';
+  position: absolute;
+  top: 50%;
+  left: 50%;
+  width: 44px;
+  height: 44px;
+  transform: translate(-50%, -50%);
+}
+.back {
+  color: var(--ink);
+}
+.more {
+  margin-left: auto;
+  font: 400 11px/16px var(--font-mono);
+  color: var(--mute);
+}
+.crumb {
+  min-width: 0;
+  font: 400 11px/16px var(--font-mono);
+  color: var(--mute);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.content {
+  flex: 1;
+  min-width: 0;
+  padding: 0 20px var(--s7);
+}
+.title {
+  margin: 0;
+  font-size: 22px;
+  line-height: 32px;
+  font-weight: 500;
+  overflow-wrap: anywhere;
+}
+.meta {
+  margin-top: var(--s1);
+  font: 400 11px/16px var(--font-mono);
+  color: var(--mute);
+}
+.actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--s2);
+  margin: var(--s3) 0 var(--s4);
+}
+.chip {
+  position: relative;
+  flex: none;
+  display: inline-flex;
+  align-items: center;
+  gap: var(--s2);
+  height: 28px;
+  padding: 0 var(--s3);
+  border: 0;
+  border-radius: 999px;
+  background: var(--surface);
+  color: var(--mute);
+  font: 400 11px/16px var(--font-mono);
+  cursor: pointer;
+  -webkit-tap-highlight-color: transparent;
+}
+.chip::after {
+  content: '';
+  position: absolute;
+  inset: -8px -4px;
+}
+.chipOn {
+  color: var(--ink);
+}
+
+.notice {
+  margin: 0 0 var(--s4);
+  padding: var(--s2) var(--s3);
+  border-radius: var(--radius);
+  background: var(--surface);
+  font-size: 13px;
+  line-height: 20px;
+  color: var(--mute);
+}
+.ask {
+  margin: 0;
+}
+.problem {
+  margin: var(--s2) 0 0;
+  color: var(--ink);
+  overflow-wrap: anywhere;
+}
+.field + .ask {
+  margin-top: var(--s2);
+}
+.buttons {
+  display: flex;
+  gap: var(--s2);
+  margin: var(--s3) 0 var(--s1);
+}
+.btn,
+.go {
+  position: relative;
+  display: inline-flex;
+  align-items: center;
+  height: 32px;
+  padding: 0 var(--s3);
+  border: 0;
+  border-radius: 999px;
+  background: var(--bg);
+  color: var(--ink);
+  font: 400 13px/20px var(--font-ui);
+  cursor: pointer;
+  -webkit-tap-highlight-color: transparent;
+}
+.go {
+  background: var(--ink);
+  color: var(--bg);
+}
+.go:disabled {
+  background: var(--bg);
+  color: var(--faint);
+  cursor: default;
+}
+.btn::after,
+.go::after {
+  content: '';
+  position: absolute;
+  inset: -6px -4px;
+}
+.field {
+  display: block;
+  width: 100%;
+  min-height: 40px;
+  margin: var(--s1) 0 0;
+  padding: 0 var(--s3);
+  border: 0;
+  border-radius: 999px;
+  background: var(--bg);
+  color: var(--ink);
+  caret-color: var(--ink);
+  font: 400 11px/16px var(--font-mono);
+  -webkit-appearance: none;
+  appearance: none;
+}
+.field:focus {
+  outline: none;
+  box-shadow: inset 0 0 0 1px var(--mute);
+}
+
+/* The model's book voice, as in a reply. Headings and lists follow the mockup. */
+.body {
+  composes: prose from './AssistantMessage.module.css';
+}
+.body.body :global(:is(h1, h2, h3, h4, h5, h6)) {
+  margin: var(--s4) 0 var(--s1);
+  font: 500 15px/22px var(--font-ui);
+  color: var(--ink);
+}
+.body.body > :first-child {
+  margin-top: 0;
+}
+.body.body :global(:is(ul, ol)) {
+  padding-left: var(--s4);
+}
+.body.body :global(li) + :global(li) {
+  margin-top: 0;
+}
+.link {
+  padding: 0;
+  border: 0;
+  background: none;
+  color: var(--ink);
+  font: inherit;
+  text-decoration: underline;
+  text-decoration-thickness: 1px;
+  text-decoration-color: var(--mute);
+  text-underline-offset: 3px;
+  cursor: pointer;
+  -webkit-tap-highlight-color: transparent;
+}
+
+/* Editor: built like the prompt editor, with the body in the book voice. The doubled classes
+   beat the composed ones, whose file can load after this one. */
+.editor {
+  display: flex;
+  flex-direction: column;
+  gap: var(--s3);
+  padding: 0 20px var(--s4);
+}
+.lineField {
+  composes: nameField from './PromptSheet.module.css';
+}
+.textField {
+  composes: textField from './PromptSheet.module.css';
+}
+.textField.textField {
+  min-height: calc(8 * 26px + 2 * var(--s3));
+  font: 400 17px/26px var(--font-prose);
+  font-optical-sizing: auto;
+  color: var(--prose);
+}
+.warn {
+  composes: notice;
+}
+.warn.warn {
+  margin: 0;
+  color: var(--ink);
+}
+.bar {
+  composes: bar from './PromptSheet.module.css';
+}
+.bar.bar {
+  background: var(--bg);
+}
+.barAsk {
+  composes: ask from './PromptSheet.module.css';
+}
+.save {
+  composes: save from './PromptSheet.module.css';
+}
+.quiet {
+  composes: quiet from './PromptSheet.module.css';
+}
+
+/* History */
+.history {
+  margin: var(--s3) 0 0;
+  padding: 0;
+  list-style: none;
+  border-top: 1px solid var(--line);
+}
+.rev {
+  display: flex;
+  align-items: center;
+  gap: var(--s3);
+  min-height: 60px;
+  padding: var(--s2) 0;
+  border-bottom: 1px solid var(--line);
+}
+.revText {
+  flex: 1;
+  min-width: 0;
+}
+.revMeta {
+  font-size: 13px;
+  line-height: 20px;
+  color: var(--mute);
+  overflow-wrap: anywhere;
+}
+.current {
+  flex: none;
+  font: 400 11px/16px var(--font-mono);
+  color: var(--mute);
+}
+
+.back:focus-visible,
+.more:focus-visible,
+.chip:focus-visible,
+.btn:focus-visible,
+.go:focus-visible,
+.link:focus-visible {
+  outline: 2px solid var(--ink);
+  outline-offset: 2px;
+}

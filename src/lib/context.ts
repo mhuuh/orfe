@@ -1,20 +1,19 @@
 import { hashText } from './hash'
 import type { OutMessage } from './openrouter'
-import type { ContextSetting, LastRequest, Message } from './types'
+import type { ContextSetting, LastRequest, Message, ToolPart } from './types'
 
-/**
- * Characters of a message's active version that count towards the estimate. A tool step counts its
- * name, JSON arguments and result. Media and dividers count 0.
- */
-function messageChars(m: Message): number {
+/** Characters a stored step adds to the request. `stepCounter` in normalise.ts gives one. */
+export type StepChars = (part: ToolPart) => number
+
+/** Characters of a message's active version that count towards the estimate. Media and dividers count 0. */
+function messageChars(m: Message, stepChars: StepChars): number {
   if (m.role === 'divider') return 0
   const version = m.versions[m.activeVersion]
   if (!version) return 0
   let chars = 0
   for (const p of version.content) {
     if (p.type === 'text') chars += p.text.length
-    // JSON.stringify gives undefined when the arguments are missing.
-    if (p.type === 'tool') chars += p.name.length + (JSON.stringify(p.args)?.length ?? 0) + p.result.length
+    if (p.type === 'tool') chars += stepChars(p)
   }
   return chars
 }
@@ -24,13 +23,13 @@ function charsToTokens(chars: number, ratio: number): number {
 }
 
 /**
- * Token estimate: active-version text characters ÷ 4, plus the system text and `overheadChars`
- * (the tools JSON), times `ratio` (the correction from the last real `usage.prompt_tokens`),
- * rounded up.
+ * Token estimate: active-version characters ÷ 4, with each step as it goes out, plus the system
+ * text and `overheadChars` (the tools JSON), times `ratio` (the correction from the last real
+ * `usage.prompt_tokens`), rounded up.
  */
-export function estimateTokens(messages: Message[], system: string | null, ratio: number, overheadChars: number): number {
+export function estimateTokens(messages: Message[], system: string | null, ratio: number, overheadChars: number, stepChars: StepChars): number {
   let chars = (system?.length ?? 0) + overheadChars
-  for (const m of messages) chars += messageChars(m)
+  for (const m of messages) chars += messageChars(m, stepChars)
   return charsToTokens(chars, ratio)
 }
 
@@ -85,9 +84,10 @@ export function fingerprint(outgoing: OutMessage[]): { prefixHash: string; prefi
  * `provider` on both sides is the user's provider preference (null until Plan 4), never the
  * provider that served the reply.
  *
- * Known trade-off: a continue sends the partial reply as an assistant prefill. The next request
- * carries the finished reply in that slot instead, so it does not extend the old one and reads as
- * cold. Accepted: continues are rare, and a cold reading at worst allows an early trim.
+ * A Continue that adds its line (see `CONTINUE_TURN`) records only the history before the reply,
+ * because the next request repeats no more than that. So that request reads warm. The exception
+ * is a text reply that merges with an assistant reply before it: the merged message is new, so that
+ * request reads cold, as it did before the line.
  */
 export function isCold(
   last: LastRequest | null,
@@ -122,6 +122,7 @@ export interface PlanInput {
   soft: number
   /** Characters sent with every request outside the messages: the tools JSON. */
   overheadChars: number
+  stepChars: StepChars
 }
 
 export interface Plan {
@@ -189,7 +190,7 @@ export function planWindow(input: PlanInput): Plan {
 
   // Size as a running sum over window + pinned-before-window.
   const weight = (m: Message): number =>
-    m.role === 'divider' ? 0 : setting.mode === 'tokens' ? messageChars(m) : 1
+    m.role === 'divider' ? 0 : setting.mode === 'tokens' ? messageChars(m, input.stepChars) : 1
   let sum = setting.mode === 'tokens' ? (input.system?.length ?? 0) + input.overheadChars : 0
   for (let i = 0; i < n; i++) if (i >= idx || sorted[i].pinned) sum += weight(sorted[i])
   const sizeOf = (s: number): number => (setting.mode === 'tokens' ? charsToTokens(s, ratio) : s)

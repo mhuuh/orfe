@@ -4,6 +4,69 @@
   height: 100%;
   padding: var(--s4) var(--s2) var(--s2);
 }
+/* Both tabs share the head and the segment, so neither moves on a switch. */
+.head {
+  flex: none;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--s3);
+  padding: 0 var(--s3) var(--s3);
+}
+.title {
+  font-weight: 500;
+}
+.done {
+  position: relative;
+  padding: 0;
+  border: 0;
+  background: none;
+  color: var(--mute);
+  font: 400 11px/16px var(--font-mono);
+  cursor: pointer;
+  -webkit-tap-highlight-color: transparent;
+}
+.done::after {
+  content: '';
+  position: absolute;
+  inset: -14px -12px;
+}
+/* The selected pill always has the panel's colour, as if cut out of the track. */
+.seg {
+  flex: none;
+  display: flex;
+  gap: var(--s1);
+  margin: var(--s1) var(--s3) var(--s4);
+  padding: var(--s1);
+  border-radius: 999px;
+  background: var(--bg);
+  --seg-on: var(--surface);
+}
+.seg.onBg {
+  background: var(--surface);
+  --seg-on: var(--bg);
+}
+.tab {
+  position: relative;
+  flex: 1;
+  padding: var(--s1) 0;
+  border: 0;
+  border-radius: 999px;
+  background: none;
+  color: var(--mute);
+  font: 400 13px/20px var(--font-ui);
+  cursor: pointer;
+  -webkit-tap-highlight-color: transparent;
+}
+.tab::after {
+  content: '';
+  position: absolute;
+  inset: -8px 0;
+}
+.tab.on {
+  background: var(--seg-on);
+  color: var(--ink);
+}
 .new,
 .row,
 .nudge,
@@ -66,6 +129,11 @@
   background: var(--bg);
   color: var(--ink);
   font: inherit;
+}
+.done:focus-visible,
+.tab:focus-visible {
+  outline: 2px solid var(--ink);
+  outline-offset: 2px;
 }
 .rename:focus-visible,
 .new:focus-visible,

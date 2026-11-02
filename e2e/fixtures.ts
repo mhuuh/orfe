@@ -15,6 +15,8 @@ export const SLOW = 'SLOWSTREAM'
 export const PARTIAL = 'Partial words so far'
 /** The last user message `TOOLCALL:<name>:<json>` makes the mock ask for that call. The next request gets text. */
 export const TOOLCALL = 'TOOLCALL'
+/** `TWOCALLS:<first>:<second>` makes the mock ask for both in one round, with no arguments. */
+export const TWOCALLS = 'TWOCALLS'
 
 export interface ChatBody {
   model: string
@@ -37,10 +39,16 @@ const usage = { choices: [], usage: { prompt_tokens: 10, completion_tokens: 5, c
 function toolCallChunks(body: ChatBody, n: number): unknown[] | null {
   const last = body.messages[body.messages.length - 1]
   if (last?.role !== 'user' || typeof last.content !== 'string') return null
+  const asks = (...calls: { name: string; arguments: string }[]) => [
+    { choices: [{ delta: { tool_calls: calls.map((c, i) => ({ index: i, id: i === 0 ? `call_${n}` : `call_${n}_${i}`, function: c })) } }] },
+    { choices: [{ delta: {}, finish_reason: 'tool_calls' }] },
+    usage,
+  ]
+  const two = new RegExp(`${TWOCALLS}:([^:]+):(.+)`).exec(last.content)
+  if (two) return asks({ name: two[1], arguments: '{}' }, { name: two[2], arguments: '{}' })
   const m = new RegExp(`${TOOLCALL}:([^:]+):(.*)`, 's').exec(last.content)
   if (!m) return null
-  const call = { index: 0, id: `call_${n}`, function: { name: m[1], arguments: m[2] } }
-  return [{ choices: [{ delta: { tool_calls: [call] } }] }, { choices: [{ delta: {}, finish_reason: 'tool_calls' }] }, usage]
+  return asks({ name: m[1], arguments: m[2] })
 }
 
 const cors ={ 'access-control-allow-origin': '*', 'access-control-allow-headers': '*', 'access-control-allow-methods': '*' }

@@ -22,6 +22,22 @@
   gap: var(--s3);
   min-height: 40px;
 }
+.name,
+.hint {
+  display: block;
+}
+.hint {
+  font: 400 13px/20px var(--font-ui);
+  color: var(--mute);
+}
+.hinted {
+  padding: var(--s1) 0;
+}
+/* The value stays. It just can't change now. */
+.greyed,
+.greyed .hint {
+  color: var(--faint);
+}
 .mono {
   font: 400 13px/20px var(--font-mono);
   overflow-wrap: anywhere;
@@ -80,6 +96,12 @@
 .switch[aria-checked='true'] .knob {
   transform: translateX(24px);
   background: var(--ink);
+}
+.switch:disabled {
+  cursor: default;
+}
+.switch:disabled .knob {
+  background: var(--faint);
 }
 .seg {
   display: flex;

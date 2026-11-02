@@ -72,6 +72,11 @@
   cursor: default;
 }
 
+/* Text right after a tool line: the line's own padding is not enough air. */
+.afterTool {
+  margin-top: var(--s2);
+}
+
 /* ---------- Prose: the model's book voice ---------- */
 .prose {
   font: 400 17px/26px var(--font-prose);

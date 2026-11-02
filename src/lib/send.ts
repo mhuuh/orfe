@@ -1,19 +1,32 @@
-import { enabledAbilities, runTool, toolsFor, type Ability } from './abilities/registry'
+import { UNCHECKED } from './abilities/outcome'
+import { activeAbilities, needsOk, runTool, toolsFor, wantsIndex, type Ability } from './abilities/registry'
 import { fallbackModelInfo, type ModelInfo } from './catalog'
 import { estimateTokens, fingerprint, isCold, planWindow, ttlFor } from './context'
-import { buildOutgoing, renderRounds } from './normalise'
+import { buildOutgoing, renderRounds, stepCounter } from './normalise'
+import { buildIndex } from './notes/index'
+import { notes, writeResult, type UndoReport } from './notes/store'
 import { mergeReasoning, streamChat, type ChatRequest, type OutMessage, type StreamEvent } from './openrouter'
 import { db, newId, storage } from './storage'
-import { systemFor } from './system'
+import { systemFor, systemText } from './system'
 import type { ContentPart, Conversation, LastRequest, Message, Reasoning, ToolPart, Usage, Version } from './types'
-import { settled } from './versions'
+import { settled, settledVersion, STOPPED, withoutActiveVersion, withVersionAt } from './versions'
 
-/** Tool rounds in one reply. The last one gets ROUND_LIMIT instead of running, so the model answers. */
+/**
+ * Tool rounds in one run. The last one gets ROUND_LIMIT instead of running, so the model answers.
+ * A Continue is a new run, so it gets a fresh count.
+ */
 export const MAX_ROUNDS = 8
 const ROUND_LIMIT = 'Round limit reached. Answer now.'
-const STOPPED = 'Stopped by the user.'
+const OUT_OF_ROUNDS = 'The model used all its steps without an answer.'
 const REFUSED = 'The provider refused this reply. Try again, or pick another model.'
-const UNCHECKED = 'Error: could not check if this call already finished, so it did not run again. Check before you run it again.'
+/**
+ * Closes a Continue's request that would end on an assistant message. Some models refuse such a
+ * request, and the others start the answer again. This message is never stored.
+ */
+const CONTINUE_TURN: OutMessage = {
+  role: 'user',
+  content: 'Continue exactly where you stopped. Do not repeat what you already wrote. Do not repeat a tool call that already ran.',
+}
 const WRITE_INTERVAL_MS = 200
 /** Share of the context limit above which a cold cache triggers a trim (spec §6). */
 const SOFT_THRESHOLD = 0.85
@@ -24,19 +37,25 @@ const SOFT_THRESHOLD = 0.85
  */
 const PROVIDER_PREFERENCE: string | null = null
 const controllers = new Map<string, AbortController>()
+/** The step that waits for an OK, by chat. A chat runs one step at a time. */
+const waits = new Map<string, { callId: string; release: () => void }>()
 const NO_CONNECTION = "Couldn't reach OpenRouter."
 
 /**
  * The stored result of a call that already ran, or null. A Continue asks this for parts left open,
- * so it never runs a write twice. A fresh call is never looked up: it can't have run yet, and a
- * reused id could only give a wrong skip.
+ * so it never runs a write twice, and Stop asks it, so a write that landed does not read as stopped.
+ * A write that an undo took back counts as not done.
+ * A fresh call is never looked up: it can't have run yet, and a reused id could only give a wrong skip.
  */
 export type AlreadyDone = (callId: string, messageId: string) => Promise<string | null>
-const neverDone: AlreadyDone = async () => null
-let alreadyDone = neverDone
+const fromRevisions: AlreadyDone = async (callId, messageId) => {
+  const rev = await notes.byCall(callId, messageId)
+  return rev && (await notes.stands(rev)) ? writeResult(rev) : null
+}
+let alreadyDone = fromRevisions
 
 /** Test seam: swap the lookup. Call with no argument to reset. */
-export function setAlreadyDoneForTest(fn: AlreadyDone = neverDone): void {
+export function setAlreadyDoneForTest(fn: AlreadyDone = fromRevisions): void {
   alreadyDone = fn
 }
 
@@ -74,28 +93,41 @@ export function stop(conversationId: string): void {
   controllers.get(conversationId)?.abort()
 }
 
+/** The visible OK on a step that waits. A tap for any other step does nothing. */
+export function okStep(conversationId: string, callId: string): void {
+  const wait = waits.get(conversationId)
+  if (wait?.callId === callId) wait.release()
+}
+
 export interface ChatSnapshot {
   conversation: Conversation
   messages: Message[]
+  /** The stamp on the chat's notes in Trash. Undo brings back those notes and no others. */
+  notesDeletedAt: number
 }
 
 /**
- * Stops the chat's stream, then deletes it. Returns what Undo puts back, with any
- * streaming version marked stopped (it would otherwise block Reroll/Continue).
+ * Stops the chat's stream, then deletes it and sends its shelf to Trash. Returns what Undo puts
+ * back, with any streaming version marked stopped (it would otherwise block Reroll/Continue).
  */
 export async function deleteChat(id: string): Promise<ChatSnapshot | null> {
   stop(id)
-  const conversation = await storage.getConversation(id)
-  if (!conversation) return null
-  const messages = (await storage.listMessages(id)).map(settled)
-  await storage.deleteConversation(id)
-  return { conversation, messages }
+  return db.transaction('rw', db.conversations, db.messages, db.notes, db.noteRevisions, async () => {
+    const conversation = await storage.getConversation(id)
+    if (!conversation) return null
+    const messages = (await storage.listMessages(id)).map(settled)
+    await storage.deleteConversation(id)
+    const notesDeletedAt = Date.now()
+    await notes.trashShelf(id, notesDeletedAt)
+    return { conversation, messages, notesDeletedAt }
+  })
 }
 
 export async function restoreChat(s: ChatSnapshot): Promise<void> {
-  await db.transaction('rw', db.conversations, db.messages, async () => {
+  await db.transaction('rw', db.conversations, db.messages, db.notes, db.noteRevisions, async () => {
     await db.conversations.put(s.conversation)
     await db.messages.bulkPut(s.messages)
+    await notes.restoreShelf(s.conversation.id, s.notesDeletedAt)
   })
 }
 
@@ -157,8 +189,26 @@ const hasOutput = (content: ContentPart[]): boolean => content.some((p) => isToo
 /** The round after the last one here. Rounds number from 0 inside a reply. */
 const nextRound = (content: ContentPart[]): number => content.reduce((n, p) => (isTool(p) ? Math.max(n, p.round + 1) : n), 0)
 
-const stoppedOpen = (content: ContentPart[]): ContentPart[] =>
-  content.map((p) => (isTool(p) && p.status === 'running' ? { ...p, status: 'stopped' as const, result: STOPPED } : p))
+const resultOf = (result: string): Partial<ToolPart> => ({ status: result.startsWith('Error:') ? 'error' : 'done', result })
+
+/**
+ * How a call ends at Stop. A write that landed just before Stop keeps its result, or the model
+ * repeats it on Continue. A failed lookup gives the model the doubt.
+ */
+async function endAtStop(callId: string, messageId: string): Promise<Partial<ToolPart>> {
+  try {
+    const stored = await alreadyDone(callId, messageId)
+    return stored === null ? { status: 'stopped', result: STOPPED } : resultOf(stored)
+  } catch {
+    return resultOf(UNCHECKED)
+  }
+}
+
+async function stoppedOpen(content: ContentPart[], messageId: string): Promise<ContentPart[]> {
+  const out: ContentPart[] = []
+  for (const p of content) out.push(isTool(p) && p.status === 'running' ? { ...p, ...(await endAtStop(p.callId, messageId)) } : p)
+  return out
+}
 
 /** Bad JSON stays as the raw string, so it can be shown and `runTool` can answer it. */
 function parseArgs(raw: string): unknown {
@@ -186,6 +236,163 @@ export async function patchVersion(messageId: string, versionId: string, patch: 
     const m = await db.messages.get(messageId)
     if (!m) return
     await db.messages.put({ ...m, versions: m.versions.map((v) => (v.id === versionId ? { ...v, ...patch } : v)) })
+  })
+}
+
+/** Marks one call as undone or not, on each version that holds it. Re-reads the message first. */
+export async function setToolUndone(messageId: string, callId: string, undone: boolean): Promise<void> {
+  await mapSteps(messageId, (p) => (p.callId === callId ? { ...p, undone, kept: false } : p))
+}
+
+/** One transaction over a reply and its notes. */
+const withNotes = <T>(fn: () => Promise<T>): Promise<T> => db.transaction('rw', db.messages, db.notes, db.noteRevisions, fn)
+
+const callIds = (versions: Version[]): string[] => versions.flatMap((v) => v.content.filter(isTool).map((p) => p.callId))
+
+/** Changes steps on each version of a reply. A Continue or an Edit copies a step, so one call can show on two versions. */
+async function mapSteps(messageId: string, fn: (p: ToolPart) => ToolPart): Promise<void> {
+  await storage.mutateMessage(messageId, (m) => ({
+    ...m,
+    versions: m.versions.map((v) => ({ ...v, content: v.content.map((p) => (isTool(p) ? fn(p) : p)) })),
+  }))
+}
+
+/**
+ * Undoes the chat-shelf writes of these versions and marks their steps. Shared-shelf writes stay.
+ * A write on a note that changed later stays too, and its step gets `kept`.
+ */
+export async function undoReplyWrites(messageId: string, versions: Version[]): Promise<UndoReport> {
+  const ids = callIds(versions)
+  if (ids.length === 0) return { undone: [], kept: [] }
+  return withNotes(async () => {
+    const report = await notes.undoCalls(messageId, ids, 'chat')
+    await mapSteps(messageId, (p) => {
+      if (report.undone.includes(p.callId)) return { ...p, undone: true, kept: false }
+      return report.kept.includes(p.callId) ? { ...p, kept: true } : p
+    })
+    return report
+  })
+}
+
+/**
+ * Takes back an undo. Only calls that the reply still holds come back. A write whose note changed
+ * since stays out, and its step stays marked undone.
+ */
+async function redoReplyWrites(messageId: string, report: UndoReport): Promise<void> {
+  await withNotes(async () => {
+    const m = await db.messages.get(messageId)
+    if (!m) return
+    const held = new Set(callIds(m.versions))
+    const { redone } = await notes.redoCalls(report.undone.filter((id) => held.has(id)), messageId)
+    await mapSteps(messageId, (p) => {
+      if (redone.includes(p.callId)) return { ...p, undone: false }
+      return report.kept.includes(p.callId) ? { ...p, kept: false } : p
+    })
+  })
+}
+
+/** The version a reroll replaces. A try with no output has no writes: they stay with the version before it. */
+const replacedBy = (m: Message): Version | undefined =>
+  m.versions.slice(0, m.activeVersion + 1).reverse().find((v) => hasOutput(v.content))
+
+/**
+ * The start of a reroll, or of a Continue from a try with no output: that one writes a new reply
+ * too. Null when there is nothing to take back.
+ */
+async function undoReplaced(target: GenerateTarget): Promise<UndoReport | null> {
+  if (target.kind === 'new') return null
+  const m = await db.messages.get(target.messageId)
+  if (!m) return null
+  if (target.kind === 'continue' && hasOutput(m.versions[m.activeVersion]?.content ?? [])) return null
+  const v = replacedBy(m)
+  return v ? undoReplyWrites(target.messageId, [v]) : null
+}
+
+/** A try with no output replaced nothing, so the writes it undid come back. No version: it never got that far. */
+async function putBackIfEmpty(messageId: string, versionId: string, report: UndoReport): Promise<void> {
+  const v = (await db.messages.get(messageId))?.versions.find((x) => x.id === versionId)
+  if (!v || !hasOutput(v.content)) await redoReplyWrites(messageId, report)
+}
+
+/** Stops the chat's stream and waits for its end, so that no write can land after this. */
+function streamEnded(conversationId: string): Promise<void> {
+  if (!controllers.has(conversationId)) return Promise.resolve()
+  return new Promise((resolve) => {
+    const off = onGenerationEnd(() => {
+      if (controllers.has(conversationId)) return
+      off()
+      resolve()
+    })
+    stop(conversationId)
+  })
+}
+
+export interface MessageSnapshot {
+  message: Message
+  report: UndoReport
+}
+
+/**
+ * Deletes a message and undoes its writes. A hidden version may still stream: that one stops first.
+ * Returns what Undo puts back.
+ */
+export async function deleteMessage(id: string): Promise<MessageSnapshot | null> {
+  const m = await db.messages.get(id)
+  if (m?.versions.some((v) => v.status === 'streaming')) await streamEnded(m.conversationId)
+  return withNotes(async () => {
+    const found = await db.messages.get(id)
+    if (!found) return null
+    const report = await undoReplyWrites(id, found.versions)
+    const removed = await storage.deleteMessage(id)
+    return removed ? { message: settled(removed), report } : null
+  })
+}
+
+export async function restoreMessage(s: MessageSnapshot): Promise<void> {
+  await withNotes(async () => {
+    await storage.restoreMessage(s.message)
+    await redoReplyWrites(s.message.id, s.report)
+  })
+}
+
+export interface VersionSnapshot {
+  messageId: string
+  removed: Version
+  index: number
+  report: UndoReport
+}
+
+/**
+ * Deletes the active version and undoes its writes. Returns what Undo puts back, or null when it
+ * is the only version. A step that another version also holds is not this version's to undo.
+ */
+export async function deleteVersion(id: string): Promise<VersionSnapshot | null> {
+  return withNotes(async () => {
+    const m = await db.messages.get(id)
+    const cut = m && withoutActiveVersion(m)
+    if (!cut) return null
+    const held = new Set(callIds(cut.message.versions))
+    const own = cut.removed.content.filter((p) => !isTool(p) || !held.has(p.callId))
+    const report = await undoReplyWrites(id, [{ ...cut.removed, content: own }])
+    // The undo marked steps on this version only, so `cut.message` is still right.
+    const removed = (await db.messages.get(id))?.versions[cut.index] ?? cut.removed
+    await db.messages.put(cut.message)
+    return { messageId: id, removed: settledVersion(removed), index: cut.index, report }
+  })
+}
+
+export async function restoreVersion(s: VersionSnapshot): Promise<void> {
+  await withNotes(async () => {
+    await storage.mutateMessage(s.messageId, (m) => {
+      // A call that another version holds may have changed since. That version has the news.
+      const held = new Map(m.versions.flatMap((v) => v.content.filter(isTool)).map((p) => [p.callId, p]))
+      const content = s.removed.content.map((p) => {
+        const sibling = isTool(p) ? held.get(p.callId) : undefined
+        return sibling ? { ...p, undone: sibling.undone, kept: sibling.kept } : p
+      })
+      return withVersionAt(m, { ...s.removed, content }, s.index)
+    })
+    await redoReplyWrites(s.messageId, s.report)
   })
 }
 
@@ -222,6 +429,7 @@ function outgoingFor(
   windowStartId: string | null,
   model: ModelInfo,
   toolsEnabled: boolean,
+  plain: boolean,
 ): OutMessage[] {
   return buildOutgoing(messages, {
     system,
@@ -230,6 +438,7 @@ function outgoingFor(
     blobUrl: () => undefined,
     modelId: model.id,
     toolsEnabled,
+    plain,
   })
 }
 
@@ -238,6 +447,9 @@ function withTurn(base: OutMessage[], turn: OutMessage[]): OutMessage[] {
   const opens = turn[0]?.role === 'assistant' && base.every((m) => m.role === 'system')
   return opens ? [...base, { role: 'user', content: '…' }, ...turn] : [...base, ...turn]
 }
+
+/** The request with `CONTINUE_TURN` after it, if it would end on an assistant message. */
+const withContinue = (out: OutMessage[]): OutMessage[] => (out.at(-1)?.role === 'assistant' ? [...out, CONTINUE_TURN] : out)
 
 /** The messages `buildOutgoing` sends for this start (from the start on, plus pinned ones before it). */
 function windowOf(sorted: Message[], startId: string | null): Message[] {
@@ -255,6 +467,7 @@ export interface ColdInput {
   model: ModelInfo
   /** Hash of the tools JSON that goes out. Null: no tools. */
   toolsHash: string | null
+  plain: boolean
   anthropicCacheHour: boolean
   now: number
 }
@@ -269,7 +482,7 @@ export function computeCold(a: ColdInput): boolean {
     model: a.model.id,
     provider: PROVIDER_PREFERENCE,
     toolsHash: a.toolsHash,
-    outgoing: outgoingFor(a.messages, a.system, a.windowStartId, a.model, a.toolsHash !== null),
+    outgoing: outgoingFor(a.messages, a.system, a.windowStartId, a.model, a.toolsHash !== null, a.plain),
     now: a.now,
     ttlMs: ttlFor(a.model.id, a.anthropicCacheHour),
   })
@@ -283,15 +496,49 @@ async function generateInner(
 ): Promise<void> {
   const conversation = await storage.getConversation(conversationId)
   if (!conversation) return
+  // First of all, so the new reply can't read the old writes and the index can't list them.
+  const undid = await undoReplaced(target)
+  const versionId = newId()
+  try {
+    await startReply(conversation, target, model, controller, versionId, (undid?.undone.length ?? 0) > 0)
+  } finally {
+    if (undid && target.kind !== 'new') await putBackIfEmpty(target.messageId, versionId, undid)
+  }
+}
+
+/** Plans the request, adds the version and runs it. `staleIndex`: an undo just changed the notes. */
+async function startReply(
+  conversation: Conversation,
+  target: GenerateTarget,
+  model: ModelInfo,
+  controller: AbortController,
+  versionId: string,
+  staleIndex: boolean,
+): Promise<void> {
+  const conversationId = conversation.id
   const settings = await storage.getSettings()
   // A reroll plans and sends only what comes before its target, so the window can never
   // point past the cut (buildOutgoing would then fall back to the whole transcript).
   const isReroll = target.kind === 'reroll'
   const messages = sendable(await storage.listMessages(conversationId), isReroll ? target.messageId : undefined)
-  const { system, prompt } = await systemFor(conversation)
+  const frozen = await systemFor(conversation, model)
+  const { prompt } = frozen
+  let system = frozen.system
   const setting = conversation.context ?? settings.context
   const tools = toolsFor(conversation, prompt, model)
   const overheadChars = tools?.json.length ?? 0
+  const stepChars = stepCounter({ modelId: model.id, toolsEnabled: tools !== null, plain: conversation.plain })
+  // With no abilities, a call that a model makes up finds nothing to run.
+  const enabled = activeAbilities(conversation, prompt, model)
+
+  /** The index moves only here: at a cold moment, a trim or an undo, where the prefix is broken anyway. */
+  let indexFresh = false
+  const refreshIndex = async (): Promise<void> => {
+    const notesIndex = buildIndex(await notes.list('shared'), await notes.list(conversationId))
+    await storage.updateConversation(conversationId, { notesIndex })
+    system = systemText(conversation, prompt, model, notesIndex)
+    indexFresh = true
+  }
 
   // The stored start. For a reroll before it (nothing in the cut is at or after the start),
   // the chat's window does not apply: plan the cut from its beginning instead.
@@ -314,9 +561,11 @@ async function generateInner(
     windowStartId: storedId,
     model,
     toolsHash: tools?.hash ?? null,
+    plain: conversation.plain,
     anthropicCacheHour: settings.anthropicCacheHour,
     now: Date.now(),
   })
+  if (wantsIndex(enabled) && (cold || staleIndex || conversation.notesIndex === null)) await refreshIndex()
   const plan = planWindow({
     messages,
     windowStartId: storedId,
@@ -327,7 +576,10 @@ async function generateInner(
     cold,
     soft: SOFT_THRESHOLD,
     overheadChars,
+    stepChars,
   })
+  // A warm send can still trim. The plan used the old index: a larger new one shows at the next send.
+  if (wantsIndex(enabled) && plan.trimmed && !indexFresh) await refreshIndex()
 
   // Store the start whenever it moved (a trim, or a deleted start snapped to the next message),
   // so the order fallback keeps working. A reroll's window is a local view of the cut: it never
@@ -346,10 +598,10 @@ async function generateInner(
   // (catalog not loaded) we cannot know, so a chosen effort is still sent rather than dropped.
   const effort =
     conversation.nextEffort !== null && (model.efforts !== null || model.unlisted === true) ? conversation.nextEffort : undefined
-  // Built before the new version exists, so a continue prefills with the old text.
-  const outgoing = outgoingFor(messages, system, plan.startId, model, tools !== null)
+  // Built before the new version exists, so a Continue sends the old text.
+  const outgoing = outgoingFor(messages, system, plan.startId, model, tools !== null, conversation.plain)
   // Ratio 1: tokenRatio is the correction to this raw estimate, not a correction of a correction.
-  const estimate = estimateTokens(windowOf(messages, plan.startId), system, 1, overheadChars)
+  const estimate = estimateTokens(windowOf(messages, plan.startId), system, 1, overheadChars, stepChars)
   const cacheControl: ChatRequest['cacheControl'] = model.id.startsWith('anthropic/')
     ? { type: 'ephemeral', ...(settings.anthropicCacheHour ? { ttl: '1h' as const } : {}) }
     : undefined
@@ -362,12 +614,13 @@ async function generateInner(
     initial = (old?.content ?? []).map((p) => ({ ...p }))
     roundReasoning = old?.roundReasoning
   }
-  // A continued reply goes out from its own parts, each round. If the base held it too, each call
-  // would go out twice. A text reply keeps its old first request: `outgoing` with the old text as prefill.
-  const base = target.kind === 'continue' ? outgoingFor(sendable(messages, target.messageId), system, plan.startId, model, tools !== null) : outgoing
-  const prefill = target.kind === 'continue' && !initial.some(isTool) ? outgoing : null
+  // A continued reply goes out from its own parts. If the base held it too, each call would go out
+  // twice. A text reply goes out as `outgoing`, because there it joins a reply before it.
+  const continues = target.kind === 'continue'
+  const base = continues ? outgoingFor(sendable(messages, target.messageId), system, plan.startId, model, tools !== null, conversation.plain) : outgoing
+  const textReply = continues && !initial.some(isTool) ? outgoing : null
   const version: Version = {
-    id: newId(),
+    id: versionId,
     content: initial,
     status: 'streaming',
     model: model.id,
@@ -399,10 +652,10 @@ async function generateInner(
     messageId,
     version,
     base,
-    prefill,
+    continues,
+    textReply,
     tools,
-    // A model without tools has no abilities, so a call it makes up finds nothing to run.
-    enabled: tools ? enabledAbilities(conversation, prompt) : [],
+    enabled,
     model,
     effort,
     cacheControl,
@@ -452,6 +705,23 @@ export async function replacePromptRef(conversationId: string, from: string | nu
   })
 }
 
+/**
+ * Sets one ability switch for this chat. The first change copies what the chat follows now, so its
+ * other switches keep their values. From then on the chat has its own set.
+ */
+export async function setAbility(conversationId: string, id: string, on: boolean): Promise<void> {
+  await db.transaction('rw', db.conversations, db.prompts, async () => {
+    const ref = (await storage.getConversation(conversationId))?.systemPromptRef
+    const prompt = ref ? await db.prompts.get(ref) : undefined
+    await storage.mutateConversation(conversationId, (c) => ({ abilities: { ...(c.abilities ?? prompt?.abilities), [id]: on } }))
+  })
+}
+
+/** Plain on or off. The ability switches keep their values, so off brings them back. */
+export async function setPlain(conversationId: string, on: boolean): Promise<void> {
+  await storage.mutateConversation(conversationId, () => ({ plain: on }))
+}
+
 interface RunArgs {
   conversation: Conversation
   stream: boolean
@@ -460,8 +730,9 @@ interface RunArgs {
   version: Version
   /** History before the reply. Frozen for the whole reply, so each round extends the one before it. */
   base: OutMessage[]
-  /** A continue of a text reply: its first request, with the old text at the end. */
-  prefill: OutMessage[] | null
+  continues: boolean
+  /** A Continue of a text reply: the history with the old text at the end. */
+  textReply: OutMessage[] | null
   tools: ReturnType<typeof toolsFor>
   enabled: Ability[]
   model: ModelInfo
@@ -495,13 +766,14 @@ async function run(a: RunArgs): Promise<void> {
   }
 
   if (controller.signal.aborted) {
-    await patchVersion(messageId, version.id, { status: 'stopped', content: stoppedOpen(a.initial) })
+    await patchVersion(messageId, version.id, { status: 'stopped', content: await stoppedOpen(a.initial, messageId) })
     return
   }
 
   let content: ContentPart[] = a.initial
   let roundReasoning = a.roundReasoning
   let round = nextRound(content)
+  const firstRound = round
   let reasoningText = ''
   let reasoned = false
   // Finished rounds, then this round. Reasoning never merges across rounds: indexes start over in each.
@@ -531,13 +803,31 @@ async function run(a: RunArgs): Promise<void> {
     else content = [...content, { type: 'text', text }]
   }
 
+  const rendered = (parts: ContentPart[]): OutMessage[] =>
+    renderRounds(parts, { modelId: a.model.id, toolsEnabled: a.tools !== null, reasoning: roundReasoning })
+
+  /** What this run added to a Continue. New text joins the old last text in `content`, so only its tail counts. */
+  const added = (): ContentPart[] => {
+    const at = a.initial.length - 1
+    const [was, is] = [a.initial[at], content[at]]
+    const tail = was?.type === 'text' && is?.type === 'text' ? is.text.slice(was.text.length) : ''
+    return [...(tail === '' ? [] : [{ type: 'text' as const, text: tail }]), ...content.slice(a.initial.length)]
+  }
+
+  /** A Continue's old reply and the line. Set at its first request, so each round extends the one before it. */
+  let resumed: OutMessage[] | null = null
+
+  /** The request for this round. It runs after open calls closed, so their results go out. */
+  const nextRequest = (): OutMessage[] => {
+    if (!a.continues) return withTurn(a.base, rendered(content))
+    resumed ??= withContinue(a.textReply ?? withTurn(a.base, rendered(content)))
+    return withContinue(withTurn(resumed, rendered(added())))
+  }
+
   /** One request and its stream. `first`: the first request of this run. */
   const streamRound = async (first: boolean): Promise<RoundEnd> => {
     const end: RoundEnd = { finished: false, calls: [], replied: false, errored: null, aborted: false }
-    const outgoing =
-      first && a.prefill
-        ? a.prefill
-        : withTurn(a.base, renderRounds(content, { modelId: a.model.id, toolsEnabled: a.tools !== null, reasoning: roundReasoning }))
+    const outgoing = nextRequest()
     let counted: Usage | null = null
     let accepted = false
 
@@ -554,12 +844,14 @@ async function run(a: RunArgs): Promise<void> {
         // The first output (text, thinking, calls, usage or a finish) means the provider took the request,
         // so its prompt is now what the cache holds. `meta` is not enough: it comes with the HTTP 200,
         // and an in-stream error can still follow before any token. A failed request is not recorded.
+        // The line is not stored, and new text joins the text before it, so after a Continue with
+        // the line the next send repeats only the history before the reply.
         accepted = true
         const lastRequest: LastRequest = {
           model: a.model.id,
           provider: PROVIDER_PREFERENCE,
           toolsHash: a.tools?.hash ?? null,
-          ...fingerprint(outgoing),
+          ...fingerprint(outgoing.includes(CONTINUE_TURN) ? a.base : outgoing),
           at: Date.now(),
         }
         await storage.updateConversation(conversation.id, { lastRequest })
@@ -644,17 +936,32 @@ async function run(a: RunArgs): Promise<void> {
   }
 
   /**
-   * Turns the model's calls into parts. A weak model can send no id, or repeat one from this reply
-   * or an earlier one, and a request needs each id once.
+   * An older version of this reply wrote under this id. A part must not share it: on Continue that
+   * write would pass for this call, and this call's write would be lost. If we can't tell, say yes.
    */
-  const partsFrom = (calls: ToolCall[]): ToolPart[] => {
+  const usedByOldVersion = (id: string): Promise<boolean> =>
+    notes.byCall(id, messageId).then(
+      (rev) => rev !== undefined,
+      () => true,
+    )
+
+  /**
+   * Turns the model's calls into parts. A weak model can send no id, or repeat one from this reply,
+   * an earlier one or any version of this one, and a request needs each id once. An id stays
+   * unique across versions, or a Continue of an old open part would find the newer write.
+   */
+  const partsFrom = async (calls: ToolCall[]): Promise<ToolPart[]> => {
     const history = a.base.flatMap((m) => (m.role === 'assistant' ? (m.tool_calls ?? []).map((c) => c.id) : []))
-    const seen = new Set([...history, ...content.filter(isTool).map((p) => p.callId)])
-    return calls.map((c) => {
-      const callId = c.id && !seen.has(c.id) ? c.id : `call_${newId()}`
+    const versions = (await db.messages.get(messageId))?.versions ?? []
+    const siblings = versions.flatMap((v) => v.content.filter(isTool).map((p) => p.callId))
+    const seen = new Set([...history, ...siblings, ...content.filter(isTool).map((p) => p.callId)])
+    const parts: ToolPart[] = []
+    for (const c of calls) {
+      const callId = c.id && !seen.has(c.id) && !(await usedByOldVersion(c.id)) ? c.id : `call_${newId()}`
       seen.add(callId)
-      return { type: 'tool', callId, round, model: a.model.id, name: c.name, args: parseArgs(c.arguments), result: '', status: 'running' }
-    })
+      parts.push({ type: 'tool', callId, round, model: a.model.id, name: c.name, args: parseArgs(c.arguments), result: '', status: 'running' })
+    }
+    return parts
   }
 
   /** Files this round's reasoning under its number and starts the next round clean. */
@@ -678,14 +985,38 @@ async function run(a: RunArgs): Promise<void> {
     await patchVersion(messageId, version.id, snapshot())
   }
 
-  const resultOf = (result: string): Partial<ToolPart> => ({ status: result.startsWith('Error:') ? 'error' : 'done', result })
+  /**
+   * Holds the run until the OK or Stop. There is no timer: a lock freezes the page with the wait
+   * still open, and a lost run ends `interrupted`, where Continue comes back here and asks again.
+   */
+  const waitForOk = async (callId: string): Promise<void> => {
+    patch.waitingFor = callId
+    await patchVersion(messageId, version.id, snapshot())
+    await new Promise<void>((resolve) => {
+      if (controller.signal.aborted) return resolve()
+      const release = () => {
+        waits.delete(conversation.id)
+        controller.signal.removeEventListener('abort', release)
+        resolve()
+      }
+      waits.set(conversation.id, { callId, release })
+      controller.signal.addEventListener('abort', release)
+    })
+    patch.waitingFor = undefined
+    await patchVersion(messageId, version.id, snapshot())
+  }
 
   const runPart = async (part: ToolPart): Promise<void> => {
+    if (needsOk(part.name, a.enabled, content.filter(isTool))) {
+      await waitForOk(part.callId)
+      // Stop: the end of the run closes this part with the other open ones.
+      if (controller.signal.aborted) return
+    }
     const raw = typeof part.args === 'string' ? part.args : JSON.stringify(part.args)
     const ctx = { conversationId: conversation.id, messageId, callId: part.callId, model: part.model, key, signal: controller.signal }
     const result = await runTool(part.name, raw, ctx, a.enabled)
-    // A stopped tool can hand back any text, so Stop wins over it.
-    await closePart(part.callId, controller.signal.aborted ? { status: 'stopped', result: STOPPED } : resultOf(result))
+    // A stopped tool can hand back any text, so its text does not count.
+    await closePart(part.callId, controller.signal.aborted ? await endAtStop(part.callId, messageId) : resultOf(result))
   }
 
   /** Runs the parts in order, one at a time. Each result is saved as it comes. */
@@ -708,8 +1039,16 @@ async function run(a: RunArgs): Promise<void> {
         await closePart(part.callId, resultOf(UNCHECKED))
         continue
       }
-      if (stored !== null) await closePart(part.callId, resultOf(stored))
-      else if (!controller.signal.aborted) await runPart(part)
+      if (stored !== null) {
+        await closePart(part.callId, resultOf(stored))
+      } else if (!controller.signal.aborted) {
+        // An undone write runs again, so it stands once more on each copy of the step.
+        if (part.undone) {
+          await setToolUndone(messageId, part.callId, false)
+          await closePart(part.callId, { undone: false })
+        }
+        await runPart(part)
+      }
     }
   }
 
@@ -717,6 +1056,7 @@ async function run(a: RunArgs): Promise<void> {
 
   let end: RoundEnd | null = null
   let first = true
+  let outOfRounds = false
   while (!controller.signal.aborted) {
     end = await streamRound(first)
     first = false
@@ -728,13 +1068,17 @@ async function run(a: RunArgs): Promise<void> {
     // Any other finish with calls left them cut off, as with 'length'. Those must not run.
     if (end.calls.length === 0 || (end.reason !== 'tool_calls' && end.reason !== 'stop')) break
 
-    const parts = partsFrom(end.calls)
+    const parts = await partsFrom(end.calls)
     closeRound()
-    if (round >= MAX_ROUNDS - 1) {
+    const used = round - firstRound
+    if (used >= MAX_ROUNDS - 1) {
       content = [...content, ...parts.map((p) => ({ ...p, status: 'error' as const, result: ROUND_LIMIT }))]
       await patchVersion(messageId, version.id, snapshot())
       // Past the last round the model had its chance to answer.
-      if (round >= MAX_ROUNDS) break
+      if (used >= MAX_ROUNDS) {
+        outOfRounds = !end.replied
+        break
+      }
     } else {
       content = [...content, ...parts]
       await patchVersion(messageId, version.id, snapshot())
@@ -744,7 +1088,7 @@ async function run(a: RunArgs): Promise<void> {
   }
 
   const stopped = end?.aborted === true || controller.signal.aborted
-  if (stopped) content = stoppedOpen(content)
+  if (stopped) content = await stoppedOpen(content, messageId)
   const final = snapshot()
   if (end?.reason !== undefined) final.finishReason = end.reason
   if (end && end.errored !== null) {
@@ -752,6 +1096,9 @@ async function run(a: RunArgs): Promise<void> {
     final.error = end.errored
   } else if (stopped) {
     final.status = 'stopped'
+  } else if (outOfRounds) {
+    final.status = 'interrupted'
+    final.error = OUT_OF_ROUNDS
   } else {
     final.status = end?.finished ? 'done' : 'interrupted'
   }

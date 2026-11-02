@@ -317,6 +317,13 @@ describe('schema v2 and prompts', () => {
     expect(await storage.getPrompt(p.id)).toEqual(p2)
   })
 
+  it('savePrompt stores abilities, and a save without them clears them', async () => {
+    const p = await storage.savePrompt({ name: 'Terse', parentId: null, text: 'x', abilities: { notes: false } })
+    expect((await storage.getPrompt(p.id))?.abilities).toEqual({ notes: false })
+    await storage.savePrompt({ id: p.id, name: 'Terse', parentId: null, text: 'x' })
+    expect(await storage.getPrompt(p.id)).not.toHaveProperty('abilities')
+  })
+
   it('listPrompts sorts by name', async () => {
     await storage.savePrompt({ name: 'banana', parentId: null, text: 'x' })
     await storage.savePrompt({ name: 'Apple', parentId: null, text: 'x' })

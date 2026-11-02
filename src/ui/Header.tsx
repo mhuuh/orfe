@@ -2,6 +2,7 @@ import { useState } from 'react'
 import { useLiveQuery } from 'dexie-react-hooks'
 import { toolsFor } from '../lib/abilities/registry'
 import { viewWindow } from '../lib/context'
+import { stepCounter } from '../lib/normalise'
 import { storage } from '../lib/storage'
 import { systemFor } from '../lib/system'
 import type { Message } from '../lib/types'
@@ -37,7 +38,14 @@ export function cacheState(messages: Message[]): CacheState {
   return 'none'
 }
 
-export function Header({ conversationId, onMenu }: { conversationId: string | null; onMenu: () => void }) {
+interface Props {
+  conversationId: string | null
+  onMenu: () => void
+  /** Show this chat's notes in the vault. */
+  onNotes: () => void
+}
+
+export function Header({ conversationId, onMenu, onNotes }: Props) {
   const [settingsOpen, setSettingsOpen] = useState(false)
   const { models } = useCatalog()
   const info = useLiveQuery(async () => {
@@ -48,8 +56,10 @@ export function Header({ conversationId, onMenu }: { conversationId: string | nu
       storage.getSettings(),
     ])
     if (!conv) return null
-    const { system, prompt } = await systemFor(conv)
+    const model = findModel(models, conv.nextModel)
+    const { system, prompt } = await systemFor(conv, model)
     const setting = conv.context ?? settings.context
+    const tools = toolsFor(conv, prompt, model)
     // Display only: the stored window, never trimmed here. Sending decides trims.
     const view = viewWindow({
       messages,
@@ -58,7 +68,8 @@ export function Header({ conversationId, onMenu }: { conversationId: string | nu
       setting,
       system,
       ratio: conv.tokenRatio,
-      overheadChars: toolsFor(conv, prompt, findModel(models, conv.nextModel))?.json.length ?? 0,
+      overheadChars: tools?.json.length ?? 0,
+      stepChars: stepCounter({ modelId: model.id, toolsEnabled: tools !== null, plain: conv.plain }),
     })
     const meta = headerMeta({
       turns: messages.filter((m) => m.role === 'user').length,
@@ -95,7 +106,15 @@ export function Header({ conversationId, onMenu }: { conversationId: string | nu
         </button>
       </header>
       {conversationId && (
-        <ChatSettings open={settingsOpen} onClose={() => setSettingsOpen(false)} conversationId={conversationId} />
+        <ChatSettings
+          open={settingsOpen}
+          onClose={() => setSettingsOpen(false)}
+          conversationId={conversationId}
+          onNotes={() => {
+            setSettingsOpen(false)
+            onNotes()
+          }}
+        />
       )}
     </>
   )

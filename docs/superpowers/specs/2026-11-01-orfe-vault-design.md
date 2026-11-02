@@ -61,6 +61,7 @@ interface ToolPart {
   result: string          // always stored whole
   status: 'running' | 'done' | 'error' | 'stopped'
   undone?: boolean        // a write that was undone
+  kept?: boolean          // a write that stayed because the note changed later
 }
 
 interface Version { /* existing */ roundReasoning?: unknown[][] }  // reasoning_details per round, stored unchanged
@@ -125,9 +126,11 @@ Lives in `src/lib/send.ts`. All tools run on the phone.
 1. Send with `tools` and a constant `tool_choice: 'auto'`.
 2. Collect `delta.tool_calls` by index until `finish_reason: 'tool_calls'`. Accumulate `reasoning_details` by `index`, and never merge across indexes, because that gives "Invalid signature".
 3. Run the calls in order, one at a time. Save each `ToolPart` as it starts and as it ends.
-4. Send the next round. Stop at 8 rounds per reply: return a result that says so, and let the model answer. (my call)
+4. Send the next round. Stop at 8 rounds per run: return a result that says so, and let the model answer. A model that still gives no answer ends `interrupted`, with a note, and a Continue starts a fresh count. (my call)
 
 A tool error is a normal result the model can read, never a thrown failure. Refusals say what to do next.
+
+**Continue:** a Continue whose request would end on an assistant message gets one user line after that message, for every model, because Haiku and Gemini refuse such a request and GPT and DeepSeek restart the answer; the line is never stored, stays in each of that Continue's tool rounds, and is left out of `lastRequest`, so the next send reads warm.
 
 **Stop:** write a `stopped` result for every open call, or the next request fails.
 
@@ -290,7 +293,7 @@ One function, `toolsFor(chat, model)`, decides what reaches the model, so a disp
 
 Notes, History search and Compaction are on by default, in all chats. Each can be switched off per chat, and a prompt can carry its own default set. (agreed; applying to existing chats: my call)
 
-**Plain chat (Mikael):** one switch per chat, above the ability switches. A plain chat is a plain OpenRouter chat: no tools, no vault, no search, no compaction, no note index, no instructions and no capability note. The request holds only the prompt and the messages. The ability switches keep their values, so turning Plain off brings them back. Like any toggle, it costs one cold turn. (Mikael asked for this or per-chat toggles; he gets both. Dropping the capability note: my call.)
+**Plain chat (Mikael):** one switch per chat, above the ability switches. A plain chat is a plain OpenRouter chat: no tools, no vault, no search, no compaction, no note index, no instructions and no capability note. The request holds only the prompt and the messages. In a plain chat, old tool steps go out as flat text, as when tools are off, because they are part of that chat's history: a model that saw "I saved it" with no step told Mikael the note did not exist. Real calls come back when Plain is off. The ability switches keep their values, so turning Plain off brings them back. Like any toggle, it costs one cold turn. (Mikael asked for this or per-chat toggles; he gets both. Dropping the capability note: my call.)
 
 **Trust:** a chat that holds private data, reads untrusted content and has an outward channel at once must warn or refuse. After a model reads anything `untrusted`, its note writes wait for a visible OK. Nothing in this design is `untrusted`, so the gate exists but stays closed until such an ability ships. (agreed)
 

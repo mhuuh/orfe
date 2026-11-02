@@ -49,6 +49,8 @@ export function App() {
   const convs = useLiveQuery(() => storage.listConversations(), [])
   const [id, go] = useConversationId()
   const [drawer, setDrawer] = useState(false)
+  /** Bumped each time chat settings asks for this chat's notes. */
+  const [vaultAsked, setVaultAsked] = useState(0)
   const [settingsOpen, setSettingsOpen] = useState(false)
   // Id of a chat we just created that the live query has not delivered yet.
   const pendingId = useRef<string | null>(null)
@@ -107,11 +109,19 @@ export function App() {
     <ToastProvider>
       <DbOutdatedToast />
       <div className={css.app}>
-        <Header conversationId={current} onMenu={() => setDrawer(true)} />
+        <Header
+          conversationId={current}
+          onMenu={() => setDrawer(true)}
+          onNotes={() => {
+            setVaultAsked((n) => n + 1)
+            setDrawer(true)
+          }}
+        />
         <Transcript conversationId={current} />
         {/* Keyed: a new chat gets fresh composer state (its draft is kept per chat). */}
         {current && <Composer key={current} conversationId={current} />}
         <Drawer
+          vaultAsked={vaultAsked}
           open={drawer}
           onClose={() => setDrawer(false)}
           currentId={current}

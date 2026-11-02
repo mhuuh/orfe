@@ -76,6 +76,15 @@ describe('versions', () => {
     expect(settled(msg([v('a')]))).toEqual(msg([v('a')]))
   })
 
+  it('settled closes the open steps of a streaming version, and no others', () => {
+    const open: ToolPart = { type: 'tool', callId: 'c1', round: 0, model: 'a/m', name: 'echo', args: {}, result: '', status: 'running' }
+    const m = msg([{ ...v('a'), status: 'interrupted', content: [open] }, { ...v('b'), status: 'streaming', content: [open] }])
+    const [lost, cut] = settled(m).versions
+    // A lost run stays open, so that Continue can finish it.
+    expect(lost.content[0]).toEqual(open)
+    expect(cut.content[0]).toEqual({ ...open, status: 'stopped', result: 'Stopped by the user.' })
+  })
+
   const tool: ToolPart = {
     type: 'tool', callId: 'c1', round: 1, model: 'a/m', name: 'note_read', args: { path: 'x' }, result: 'ok', status: 'done',
   }

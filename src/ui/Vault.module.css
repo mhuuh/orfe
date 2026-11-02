@@ -1,0 +1,234 @@
+/* The mockup's vault phone. Text sits 20 px in; the drawer's own padding gives 8 of that. */
+.vault {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+  margin: 0 calc(-1 * var(--s2));
+  padding: 0 20px var(--s4);
+}
+
+.search {
+  display: block;
+  width: 100%;
+  height: 40px;
+  margin: 0 0 var(--s4);
+  padding: 0 var(--s4);
+  border: 0;
+  border-radius: 999px;
+  background: var(--surface);
+  color: var(--ink);
+  caret-color: var(--ink);
+  font: 400 15px/22px var(--font-ui);
+  -webkit-appearance: none;
+  appearance: none;
+}
+.search::placeholder {
+  color: var(--faint);
+  opacity: 1;
+}
+.search:focus {
+  outline: none;
+  box-shadow: inset 0 0 0 1px var(--mute);
+}
+
+.shelf {
+  margin-bottom: var(--s5);
+}
+.head {
+  display: flex;
+  justify-content: space-between;
+  gap: var(--s3);
+  padding-bottom: var(--s2);
+  border-bottom: 1px solid var(--line);
+  font: 400 11px/16px var(--font-mono);
+  color: var(--mute);
+}
+.headText {
+  min-width: 0;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.headCount {
+  flex: none;
+}
+
+.rows {
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+.item {
+  display: flex;
+  align-items: center;
+  border-bottom: 1px solid var(--line);
+}
+.inner .row {
+  padding-left: var(--s3);
+}
+.row {
+  display: block;
+  flex: 1;
+  min-width: 0;
+  padding: var(--s2) 0;
+  border: 0;
+  background: none;
+  color: var(--ink);
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+  -webkit-tap-highlight-color: transparent;
+}
+.top {
+  display: flex;
+  align-items: center;
+  gap: var(--s2);
+}
+.name {
+  min-width: 0;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.right {
+  flex: none;
+  max-width: 50%;
+  margin-left: auto;
+  font: 400 11px/16px var(--font-mono);
+  color: var(--mute);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.detail {
+  display: block;
+  font-size: 13px;
+  line-height: 20px;
+  color: var(--mute);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+/* A search snippet: the hit sits in the middle of it, so one line would hide it. */
+.wrap {
+  display: -webkit-box;
+  white-space: normal;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 2;
+  overflow-wrap: anywhere;
+}
+.lock {
+  flex: none;
+  width: 12px;
+  height: 12px;
+  color: var(--mute);
+}
+.chev,
+.chevOpen {
+  display: inline-block;
+  transition: transform 150ms ease-out;
+}
+.chevOpen {
+  transform: rotate(90deg);
+}
+
+.none {
+  margin: 0;
+  padding: var(--s2) 0;
+  font: 400 11px/16px var(--font-mono);
+  color: var(--mute);
+}
+
+/* Other chats: a row that scrolls sideways. The padding keeps the 44 px hit areas unclipped. */
+.chips {
+  display: flex;
+  gap: var(--s2);
+  margin: 0 -20px;
+  padding: var(--s3) 20px;
+  overflow-x: auto;
+  scrollbar-width: none;
+}
+.chip {
+  position: relative;
+  flex: none;
+  display: inline-flex;
+  align-items: center;
+  gap: 1ch;
+  height: 28px;
+  padding: 0 var(--s3);
+  border: 0;
+  border-radius: 999px;
+  background: var(--surface);
+  color: var(--mute);
+  font: 400 11px/16px var(--font-mono);
+  cursor: pointer;
+  -webkit-tap-highlight-color: transparent;
+}
+.chip::after {
+  content: '';
+  position: absolute;
+  inset: -8px -4px;
+}
+.chipOn {
+  color: var(--ink);
+}
+.chipName {
+  max-width: 160px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.trash,
+.showAll {
+  display: flex;
+  align-items: center;
+  gap: var(--s2);
+  width: 100%;
+  min-height: 48px;
+  padding: 0;
+  border: 0;
+  border-bottom: 1px solid var(--line);
+  background: none;
+  color: var(--ink);
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+  -webkit-tap-highlight-color: transparent;
+}
+.trash:disabled {
+  cursor: default;
+}
+.showAll {
+  border-bottom: 0;
+}
+
+.restore {
+  position: relative;
+  flex: none;
+  margin-left: var(--s3);
+  padding: 0;
+  border: 0;
+  background: none;
+  color: var(--ink);
+  font: 400 11px/16px var(--font-mono);
+  text-decoration: underline;
+  text-decoration-color: var(--line);
+  text-underline-offset: 3px;
+  cursor: pointer;
+  -webkit-tap-highlight-color: transparent;
+}
+.restore::after {
+  content: '';
+  position: absolute;
+  inset: -14px -4px;
+}
+
+.row:focus-visible,
+.trash:focus-visible,
+.showAll:focus-visible,
+.chip:focus-visible,
+.restore:focus-visible {
+  outline: 2px solid var(--ink);
+  outline-offset: 2px;
+}
