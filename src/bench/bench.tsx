@@ -1,9 +1,12 @@
 import { useState } from 'react'
 import { createRoot } from 'react-dom/client'
-import { reportText, runBench, type BenchProgress } from './run'
+import { clearBench, freeSpaceText, reportText, runBench, storageEstimate, type BenchProgress } from './run'
 import css from './bench.module.css'
 
-const MESSAGES = 100_000
+// Options for scripted runs. They stay out of the page.
+const options = new URLSearchParams(location.search)
+const MESSAGES = Number(options.get('messages')) || 100_000
+const ONE_CHAT = options.has('oneChat')
 const PHASES: Record<BenchProgress['phase'], string> = {
   seed: 'Writing messages',
   index: 'Indexing',
@@ -23,6 +26,7 @@ async function keepScreenOn(): Promise<(() => void) | null> {
 
 function Bench() {
   const [running, setRunning] = useState(false)
+  const [space, setSpace] = useState('')
   const [status, setStatus] = useState('')
   const [report, setReport] = useState<string | null>(null)
   const [copied, setCopied] = useState(false)
@@ -31,10 +35,12 @@ function Bench() {
     setRunning(true)
     setReport(null)
     setCopied(false)
+    setSpace(freeSpaceText(await storageEstimate()))
     const release = await keepScreenOn()
     try {
       const result = await runBench({
         messages: MESSAGES,
+        oneChat: ONE_CHAT,
         onProgress: (p) => setStatus(`${PHASES[p.phase]}: ${p.done.toLocaleString('en-US')} of ${p.total.toLocaleString('en-US')}`),
       })
       setReport(reportText(result))
@@ -67,6 +73,7 @@ function Bench() {
           {copied ? 'Copied' : 'Copy'}
         </button>
       </div>
+      {space !== '' && <p className={css.progress}>{space}</p>}
       {status !== '' && (
         <p className={css.progress} role="status">
           {status}
@@ -78,5 +85,6 @@ function Bench() {
 }
 
 export function mountBench(el: HTMLElement): void {
+  clearBench().catch((e: unknown) => console.error('bench cleanup failed', e))
   createRoot(el).render(<Bench />)
 }

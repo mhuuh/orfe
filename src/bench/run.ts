@@ -1,6 +1,6 @@
 import Dexie from 'dexie'
 import { CACHE_SCHEMA, MESSAGES_SCHEMA, SEARCH_DOCS_SCHEMA } from '../lib/db'
-import { createSearchIndex } from '../lib/search/termIndex'
+import { createSearchIndex, SLICE_BUDGET_MS } from '../lib/search/termIndex'
 import type { Message, SearchDoc } from '../lib/types'
 
 /**
@@ -18,6 +18,10 @@ const SLICE_MS = 100
 const WRITE_SAMPLES = 50
 const SEARCH_LIMIT = 25
 const SLOW_MS = 500
+/** One slice in this many runs at the app's real budget, so its time can be read. */
+const REAL_SLICE_EVERY = 10
+const LONG_MESSAGE_CHARS = 500_000
+const SMALL_SPACE_BYTES = 2 * 1024 ** 3
 
 /** Single words, inflected Finnish and two-word queries. Common words are in on purpose: they cost the most. */
 export const QUERIES = [
@@ -41,6 +45,10 @@ export const QUERIES = [
   'memory project',
   'talo järvi',
   'kirja window',
+  'kissa kissan kissoille kissoja kissat',
+  'talo talon talossa taloon talot taloja',
+  'the and of to in is that it',
+  'memory cache token model stream message search index',
 ]
 
 const FINNISH_COMMON = 'ja on ei se että mutta kun niin myös vain sitten nyt jos tai minä sinä hän me te he olen olet oli ovat kuin mitä tämä tuo siellä täällä'.split(' ')
@@ -116,17 +124,17 @@ export function fakeText(seed: number): string {
   return text
 }
 
-const chatsFor = (): string[] => Array.from({ length: OTHER_CHATS + 1 }, () => crypto.randomUUID())
-const chatOf = (order: number, chats: string[]): string => (order % 5 === 0 ? chats[0] : chats[1 + (order % OTHER_CHATS)])
+const chatsFor = (oneChat: boolean): string[] => Array.from({ length: oneChat ? 1 : OTHER_CHATS + 1 }, () => crypto.randomUUID())
+const chatOf = (order: number, chats: string[]): string => (order % 5 === 0 || chats.length === 1 ? chats[0] : chats[1 + (order % OTHER_CHATS)])
 
-function fakeMessage(order: number, chats: string[]): Message {
+function fakeMessage(order: number, chats: string[], text = fakeText(order)): Message {
   const createdAt = order
   return {
     id: crypto.randomUUID(),
     conversationId: chatOf(order, chats),
     order,
     role: order % 2 === 0 ? 'user' : 'assistant',
-    versions: [{ id: crypto.randomUUID(), content: [{ type: 'text', text: fakeText(order) }], status: 'done', createdAt }],
+    versions: [{ id: crypto.randomUUID(), content: [{ type: 'text', text }], status: 'done', createdAt }],
     activeVersion: 0,
     pinned: false,
     createdAt,
@@ -136,12 +144,14 @@ function fakeMessage(order: number, chats: string[]): Message {
 export interface Stats {
   min: number
   median: number
+  p90: number
   max: number
 }
 
 export function stats(values: number[]): Stats {
   const sorted = [...values].sort((a, b) => a - b)
-  return { min: sorted[0], median: sorted[Math.floor(sorted.length / 2)], max: sorted[sorted.length - 1] }
+  const at = (share: number) => sorted[Math.floor(sorted.length * share)]
+  return { min: sorted[0], median: at(0.5), p90: at(0.9), max: sorted[sorted.length - 1] }
 }
 
 export interface BenchProgress {
@@ -157,7 +167,7 @@ export interface BenchResult {
   longChat: number
   seedMs: number
   indexMs: number
-  /** A second pass that finds nothing to do: what each app start costs. */
+  /** A second pass that finds nothing to do. */
   repairMs: number
   /** Null when the browser gives no storage estimate. */
   indexBytes: number | null
@@ -165,21 +175,21 @@ export interface BenchResult {
   indexedRows: number
   termsPerMessage: number
   write: Stats
+  /** Backfill slices at the app's real budget, spread over the whole index phase. */
+  slice: Stats
+  /** Indexing one 500 KB message. */
+  longMessageMs: number
   query: Stats
   queries: { query: string; ms: number; hits: number }[]
+  /** A frozen page adds time to any number here, and loses the wake lock. */
+  hidden: boolean
   device: string
 }
 
 /** Lets the page paint and take taps. */
 const breathe = (): Promise<void> => new Promise((resolve) => setTimeout(resolve))
 
-async function usedBytes(): Promise<number | null> {
-  try {
-    return (await navigator.storage?.estimate?.())?.usage ?? null
-  } catch {
-    return null
-  }
-}
+const usedBytes = async (): Promise<number | null> => (await storageEstimate())?.usage ?? null
 
 const timed = async (fn: () => Promise<void>): Promise<number> => {
   const start = performance.now()
@@ -194,17 +204,48 @@ function deviceLine(): string {
   return `${nav.userAgent} | cores ${nav.hardwareConcurrency ?? '?'} | memory ${nav.deviceMemory ?? '?'} GB`
 }
 
-export async function runBench(opts: { messages: number; onProgress(p: BenchProgress): void }): Promise<BenchResult> {
-  const { messages: total, onProgress } = opts
-  // A killed run leaves its database behind.
-  await Dexie.delete(BENCH_DB)
+/** A killed run leaves its database behind. This never touches the real one. */
+export const clearBench = (): Promise<void> => Dexie.delete(BENCH_DB)
+
+export function freeSpaceText(estimate: StorageEstimate | null): string {
+  if (estimate?.quota === undefined || estimate.usage === undefined) return 'Free space: not given by this browser.'
+  const free = estimate.quota - estimate.usage
+  const line = `Free space: ${(free / 1024 ** 3).toFixed(1)} GB.`
+  return free < SMALL_SPACE_BYTES ? `${line} Under 2 GB: the run may fail.` : line
+}
+
+export async function storageEstimate(): Promise<StorageEstimate | null> {
+  try {
+    return (await navigator.storage?.estimate?.()) ?? null
+  } catch {
+    return null
+  }
+}
+
+async function fakeLongText(): Promise<string> {
+  let text = ''
+  for (let seed = 1; text.length < LONG_MESSAGE_CHARS; seed++) {
+    text += `${fakeText(seed)}\n`
+    if (seed % 100 === 0) await breathe()
+  }
+  return text
+}
+
+export async function runBench(opts: { messages: number; oneChat?: boolean; onProgress(p: BenchProgress): void }): Promise<BenchResult> {
+  const { messages: total, oneChat = false, onProgress } = opts
+  let hidden = document.visibilityState === 'hidden'
+  const noteHidden = () => {
+    if (document.visibilityState === 'hidden') hidden = true
+  }
+  document.addEventListener('visibilitychange', noteHidden)
+  await clearBench()
   const bench = new Dexie(BENCH_DB)
   bench.version(1).stores({ messages: MESSAGES_SCHEMA, cache: CACHE_SCHEMA, searchDocs: SEARCH_DOCS_SCHEMA })
   try {
     const rows = bench.table<Message, string>('messages')
     const docs = bench.table<SearchDoc, number>('searchDocs')
     const index = createSearchIndex(bench)
-    const chats = chatsFor()
+    const chats = chatsFor(oneChat)
 
     await rows.count()
     const start = await usedBytes()
@@ -219,10 +260,16 @@ export async function runBench(opts: { messages: number; onProgress(p: BenchProg
     })
     const seeded = await usedBytes()
 
+    const sliceTimes: number[] = []
     const indexMs = await timed(async () => {
-      let slices = 0
-      while (!(await index.backfill(SLICE_MS))) {
-        if (++slices % 20 === 0) onProgress({ phase: 'index', done: await docs.count(), total })
+      for (let slices = 1; ; slices++) {
+        const real = slices % REAL_SLICE_EVERY === 0
+        const start = performance.now()
+        const done = await index.backfill(real ? SLICE_BUDGET_MS : SLICE_MS)
+        // A small run may never reach a real slice, so the first one counts too.
+        if (real || sliceTimes.length === 0) sliceTimes.push(performance.now() - start)
+        if (done) return
+        if (slices % 20 === 0) onProgress({ phase: 'index', done: await docs.count(), total })
         await breathe()
       }
     })
@@ -249,6 +296,12 @@ export async function runBench(opts: { messages: number; onProgress(p: BenchProg
       await breathe()
     }
 
+    const long = fakeMessage(total + 1, chats, await fakeLongText())
+    await rows.add(long)
+    const longMessageMs = await timed(() => index.index(long.id))
+    await rows.delete(long.id)
+    await index.remove(long.id)
+
     const repairMs = await timed(async () => {
       while (!(await index.backfill(SLICE_MS))) await breathe()
     })
@@ -258,7 +311,7 @@ export async function runBench(opts: { messages: number; onProgress(p: BenchProg
     const result: BenchResult = {
       messages: total,
       chats: chats.length,
-      longChat: Math.floor(total / 5),
+      longChat: oneChat ? total : Math.floor(total / 5),
       seedMs,
       indexMs,
       repairMs,
@@ -267,21 +320,25 @@ export async function runBench(opts: { messages: number; onProgress(p: BenchProg
       indexedRows: await docs.count(),
       termsPerMessage: held.reduce((n, d) => n + d.terms.length, 0) / Math.max(1, held.length),
       write: stats(writes),
+      slice: stats(sliceTimes),
+      longMessageMs,
       query: stats(queries.map((q) => q.ms)),
       queries,
+      hidden,
       device: deviceLine(),
     }
     onProgress({ phase: 'clean', done: 1, total: 1 })
     return result
   } finally {
+    document.removeEventListener('visibilitychange', noteHidden)
     bench.close()
-    await Dexie.delete(BENCH_DB)
+    await clearBench()
   }
 }
 
 const ms = (n: number): string => `${Math.round(n)} ms`
 const mb = (n: number): string => `${(n / 1_048_576).toFixed(1)} MB`
-const statLine = (s: Stats): string => `min ${ms(s.min)}, median ${ms(s.median)}, max ${ms(s.max)}`
+const statLine = (s: Stats): string => `min ${ms(s.min)}, median ${ms(s.median)}, p90 ${ms(s.p90)}, max ${ms(s.max)}`
 const seconds = (n: number): string => `${(n / 1000).toFixed(1)} s`
 
 export function reportText(r: BenchResult): string {
@@ -297,9 +354,12 @@ export function reportText(r: BenchResult): string {
     r.messageBytes === null ? 'Message size: not given by this browser' : `Message size: ${mb(r.messageBytes)}`,
     `Index rows: ${r.indexedRows.toLocaleString('en-US')}, about ${Math.round(r.termsPerMessage)} terms each`,
     `One index write: ${statLine(r.write)}`,
+    `Backfill slice: ${statLine(r.slice)}`,
+    `One 500 KB message: ${ms(r.longMessageMs)}`,
     `Queries (${r.queries.length}): ${statLine(r.query)}`,
     `Slowest: "${slowest.query}" ${ms(slowest.ms)}`,
     `Over 500 ms: ${over} of ${r.queries.length}`,
+    `Page was hidden: ${r.hidden ? 'yes' : 'no'}`,
     '',
     ...r.queries.map((q) => `${ms(q.ms).padStart(8)}  ${q.query} (${q.hits} hits)`),
     '',
