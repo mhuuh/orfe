@@ -1,7 +1,7 @@
 import { afterEach, describe, expect, it } from 'vitest'
 import { setAbilitiesForTest, type Ability } from './abilities/registry'
 import { setModelRulesForTest } from './modelRules'
-import { buildOutgoing, renderRounds, stepCounter } from './normalise'
+import { buildOutgoing, renderRounds, stepCounter, type StepContext } from './normalise'
 import type { OutMessage } from './openrouter'
 import type { ContentPart, Message, Role, ToolPart, Version } from './types'
 
@@ -506,26 +506,29 @@ describe('stepCounter', () => {
   const part = step('c1', { name: 'find', args: { q: 'a' }, result: 'x'.repeat(100) })
   const line = '(Used find.)'.length
 
+  /** The count for a step that is new in the chat, so it renders whole if it is a call. */
+  const count = (s: StepContext, p: ToolPart = part) => stepCounter(s, [msg('m1', 'assistant', [p])])(p)
+
   afterEach(() => setModelRulesForTest())
 
   it('agrees with buildOutgoing on real calls and flattened steps', () => {
     const on = { modelId: 'm/a', toolsEnabled: true, plain: false }
-    expect(stepCounter(on)(part)).toBe(4 + 9 + 100)
-    expect(stepCounter({ ...on, toolsEnabled: false })(part)).toBe(line)
-    expect(stepCounter({ ...on, modelId: 'm/b' })(part)).toBe(line)
-    expect(stepCounter({ ...on, plain: true })(part)).toBe(line)
+    expect(count(on)).toBe(4 + 9 + 100)
+    expect(count({ ...on, toolsEnabled: false })).toBe(line)
+    expect(count({ ...on, modelId: 'm/b' })).toBe(line)
+    expect(count({ ...on, plain: true })).toBe(line)
     // A name a provider would refuse flattens.
-    expect(stepCounter(on)({ ...part, name: 'bad name' })).toBe('(Used bad name.)'.length)
+    expect(count(on, { ...part, name: 'bad name' })).toBe('(Used bad name.)'.length)
   })
 
   it('counts bad arguments as what goes out: an empty object', () => {
     const on = { modelId: 'm/a', toolsEnabled: true, plain: false }
-    expect(stepCounter(on)({ ...part, args: undefined })).toBe(4 + 2 + 100)
-    expect(stepCounter(on)({ ...part, args: 'not json' })).toBe(4 + 2 + 100)
+    expect(count(on, { ...part, args: undefined })).toBe(4 + 2 + 100)
+    expect(count(on, { ...part, args: 'not json' })).toBe(4 + 2 + 100)
   })
 
   it('follows the model rules', () => {
     setModelRulesForTest([{ pattern: /^m\/a/, rule: { flattenAll: true } }])
-    expect(stepCounter({ modelId: 'm/a', toolsEnabled: true, plain: false })(part)).toBe(line)
+    expect(count({ modelId: 'm/a', toolsEnabled: true, plain: false })).toBe(line)
   })
 })

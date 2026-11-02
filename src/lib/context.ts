@@ -5,6 +5,12 @@ import type { ContextSetting, LastRequest, Message, ToolPart } from './types'
 /** Characters a stored step adds to the request. `stepCounter` in normalise.ts gives one. */
 export type StepChars = (part: ToolPart) => number
 
+/** The messages a request holds for this start: from the start on, plus pinned ones before it. `sorted` is by order. */
+export function windowOf(sorted: Message[], startId: string | null): Message[] {
+  const start = startId === null ? 0 : Math.max(0, sorted.findIndex((m) => m.id === startId))
+  return sorted.filter((m, i) => i >= start || m.pinned)
+}
+
 /** Characters of a message's active version that count towards the estimate. Media and dividers count 0. */
 function messageChars(m: Message, stepChars: StepChars): number {
   if (m.role === 'divider') return 0
@@ -50,7 +56,7 @@ export function ttlFor(modelId: string, anthropicCacheHour: boolean): number {
 /**
  * The request as the cold check sees it. Tool content becomes the call id, so a result that shrinks
  * at render time does not read as cold. reasoning_details go, because a turn in flight sends them
- * and the same turn sends none once it is finished. Both cost only the tail, never the whole prefix.
+ * and the same turn sends none once it is finished. Both normally cost only the tail.
  * Other messages stay as they are, so a hash stored before tools existed still matches.
  */
 export function canonical(outgoing: OutMessage[]): OutMessage[] {

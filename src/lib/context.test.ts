@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest'
 import { canonical, estimateTokens, fingerprint, isCold, planWindow, raisesLimit, ttlFor, viewWindow } from './context'
 import { hashText } from './hash'
-import { buildOutgoing, stepCounter } from './normalise'
+import { buildOutgoing, stepCounter, type StepContext } from './normalise'
 import type { OutMessage } from './openrouter'
 import type { ContentPart, ContextSetting, LastRequest, Message, Role, ToolPart } from './types'
 
@@ -26,8 +26,9 @@ function transcript(count: number, chars = 40): Message[] {
 }
 
 const tokens100: ContextSetting = { mode: 'tokens', limit: 100, trimTo: 0.7 }
-/** Every step by 'm/a' goes out as a real call. */
-const stepChars = stepCounter({ modelId: 'm/a', toolsEnabled: true, plain: false })
+/** Every step by 'm/a' goes out as a real call, whole: each one counts as new in the chat. */
+const counter = (s: StepContext) => (p: ToolPart) => stepCounter(s, [msg(1, 'assistant', [p])])(p)
+const stepChars = counter({ modelId: 'm/a', toolsEnabled: true, plain: false })
 const base = {
   stepChars,
   windowStartId: null,
@@ -457,9 +458,9 @@ describe('tool text that is not sent', () => {
     ]).flat()
   const asked = (order: number) => msg(order, 'user', 'x'.repeat(40))
   const tokens32k: ContextSetting = { mode: 'tokens', limit: 32000, trimTo: 0.7 }
-  const plain = stepCounter({ modelId: 'm/a', toolsEnabled: false, plain: true })
-  const flat = stepCounter({ modelId: 'm/a', toolsEnabled: false, plain: false })
-  const otherModel = stepCounter({ modelId: 'm/b', toolsEnabled: true, plain: false })
+  const plain = counter({ modelId: 'm/a', toolsEnabled: false, plain: true })
+  const flat = counter({ modelId: 'm/a', toolsEnabled: false, plain: false })
+  const otherModel = counter({ modelId: 'm/b', toolsEnabled: true, plain: false })
 
   it('a real call counts name, arguments and result', () => {
     expect(estimateTokens(turns(1), null, 1, 0, stepChars)).toBe(Math.ceil((40 + 40 + 4 + 9 + RESULT) / 4))

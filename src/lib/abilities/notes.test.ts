@@ -25,6 +25,7 @@ const ctx = (callId = 'c1', model = T.id): AbilityCtx => ({
   model,
   key: 'k',
   signal: new AbortController().signal,
+  wholeCopy: () => false,
 })
 const call = (name: string, args: unknown, callId?: string): Promise<string> => notesAbility.run(name, args, ctx(callId))
 const put = (path: string, description = `About ${path}`, body = 'Body text.') =>

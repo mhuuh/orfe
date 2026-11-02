@@ -1,11 +1,12 @@
 import { UNCHECKED } from './abilities/outcome'
 import { activeAbilities, needsOk, runTool, toolsFor, wantsIndex, type Ability } from './abilities/registry'
 import { fallbackModelInfo, type ModelInfo } from './catalog'
-import { estimateTokens, fingerprint, isCold, planWindow, ttlFor } from './context'
-import { buildOutgoing, renderRounds, stepCounter } from './normalise'
+import { estimateTokens, fingerprint, isCold, planWindow, ttlFor, windowOf } from './context'
+import { buildOutgoing, renderRounds, sendsCall, stepCounter } from './normalise'
 import { buildIndex } from './notes/index'
 import { notes, writeResult, type UndoReport } from './notes/store'
 import { mergeReasoning, streamChat, type ChatRequest, type OutMessage, type StreamEvent } from './openrouter'
+import { wholeInWindow } from './retention'
 import { db, newId, storage } from './storage'
 import { systemFor, systemText } from './system'
 import type { ContentPart, Conversation, LastRequest, Message, Reasoning, ToolPart, Usage, Version } from './types'
@@ -451,12 +452,6 @@ function withTurn(base: OutMessage[], turn: OutMessage[]): OutMessage[] {
 /** The request with `CONTINUE_TURN` after it, if it would end on an assistant message. */
 const withContinue = (out: OutMessage[]): OutMessage[] => (out.at(-1)?.role === 'assistant' ? [...out, CONTINUE_TURN] : out)
 
-/** The messages `buildOutgoing` sends for this start (from the start on, plus pinned ones before it). */
-function windowOf(sorted: Message[], startId: string | null): Message[] {
-  const start = startId === null ? 0 : Math.max(0, sorted.findIndex((m) => m.id === startId))
-  return sorted.filter((m, i) => i >= start || m.pinned)
-}
-
 export interface ColdInput {
   lastRequest: LastRequest | null
   /** What the request is built from: already cut for a reroll. */
@@ -527,7 +522,7 @@ async function startReply(
   const setting = conversation.context ?? settings.context
   const tools = toolsFor(conversation, prompt, model)
   const overheadChars = tools?.json.length ?? 0
-  const stepChars = stepCounter({ modelId: model.id, toolsEnabled: tools !== null, plain: conversation.plain })
+  const stepChars = stepCounter({ modelId: model.id, toolsEnabled: tools !== null, plain: conversation.plain }, messages)
   // With no abilities, a call that a model makes up finds nothing to run.
   const enabled = activeAbilities(conversation, prompt, model)
 
@@ -617,7 +612,8 @@ async function startReply(
   // A continued reply goes out from its own parts. If the base held it too, each call would go out
   // twice. A text reply goes out as `outgoing`, because there it joins a reply before it.
   const continues = target.kind === 'continue'
-  const base = continues ? outgoingFor(sendable(messages, target.messageId), system, plan.startId, model, tools !== null, conversation.plain) : outgoing
+  const history = continues ? sendable(messages, target.messageId) : messages
+  const base = continues ? outgoingFor(history, system, plan.startId, model, tools !== null, conversation.plain) : outgoing
   const textReply = continues && !initial.some(isTool) ? outgoing : null
   const version: Version = {
     id: versionId,
@@ -651,6 +647,8 @@ async function startReply(
     key: settings.key,
     messageId,
     version,
+    history,
+    startId: plan.startId,
     base,
     continues,
     textReply,
@@ -728,6 +726,10 @@ interface RunArgs {
   key: string | null
   messageId: string
   version: Version
+  /** The stored messages that `base` is built from. */
+  history: Message[]
+  /** Where the sent window starts. */
+  startId: string | null
   /** History before the reply. Frozen for the whole reply, so each round extends the one before it. */
   base: OutMessage[]
   continues: boolean
@@ -812,6 +814,23 @@ async function run(a: RunArgs): Promise<void> {
     const [was, is] = [a.initial[at], content[at]]
     const tail = was?.type === 'text' && is?.type === 'text' ? is.text.slice(was.text.length) : ''
     return [...(tail === '' ? [] : [{ type: 'text' as const, text: tail }]), ...content.slice(a.initial.length)]
+  }
+
+  const sent = sendsCall({ modelId: a.model.id, toolsEnabled: a.tools !== null, plain: conversation.plain })
+
+  /** Asks about what the next request holds: the frozen history, then this reply, last and never stripped. */
+  const wholeCopy = (path: string, noteVersion: number, page: number): boolean => {
+    const turn: Message = {
+      id: messageId,
+      conversationId: conversation.id,
+      order: Infinity,
+      role: 'assistant',
+      versions: [{ ...version, content }],
+      activeVersion: 0,
+      pinned: false,
+      createdAt: version.createdAt,
+    }
+    return wholeInWindow([...a.history, turn], a.startId, path, noteVersion, page, sent)
   }
 
   /** A Continue's old reply and the line. Set at its first request, so each round extends the one before it. */
@@ -1013,7 +1032,7 @@ async function run(a: RunArgs): Promise<void> {
       if (controller.signal.aborted) return
     }
     const raw = typeof part.args === 'string' ? part.args : JSON.stringify(part.args)
-    const ctx = { conversationId: conversation.id, messageId, callId: part.callId, model: part.model, key, signal: controller.signal }
+    const ctx = { conversationId: conversation.id, messageId, callId: part.callId, model: part.model, key, signal: controller.signal, wholeCopy }
     const result = await runTool(part.name, raw, ctx, a.enabled)
     // A stopped tool can hand back any text, so its text does not count.
     await closePart(part.callId, controller.signal.aborted ? await endAtStop(part.callId, messageId) : resultOf(result))

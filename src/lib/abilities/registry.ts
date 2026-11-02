@@ -18,6 +18,8 @@ export interface AbilityCtx {
   model: string
   key: string
   signal: AbortSignal
+  /** True when this page of this note, at this version, is whole in what this request sends. */
+  wholeCopy(path: string, version: number, page: number): boolean
 }
 
 /** The words for one tool line: while running, when done, and the line a model reads after a flatten. */
@@ -44,6 +46,8 @@ export interface Ability {
   instructions?: string
   run(name: string, args: unknown, ctx: AbilityCtx): Promise<string>
   describe(part: ToolPart): StepWords
+  /** One sentence for a stripped result: what it held. Null or left out: the step's past line. */
+  pointer?(part: ToolPart): string | null
   hooks?: { beforeSend?(plan: SendPlan): Promise<void> }
   traits: { private?: true; untrusted?: true; outward?: true }
   /** The tools that change a note. */
@@ -148,6 +152,17 @@ export function needsOk(toolName: string, enabled: Ability[], reply: ToolPart[])
   if (!enabled.some((a) => a.tools.some((t) => t.name === toolName))) return false
   if (!writesNotes(toolName) && !abilityOf(toolName)?.traits.outward) return false
   return reply.some((p) => (p.status === 'done' || p.status === 'error') && abilityOf(p.name)?.traits.untrusted)
+}
+
+/** What a stripped result held. Falls back to the past line, so any tool has words. */
+export function pointerWords(part: ToolPart): string {
+  try {
+    const words = abilityOf(part.name)?.pointer?.(part)
+    if (words) return words
+  } catch {
+    // Use the plain words below.
+  }
+  return describeStep(part).past.replace(/^\(|\)$/g, '')
 }
 
 /** Words for a tool line. Falls back to the tool name, so an old or removed tool still shows. */

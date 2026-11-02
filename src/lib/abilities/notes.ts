@@ -185,7 +185,20 @@ function paged(header: string[], lines: string[], page: number, path: string): s
   return [...header, ...line, '', pages[page - 1]].join('\n')
 }
 
-function readNote(n: Note, asked: string, page: number): string {
+/** The page a notes_read call asks for. */
+const pageOf = (a: Args): number => Math.max(1, Math.floor(num(a.page) ?? 1))
+
+/** Which page of which note a finished read returned. Null for anything else, like a list or a miss. */
+export function readOf(part: ToolPart): { path: string; version: number; page: number } | null {
+  if (part.name !== 'notes_read' || part.status !== 'done') return null
+  const head = /^(.+?), version (\d+): /.exec(part.result)
+  return head ? { path: head[1], version: Number(head[2]), page: pageOf(asArgs(part.args)) } : null
+}
+
+function readNote(n: Note, asked: string, page: number, ctx: AbilityCtx): string {
+  if (ctx.wholeCopy(shownPath(n), n.version, page)) {
+    return `${shownPath(n)} is unchanged since your last read, see above. ${atVersion(n)}`
+  }
   const moved = asked.toLowerCase() !== shownPath(n).toLowerCase()
   const header = [
     `${shownPath(n)}, version ${n.version}: ${n.description}`,
@@ -212,7 +225,7 @@ async function lookup(given: string, page: number, ctx: AbilityCtx): Promise<str
   const asFolder = (): Promise<string | null> => listing(ctx, path, page)
   const asNote = async (): Promise<string | null> => {
     const note = await notes.read({ path, conversationId: ctx.conversationId })
-    return note ? readNote(note, path, page) : null
+    return note ? readNote(note, path, page, ctx) : null
   }
   return given.endsWith('/') ? ((await asFolder()) ?? (await asNote())) : ((await asNote()) ?? (await asFolder()))
 }
@@ -220,7 +233,7 @@ async function lookup(given: string, page: number, ctx: AbilityCtx): Promise<str
 async function read(a: Args, ctx: AbilityCtx): Promise<string> {
   // A [[link]] from a note body works as a path.
   const given = (word(a.path) ?? '').trim().replace(/^\[\[(.*)\]\]$/s, '$1')
-  const page = Math.max(1, Math.floor(num(a.page) ?? 1))
+  const page = pageOf(a)
   if (normalisePath(given) === '') return (await listing(ctx, '', page)) ?? 'There are no notes yet. Use notes_write to save one.'
   // The whole text first: a path may hold what looks like a tail.
   const bare = given.replace(LINE_TAIL, '')
@@ -378,6 +391,13 @@ function describe(part: ToolPart): StepWords {
   }
 }
 
+/** A note read names the note, the version and the page. Other steps keep their past line. */
+function pointer(part: ToolPart): string | null {
+  const read = readOf(part)
+  if (!read) return null
+  return `Read ${read.path}, version ${read.version}${read.page > 1 ? `, page ${read.page}` : ''}.`
+}
+
 export const notesAbility: Ability = {
   id: 'notes',
   title: 'Notes',
@@ -386,6 +406,7 @@ export const notesAbility: Ability = {
   instructions,
   run: async (name, args, ctx) => run(name, asArgs(args), ctx),
   describe,
+  pointer,
   traits: { private: true },
   writes: ['notes_write', 'notes_edit', 'notes_delete'],
 }
