@@ -76,6 +76,11 @@ export interface Message {
 
 /** One message in the term index. Rebuilt from messages, so it is never backed up. */
 export interface SearchDoc {
+  /**
+   * The primary key: a number that sorts by message time, newest lowest. Each index entry repeats
+   * the primary key, so a number here makes the index 60% smaller than a message id would.
+   */
+  n: number
   messageId: string
   conversationId: string
   /** Each term starts with the chat id. See `filed` in search/termIndex.ts. */

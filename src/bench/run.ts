@@ -202,7 +202,7 @@ export async function runBench(opts: { messages: number; onProgress(p: BenchProg
   bench.version(1).stores({ messages: MESSAGES_SCHEMA, cache: CACHE_SCHEMA, searchDocs: SEARCH_DOCS_SCHEMA })
   try {
     const rows = bench.table<Message, string>('messages')
-    const docs = bench.table<SearchDoc, string>('searchDocs')
+    const docs = bench.table<SearchDoc, number>('searchDocs')
     const index = createSearchIndex(bench)
     const chats = chatsFor()
 
@@ -231,10 +231,10 @@ export async function runBench(opts: { messages: number; onProgress(p: BenchProg
 
     const steps = WRITE_SAMPLES + QUERIES.length + 1
     let step = 0
-    const sample = await rows.limit(WRITE_SAMPLES).toArray()
+    const sample = await rows.limit(WRITE_SAMPLES).primaryKeys()
     const writes: number[] = []
-    for (const m of sample) {
-      writes.push(await timed(() => index.index(m)))
+    for (const id of sample) {
+      writes.push(await timed(() => index.index(id)))
       onProgress({ phase: 'measure', done: ++step, total: steps })
     }
 

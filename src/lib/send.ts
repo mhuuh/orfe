@@ -134,13 +134,10 @@ export function backfillSoon(): void {
  * throws: a send must not wait on the index or fail with it.
  */
 function syncIndex(messageId: string): void {
-  void db.messages
-    .get(messageId)
-    .then((m) => (m ? searchIndex.index(m) : searchIndex.remove(messageId)))
-    .catch((e: unknown) => {
-      console.error('index failed', e)
-      backfillSoon()
-    })
+  searchIndex.index(messageId).catch((e: unknown) => {
+    console.error('index failed', e)
+    backfillSoon()
+  })
 }
 
 /** The visible OK on a step that waits. A tap for any other step does nothing. */

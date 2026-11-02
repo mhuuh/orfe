@@ -2,7 +2,8 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { db, newId, storage } from '../storage'
 import type { ContentPart, Message } from '../types'
 import { editedVersion, withActive, withNewVersion } from '../versions'
-import { createSearchIndex, MAX_ROWS_PER_TOKEN, searchIndex } from './termIndex'
+import { hashText } from '../hash'
+import { createSearchIndex, MAX_QUERY_WORDS, MAX_ROWS_PER_TOKEN, searchIndex } from './termIndex'
 
 let chat: string
 
@@ -20,9 +21,21 @@ const text = (t: string, conversationId = chat): Promise<Message> =>
   storage.appendMessage(conversationId, 'user', version([{ type: 'text', text: t }]))
 async function indexed(t: string, conversationId = chat): Promise<Message> {
   const m = await text(t, conversationId)
-  await searchIndex.index(m)
+  await searchIndex.index(m.id)
   return m
 }
+/** A message from this moment, not from now. */
+const at = async (m: Message, createdAt: number): Promise<void> => void (await db.messages.update(m.id, { createdAt }))
+/** A message and its row, from this moment. */
+async function indexedAt(t: string, createdAt: number): Promise<Message> {
+  const m = await text(t)
+  await at(m, createdAt)
+  await searchIndex.index(m.id)
+  return m
+}
+/** A row by hand, with no message behind it. */
+const row = (n: number, messageId: string, term: string, textHash = 'x') => ({ n, messageId, conversationId: chat, terms: [`${chat}:${term}`], textHash })
+const numberOf = async (id: string): Promise<number> => (await db.searchDocs.where('messageId').equals(id).first())!.n
 const found = async (query: string, conversationId = chat): Promise<string[]> =>
   (await searchIndex.search(conversationId, query, 50)).map((h) => h.messageId)
 /** Runs a pass to its end. */
@@ -58,7 +71,7 @@ describe('search', () => {
   it('an edit replaces the old terms', async () => {
     const m = await indexed('kissa')
     const edited = await storage.mutateMessage(m.id, (x) => withNewVersion(x, editedVersion(x.versions[0], 'koira')))
-    await searchIndex.index(edited!)
+    await searchIndex.index(edited!.id)
     expect(await found('kissa')).toEqual([])
     expect(await found('koira')).toEqual([m.id])
   })
@@ -67,17 +80,9 @@ describe('search', () => {
     const m = await indexed('kissa')
     await storage.mutateMessage(m.id, (x) => withNewVersion(x, editedVersion(x.versions[0], 'koira')))
     const flipped = await storage.mutateMessage(m.id, (x) => withActive(x, 0))
-    await searchIndex.index(flipped!)
+    await searchIndex.index(flipped!.id)
     expect(await found('kissa')).toEqual([m.id])
     expect(await found('koira')).toEqual([])
-  })
-
-  it('a stale copy cannot put old text back', async () => {
-    const m = await indexed('kissa')
-    await storage.mutateMessage(m.id, (x) => withNewVersion(x, editedVersion(x.versions[0], 'koira')))
-    await searchIndex.index(m)
-    expect(await found('koira')).toEqual([m.id])
-    expect(await found('kissa')).toEqual([])
   })
 
   it('a deleted message leaves the index', async () => {
@@ -91,7 +96,7 @@ describe('search', () => {
   it('a message deleted before its index call leaves no row', async () => {
     const m = await text('kissa')
     await storage.deleteMessage(m.id)
-    await searchIndex.index(m)
+    await searchIndex.index(m.id)
     expect(await db.searchDocs.count()).toBe(0)
   })
 
@@ -126,12 +131,71 @@ describe('search', () => {
   })
 
   it('reads a bounded number of rows for a common word, the exact word first', async () => {
-    const row = (id: string, term: string) => ({ messageId: id, conversationId: chat, terms: [`${chat}:${term}`], textHash: 'x' })
-    const common = Array.from({ length: MAX_ROWS_PER_TOKEN + 50 }, (_, i) => row(`a${i}`, 'kissalla'))
-    await db.searchDocs.bulkPut([...common, row('z-rare', 'kissa')])
+    const common = Array.from({ length: MAX_ROWS_PER_TOKEN + 50 }, (_, i) => row(i, `a${i}`, 'kissalla'))
+    await db.searchDocs.bulkPut([...common, row(1_000_000, 'z-rare', 'kissa')])
     const hits = await searchIndex.search(chat, 'kissa', MAX_ROWS_PER_TOKEN * 2)
     expect(hits).toHaveLength(MAX_ROWS_PER_TOKEN)
     expect(hits.map((h) => h.messageId)).toContain('z-rare')
+  })
+
+  it('past the cap, the newest rows of a word stay', async () => {
+    await db.searchDocs.bulkPut(Array.from({ length: MAX_ROWS_PER_TOKEN + 50 }, (_, i) => row(i, `m${i}`, 'kissa')))
+    const ids = (await searchIndex.search(chat, 'kissa', MAX_ROWS_PER_TOKEN * 2)).map((h) => h.messageId)
+    expect(ids).toContain('m0')
+    expect(ids).toContain(`m${MAX_ROWS_PER_TOKEN - 1}`)
+    expect(ids).not.toContain(`m${MAX_ROWS_PER_TOKEN}`)
+  })
+
+  it('reads each distinct token once', async () => {
+    await indexed('kissa')
+    const where = vi.spyOn(db.table('searchDocs'), 'where')
+    await searchIndex.search(chat, 'kissa kissan kissat kissa', 5) // kis is a stem of all three
+    const reads = where.mock.calls.filter(([index]) => (index as unknown) === 'terms')
+    expect(reads).toHaveLength(new Set(['kissa', 'kissan', 'kissat', 'kis']).size)
+  })
+
+  it('reads the query up to its word limit and drops the rest', async () => {
+    const m = await indexed('kaukainen')
+    const fill = Array.from({ length: MAX_QUERY_WORDS }, (_, i) => `sana${i}`).join(' ')
+    expect(await found(`${fill} kaukainen`)).toEqual([])
+    expect(await found(`kaukainen ${fill}`)).toEqual([m.id])
+  })
+
+  it('a form of a word and the word itself each use up a word of the limit', async () => {
+    const m = await indexed('kaukainen')
+    const forms = Array.from({ length: MAX_QUERY_WORDS }, (_, i) => `talo${'a'.repeat(i + 1)}`).join(' ')
+    expect(await found(`${forms} kaukainen`)).toEqual([])
+    expect(await found('kaukainen kaukaisen')).toEqual([m.id])
+  })
+
+  it('finds ids only for the rows it returns', async () => {
+    for (let i = 0; i < 12; i++) await indexed(`kissa ${i}`)
+    const bulkGet = vi.spyOn(db.table('searchDocs'), 'bulkGet')
+    expect(await searchIndex.search(chat, 'kissa', 3)).toHaveLength(3)
+    expect(bulkGet.mock.calls.flatMap(([keys]) => keys as unknown[])).toHaveLength(3)
+  })
+
+  it('a rare word beats a common word', async () => {
+    for (let i = 0; i < 30; i++) await indexed(`ja ${i}`)
+    const rare = await indexed('mira')
+    const hits = await searchIndex.search(chat, 'mira ja', 5)
+    expect(hits[0].messageId).toBe(rare.id)
+  })
+
+  it('a word at the cap weighs the least', async () => {
+    const common = Array.from({ length: MAX_ROWS_PER_TOKEN + 1 }, (_, i) => row(i, `m${i}`, 'ja'))
+    const nearly = Array.from({ length: MAX_ROWS_PER_TOKEN - 1 }, (_, i) => row(100_000 + i, `n${i}`, 'on'))
+    await db.searchDocs.bulkPut([...common, ...nearly])
+    const hits = await searchIndex.search(chat, 'ja on', MAX_ROWS_PER_TOKEN * 2)
+    const score = (id: string) => hits.find((h) => h.messageId === id)!.score
+    expect(score('m0')).toBeLessThan(score('n0'))
+  })
+
+  it('ties go to the newest message', async () => {
+    const old = await indexedAt('kissa', 1000)
+    const newest = await indexedAt('kissa', 3000)
+    const mid = await indexedAt('kissa', 2000)
+    expect(await found('kissa')).toEqual([newest.id, mid.id, old.id])
   })
 
   it('stops at the limit', async () => {
@@ -146,11 +210,76 @@ describe('search', () => {
   })
 })
 
+describe('row numbers', () => {
+  it('sorts by message time, newest lowest', async () => {
+    const old = await indexedAt('kissa', 1000)
+    const newest = await indexedAt('koira', 2000)
+    expect(await numberOf(newest.id)).toBeLessThan(await numberOf(old.id))
+  })
+
+  it('gives two messages of one millisecond their own rows', async () => {
+    const a = await indexedAt('kissa', 1000)
+    const b = await indexedAt('koira', 1000)
+    expect(await db.searchDocs.count()).toBe(2)
+    expect(await numberOf(a.id)).not.toBe(await numberOf(b.id))
+  })
+
+  it('a clash stays inside its millisecond', async () => {
+    const before = await indexedAt('kissa', 1001)
+    const a = await indexedAt('kissa', 1000)
+    const b = await indexedAt('kissa', 1000)
+    const after = await indexedAt('kissa', 999)
+    const order = await Promise.all([before, a, b, after].map((m) => numberOf(m.id)))
+    expect(order[0]).toBeLessThan(Math.min(order[1], order[2]))
+    expect(Math.max(order[1], order[2])).toBeLessThan(order[3])
+  })
+
+  it('holds under index calls at the same moment', async () => {
+    const ms = await Promise.all(Array.from({ length: 8 }, async (_, i) => {
+      const m = await text(`kissa ${i}`)
+      await at(m, 1000)
+      return m
+    }))
+    await Promise.all(ms.map((m) => searchIndex.index(m.id)))
+    expect(await db.searchDocs.count()).toBe(8)
+    expect(new Set(await db.searchDocs.toCollection().primaryKeys()).size).toBe(8)
+  })
+
+  it('holds in a pass, and beside rows already there', async () => {
+    const first = await indexedAt('kissa', 1000)
+    for (let i = 0; i < 40; i++) await at(await text(`koira ${i}`), 1000)
+    await pass()
+    expect(await db.searchDocs.count()).toBe(41)
+    expect(await numberOf(first.id)).toBe(-1000 * 1024)
+  })
+
+  it('re-indexing keeps the row and its number', async () => {
+    const m = await indexedAt('kissa', 1000)
+    await indexedAt('koira', 1000)
+    const n = await numberOf(m.id)
+    await storage.mutateMessage(m.id, (x) => withNewVersion(x, editedVersion(x.versions[0], 'lintu')))
+    await searchIndex.index(m.id)
+    await searchIndex.index(m.id)
+    expect(await db.searchDocs.count()).toBe(2)
+    expect(await numberOf(m.id)).toBe(n)
+    expect(await found('lintu')).toEqual([m.id])
+  })
+
+  it('a pass repair keeps the number too', async () => {
+    const m = await indexedAt('kissa', 1000)
+    const n = await numberOf(m.id)
+    await storage.mutateMessage(m.id, (x) => withNewVersion(x, editedVersion(x.versions[0], 'lintu')))
+    await pass()
+    expect(await db.searchDocs.count()).toBe(1)
+    expect(await numberOf(m.id)).toBe(n)
+  })
+})
+
 describe('what goes in', () => {
   it('leaves tool steps out', async () => {
     const step: ContentPart = { type: 'tool', callId: 'c', round: 0, model: 'm', name: 'read_note', args: { path: 'mira' }, result: 'mira', status: 'done' }
     const m = await storage.appendMessage(chat, 'assistant', version([step, { type: 'text', text: 'kissa' }]))
-    await searchIndex.index(m)
+    await searchIndex.index(m.id)
     expect(await found('mira')).toEqual([])
     expect(await found('read_note')).toEqual([])
     expect(await found('kissa')).toEqual([m.id])
@@ -158,14 +287,14 @@ describe('what goes in', () => {
 
   it('stores no row for a message with no text', async () => {
     const divider = await storage.appendMessage(chat, 'divider', version([]))
-    await searchIndex.index(divider)
+    await searchIndex.index(divider.id)
     expect(await db.searchDocs.count()).toBe(0)
   })
 
   it('takes the row away when the active version has no text', async () => {
     const m = await indexed('kissa')
     const empty = await storage.mutateMessage(m.id, (x) => withNewVersion(x, version([])))
-    await searchIndex.index(empty!)
+    await searchIndex.index(empty!.id)
     expect(await db.searchDocs.count()).toBe(0)
   })
 })
@@ -221,16 +350,24 @@ describe('backfill', () => {
 
   it('takes away rows whose message is gone, at any place in the walk', async () => {
     for (let i = 0; i < 40; i++) await indexed(`kissa ${i}`)
-    for (const id of ['0', 'zzzz']) await db.searchDocs.put({ messageId: id, conversationId: chat, terms: [`${chat}:haamu`], textHash: 'x' })
+    await db.searchDocs.bulkPut([row(1, '0', 'haamu'), row(2, 'zzzz', 'haamu')])
     await pass()
     expect(await found('haamu')).toEqual([])
     expect(await db.searchDocs.count()).toBe(40)
   })
 
   it('takes away every row when no message is left', async () => {
-    await db.searchDocs.put({ messageId: 'gone', conversationId: chat, terms: ['haamu'], textHash: 'x' })
+    await db.searchDocs.put(row(1, 'gone', 'haamu'))
     await pass()
     expect(await db.searchDocs.count()).toBe(0)
+  })
+
+  it('rebuilds a row of an older format, though its text is the same', async () => {
+    const m = await indexed('kissa')
+    await db.searchDocs.where('messageId').equals(m.id).modify({ textHash: hashText('0:kissa'), terms: ['vanha muoto'] })
+    await pass()
+    expect(await found('kissa')).toEqual([m.id])
+    expect((await db.searchDocs.toArray())[0].terms).not.toContain('vanha muoto')
   })
 
   it('does not tokenise a message that has not changed', async () => {

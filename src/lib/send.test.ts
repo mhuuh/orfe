@@ -2608,7 +2608,7 @@ describe('term index', () => {
     const m = await lastMsg()
     await finds('koira', m.id)
     expect(put.mock.calls.length).toBeGreaterThan(3)
-    expect(index.mock.calls.filter(([x]) => x.id === m.id)).toHaveLength(1)
+    expect(index.mock.calls.filter(([id]) => id === m.id)).toHaveLength(1)
   })
 
   it('indexes what a stopped reply kept', async () => {

@@ -116,12 +116,12 @@ describe('backup', () => {
 
   it('leaves the term index out of the file, and ignores it in one', async () => {
     const chat = await seed()
-    await db.searchDocs.put({ messageId: 'm1', conversationId: chat.id, terms: ['kissa'], textHash: 'x' })
+    await db.searchDocs.put({ n: 1, messageId: 'm1', conversationId: chat.id, terms: ['kissa'], textHash: 'x' })
     const file = await exportBackup()
     expect(JSON.parse(await file.text()).tables).not.toHaveProperty('searchDocs')
 
     await db.searchDocs.clear()
-    const row = { messageId: 'm2', conversationId: chat.id, terms: ['koira'], textHash: 'x' }
+    const row = { n: 2, messageId: 'm2', conversationId: chat.id, terms: ['koira'], textHash: 'x' }
     const forged = new Blob([JSON.stringify({ format: 'orfe-backup', version: 1, exportedAt: 1, tables: { prompts: [], searchDocs: [row] } })])
     await importBackup(forged, 'replace')
     expect(await db.searchDocs.count()).toBe(0)

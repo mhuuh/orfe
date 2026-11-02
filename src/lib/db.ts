@@ -10,7 +10,7 @@ export interface KvRow {
 /** Shared with the bench, which runs the term index on a database of its own. */
 export const MESSAGES_SCHEMA = 'id, conversationId, [conversationId+order]'
 export const CACHE_SCHEMA = 'k'
-export const SEARCH_DOCS_SCHEMA = 'messageId, conversationId, *terms'
+export const SEARCH_DOCS_SCHEMA = 'n, &messageId, conversationId, *terms'
 
 class OrfeDb extends Dexie {
   conversations!: EntityTable<Conversation, 'id'>
@@ -21,7 +21,7 @@ class OrfeDb extends Dexie {
   notes!: EntityTable<Note, 'id'>
   noteRevisions!: EntityTable<NoteRevision, 'id'>
   summaries!: EntityTable<Summary, 'id'>
-  searchDocs!: EntityTable<SearchDoc, 'messageId'>
+  searchDocs!: EntityTable<SearchDoc, 'n'>
 
   constructor() {
     super('orfe')
