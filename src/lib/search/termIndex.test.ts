@@ -3,7 +3,8 @@ import { db, newId, storage } from '../storage'
 import type { ContentPart, Message } from '../types'
 import { editedVersion, withActive, withNewVersion } from '../versions'
 import { hashText } from '../hash'
-import { createSearchIndex, MAX_QUERY_WORDS, MAX_ROWS_PER_TOKEN, MS_PER_TERM, searchIndex } from './termIndex'
+import { wordTokens } from './tokens'
+import { createSearchIndex, MAX_KEYS_PER_SEARCH, MAX_QUERY_WORDS, MAX_ROWS_PER_TOKEN, MS_PER_TERM, placeRow, searchIndex } from './termIndex'
 
 let chat: string
 
@@ -146,6 +147,34 @@ describe('search', () => {
     expect(ids).not.toContain(`m${MAX_ROWS_PER_TOKEN}`)
   })
 
+  describe('keys per search', () => {
+    /** Eight short words, so the query holds eight or more tokens. */
+    const words = ['aa', 'ab', 'ac', 'ad', 'ae', 'af', 'ag', 'ah']
+    const tokenCount = new Set(words.flatMap(wordTokens)).size
+    const limit = Math.floor(MAX_KEYS_PER_SEARCH / tokenCount)
+
+    it('a query of many tokens shares out its keys', async () => {
+      await db.searchDocs.bulkPut(Array.from({ length: limit + 50 }, (_, i) => row(i, `m${i}`, 'aa')))
+      const hits = await searchIndex.search(chat, words.join(' '), limit * 2)
+      expect(limit).toBeLessThan(MAX_ROWS_PER_TOKEN)
+      expect(hits).toHaveLength(limit)
+      expect(hits.map((h) => h.messageId)).toContain('m0')
+      expect(hits.map((h) => h.messageId)).not.toContain(`m${limit}`)
+    })
+
+    it('a query of few tokens keeps the full cap', async () => {
+      await db.searchDocs.bulkPut(Array.from({ length: limit + 50 }, (_, i) => row(i, `m${i}`, 'aa')))
+      expect(await searchIndex.search(chat, 'aa', limit * 2)).toHaveLength(limit + 50)
+    })
+
+    it('a token that reached the limit it was read with weighs as capped', async () => {
+      await db.searchDocs.bulkPut(Array.from({ length: limit }, (_, i) => row(i, `m${i}`, 'aa')))
+      const [hit] = await searchIndex.search(chat, words.join(' '), 1)
+      const lowest = 1 / (1 + Math.log2(MAX_ROWS_PER_TOKEN))
+      expect(hit.score).toBeCloseTo(lowest / wordTokens('aa').length, 8)
+    })
+  })
+
   it('reads each distinct token once', async () => {
     await indexed('kissa')
     const where = vi.spyOn(db.table('searchDocs'), 'where')
@@ -251,6 +280,20 @@ describe('row numbers', () => {
     await pass()
     expect(await db.searchDocs.count()).toBe(41)
     expect(await numberOf(first.id)).toBe(-1000 * 1024)
+  })
+
+  it('a message with no usable time gets a row, and the pass goes past it', async () => {
+    const bad: Message[] = []
+    for (const [i, time] of [undefined, Number.NaN, 1e300].entries()) {
+      const m = await text(`kissa ${i}`)
+      await db.messages.update(m.id, { createdAt: time })
+      bad.push(m)
+    }
+    const good = await text('kissa hyvä')
+    await expect(searchIndex.index(bad[0].id)).resolves.toBeUndefined()
+    await pass()
+    expect(await db.searchDocs.count()).toBe(4)
+    expect((await found('kissa')).sort()).toEqual([...bad, good].map((m) => m.id).sort())
   })
 
   it('re-indexing keeps the row and its number', async () => {
@@ -367,12 +410,59 @@ describe('backfill', () => {
     expect(await db.searchDocs.count()).toBeLessThanOrEqual(Math.ceil(budget / (perRow * MS_PER_TERM)) + 1)
   })
 
+  describe('a slow batch read', () => {
+    /** The clock moves only when a batch is read, so nothing else can use up the budget. */
+    async function slicesFor(readMs: number): Promise<number> {
+      let now = 0
+      vi.spyOn(performance, 'now').mockImplementation(() => now)
+      const messages = db.table('messages')
+      const where = messages.where.bind(messages)
+      vi.spyOn(messages, 'where').mockImplementation(((index: string) => {
+        now += readMs
+        return where(index)
+      }) as typeof messages.where)
+      let slices = 1
+      while (!(await searchIndex.backfill(30))) slices++
+      return slices
+    }
+
+    beforeEach(async () => {
+      for (let i = 0; i < 60; i++) await indexed(`kissa ${i}`)
+    })
+
+    it('does not use up the row budget of a clean pass', async () => {
+      expect(await slicesFor(31)).toBeLessThanOrEqual(3)
+    })
+
+    it('still walks more than one message when the read alone is over the budget', async () => {
+      expect(await slicesFor(70)).toBeLessThanOrEqual(3)
+    })
+  })
+
   it('a slice always moves on, however large the first message', async () => {
     const words = Array.from({ length: 500 }, (_, i) => `sana${i}`).join(' ')
     await text(words)
     await text(words)
     expect(await searchIndex.backfill(1)).toBe(false)
     expect(await db.searchDocs.count()).toBe(1)
+  })
+
+  it('ignores a place of another format, so a format change rebuilds rows below it', async () => {
+    for (let i = 0; i < 6; i++) await indexed(`kissa ${i}`)
+    const ids = (await db.messages.toCollection().primaryKeys()).sort()
+    await db.searchDocs.toCollection().modify({ textHash: 'vanha', terms: ['vanha'] })
+    await db.cache.put({ ...placeRow(ids[2]), value: { id: ids[2], format: 0 } })
+    await pass()
+    expect((await found('kissa')).length).toBe(6)
+  })
+
+  it('a place of this format is kept', async () => {
+    for (let i = 0; i < 6; i++) await indexed(`kissa ${i}`)
+    const ids = (await db.messages.toCollection().primaryKeys()).sort()
+    await db.searchDocs.toCollection().modify({ textHash: 'vanha', terms: ['vanha'] })
+    await db.cache.put(placeRow(ids[2]))
+    await pass()
+    expect((await found('kissa')).length).toBe(3)
   })
 
   describe('passDue', () => {

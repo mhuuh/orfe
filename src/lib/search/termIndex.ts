@@ -24,7 +24,10 @@ export interface SearchIndex {
 
 /** Bump this on any change to `filed` or `tokens`. A pass then rebuilds every row. */
 const FORMAT = 1
-/** `db.cache` key: the last message id the pass walked. A killed run resumes from it. */
+/**
+ * `db.cache` key: the last message id the pass walked, and the format of that pass. A killed run
+ * resumes from it. A place of another format is ignored: rows below it would stay old.
+ */
 const PLACE = 'search-backfill'
 /** `db.cache` key: `at` is when the last pass finished, and `value` its format. */
 const FINISHED = 'search-backfill-finished'
@@ -32,8 +35,10 @@ const WEEK_MS = 7 * 86_400_000
 /** Messages read in one transaction. */
 const BATCH = 25
 /**
- * One backfill slice, in ms. It holds `messages`, so a send can wait that long. Measured at 100k
- * messages under a 6x throttle: median 27 ms, p90 33 ms, max 108 ms.
+ * The time one backfill slice gets for its rows, in ms. The batch read comes on top: a slow read
+ * must not leave a slice one message. A slice holds `messages`, so a send can wait that long.
+ * Measured at 100k messages under a 6x throttle. Writing: median 31 ms, p90 37 ms, max 118 ms. A
+ * clean pass: median 40 ms, max 49 ms, 70 messages a slice.
  */
 export const SLICE_BUDGET_MS = 30
 /**
@@ -55,6 +60,13 @@ const MIN_PREFIX = 3
  * common word reaches only the newest 4,000 rows that hold it. A rare word never reaches the cap.
  */
 export const MAX_ROWS_PER_TOKEN = 4000
+/**
+ * The most keys one search reads. The time of a search is almost all key reads, at about 16
+ * microseconds per key under a 6x throttle, so this holds a search near 400 ms. Each token gets its
+ * share, up to `MAX_ROWS_PER_TOKEN`. The cost: in a query with many tokens, a capped word reaches
+ * only its newest 2,000 to 3,000 rows. Queries of one or two words never reach this limit.
+ */
+export const MAX_KEYS_PER_SEARCH = 24000
 /** Query words read. Past this the rest are dropped. A form of a word counts as a word. */
 export const MAX_QUERY_WORDS = 8
 
@@ -79,6 +91,18 @@ const termsOf = (m: Message, text: string): string[] => tokens(text).map((t) => 
 /** More rows, less weight: 1 for a word in one row, about 0.08 for a word at the cap. */
 const rarity = (rows: number): number => 1 / (1 + Math.log2(Math.max(1, rows)))
 
+/** The stored place of a pass. Exported for the bench, which times a pass over part of its messages. */
+export const placeRow = (id: string): KvRow => ({ k: PLACE, value: { id, format: FORMAT }, at: Date.now() })
+
+/** Where the stored place says to go on from. Empty: the start. */
+function placeOf(row: KvRow | undefined): string {
+  const place = row?.value as { id: string; format: number } | undefined
+  return place?.format === FORMAT ? place.id : ''
+}
+
+/** The message's time, or 0 if a hand-edited backup left none: `n` must be a safe integer. */
+const timeOf = (m: Message): number => (Number.isSafeInteger(m.createdAt * SAME_MS) ? m.createdAt : 0)
+
 /** The database is a parameter so that the bench can run this same code on its own database. */
 export function createSearchIndex(store: Dexie): SearchIndex {
   const messages = store.table<Message, string>('messages')
@@ -91,20 +115,21 @@ export function createSearchIndex(store: Dexie): SearchIndex {
    * `taken` holds numbers picked in this transaction and not written yet.
    */
   const freeNumber = async (m: Message, taken: Set<number>): Promise<number> => {
-    let n = -m.createdAt * SAME_MS
+    let n = -timeOf(m) * SAME_MS
     while (taken.has(n) || (await docs.get(n))) n++
     taken.add(n)
     return n
   }
 
   /**
-   * Walks one batch from the stored place. Stops early when the clock plus the writes charged so
-   * far pass the deadline, but always walks one message. Returns the charge, and true at the end.
+   * Walks one batch from the stored place. `paid` is what the slice has used of `budgetMs` so far:
+   * time on rows, and writes charged. Stops when that reaches the budget, but always walks one
+   * message. Returns the new `paid`, and true at the end.
    */
-  const walk = (deadline: number, charged: number): Promise<{ end: boolean; charged: number }> =>
+  const walk = (budgetMs: number, paid: number): Promise<{ end: boolean; paid: number }> =>
     // One transaction, with the messages in it, so an edit can't slip in between the read and the write.
     store.transaction('rw', messages, docs, cache, async () => {
-      const place = ((await cache.get(PLACE))?.value as string | undefined) ?? ''
+      const place = placeOf(await cache.get(PLACE))
       const batch = await messages.where(':id').above(place).limit(BATCH).toArray()
       const lastRead = batch.at(-1)?.id
       const tail = batch.length < BATCH || lastRead === undefined
@@ -112,24 +137,28 @@ export function createSearchIndex(store: Dexie): SearchIndex {
       // Both sort by message id, so this stretch of rows holds any row of these messages.
       const stretch = await (tail ? ids.above(place) : ids.between(place, lastRead, false, true)).toArray()
       const held = new Map(stretch.map((d) => [d.messageId, d]))
+      // The clock starts here. A read that is already paid for must not use up the row budget.
+      const begun = performance.now()
+      const used = (): number => paid + performance.now() - begun
       const puts: SearchDoc[] = []
       const drops: number[] = []
       const taken = new Set<number>()
       const walked = new Set<string>()
       for (const m of batch) {
-        if (walked.size > 0 && performance.now() + charged >= deadline) break
+        if (walked.size > 0 && used() >= budgetMs) break
         walked.add(m.id)
         const text = textOf(m)
         const row = held.get(m.id)
         const textHash = hashOf(text)
         if (row?.textHash === textHash) continue
         const terms = termsOf(m, text)
-        charged += terms.length * MS_PER_TERM
+        paid += terms.length * MS_PER_TERM
         if (terms.length > 0) {
           const n = row?.n ?? (await freeNumber(m, taken))
           puts.push({ n, messageId: m.id, conversationId: m.conversationId, terms, textHash })
         } else if (row) drops.push(row.n)
       }
+      const spent = used()
       const last = [...walked].at(-1)
       const end = tail && walked.size === batch.length
       // A row in the walked stretch with no message has lost its message.
@@ -141,15 +170,15 @@ export function createSearchIndex(store: Dexie): SearchIndex {
       if (end) {
         await cache.delete(PLACE)
         await cache.put({ k: FINISHED, value: FORMAT, at: Date.now() })
-      } else if (last !== undefined) await cache.put({ k: PLACE, value: last, at: Date.now() })
-      return { end, charged }
+      } else if (last !== undefined) await cache.put(placeRow(last))
+      return { end, paid: spent }
     })
 
   /** The numbers of rows that hold this token, newest first. Keys only: much cheaper than reading the rows. */
-  const holders = (conversationId: string, token: string): Promise<number[]> => {
+  const holders = (conversationId: string, token: string, limit: number): Promise<number[]> => {
     const terms = docs.where('terms')
     const term = filed(conversationId, token)
-    return (token.length < MIN_PREFIX ? terms.equals(term) : terms.startsWith(term)).limit(MAX_ROWS_PER_TOKEN).primaryKeys()
+    return (token.length < MIN_PREFIX ? terms.equals(term) : terms.startsWith(term)).limit(limit).primaryKeys()
   }
 
   return {
@@ -175,11 +204,12 @@ export function createSearchIndex(store: Dexie): SearchIndex {
       const asked = [...new Set(wordsOf(query))].slice(0, MAX_QUERY_WORDS).map(wordTokens)
       // Forms of a word share stems, so each token is read once.
       const distinct = [...new Set(asked.flat())]
-      const reads = await Promise.all(distinct.map((t) => holders(conversationId, t)))
+      const perToken = Math.min(MAX_ROWS_PER_TOKEN, Math.floor(MAX_KEYS_PER_SEARCH / Math.max(1, distinct.length)))
+      const reads = await Promise.all(distinct.map((t) => holders(conversationId, t, perToken)))
       const found = new Map(
         distinct.map((token, i) => {
           const rows = new Set(reads[i])
-          return [token, { rows, weight: rarity(reads[i].length >= MAX_ROWS_PER_TOKEN ? MAX_ROWS_PER_TOKEN : rows.size) }]
+          return [token, { rows, weight: rarity(reads[i].length >= perToken ? MAX_ROWS_PER_TOKEN : rows.size) }]
         }),
       )
       const scores = new Map<number, number>()
@@ -200,13 +230,14 @@ export function createSearchIndex(store: Dexie): SearchIndex {
       })
     },
     async backfill(budgetMs) {
-      const deadline = performance.now() + budgetMs
-      let charged = 0
+      const start = performance.now()
+      let paid = 0
       for (;;) {
-        const step = await walk(deadline, charged)
+        const step = await walk(budgetMs, paid)
         if (step.end) return true
-        charged = step.charged
-        if (performance.now() + charged >= deadline) return false
+        paid = step.paid
+        // The second check counts reads too, so a clean pass can't read batch after batch.
+        if (paid >= budgetMs || performance.now() - start >= budgetMs) return false
       }
     },
     async passDue() {

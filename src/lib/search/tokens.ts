@@ -6,7 +6,7 @@ const WORD = /[\p{L}\p{N}]+/gu
 const MAX_WORD = 64
 /**
  * Tokens kept per message. Past this the rest of the message is not indexed. At 2,000 a 500 KB
- * message takes about 160 ms under a 6x throttle, and about 12 KB of varied text still fits whole.
+ * message takes about 170 to 220 ms under a 6x throttle, and about 12 KB of varied text still fits whole.
  */
 export const MAX_TOKENS = 2000
 

@@ -19,6 +19,7 @@ const RESULT: BenchResult = {
   write: { min: 1, median: 2, p90: 3, max: 3 },
   slice: { min: 20, median: 40, p90: 60, max: 70 },
   longMessageMs: 150,
+  cleanPass: { messages: 1000, slices: 20, slice: { min: 30, median: 44, p90: 50, max: 60 } },
   query: { min: 10, median: 100, p90: 700, max: 700 },
   queries: [
     { query: 'the', ms: 700, hits: 25 },
@@ -82,6 +83,8 @@ describe('runBench', () => {
     expect([...phases]).toEqual(['seed', 'index', 'measure', 'clean'])
     expect(r.slice.max).toBeGreaterThanOrEqual(r.slice.min)
     expect(r.longMessageMs).toBeGreaterThan(0)
+    expect(r.cleanPass.messages).toBeGreaterThan(0)
+    expect(r.cleanPass.slices).toBeGreaterThan(0)
     expect(r.hidden).toBe(false)
   })
 
@@ -146,6 +149,7 @@ describe('runBench', () => {
     expect(line).toContain('190.7 MB')
     expect(line).toContain('Backfill slice: min 20 ms, median 40 ms, p90 60 ms, max 70 ms')
     expect(line).toContain('One 500 KB message: 150 ms')
+    expect(line).toContain('Clean pass at 30 ms: 1,000 messages, 20 slices, 50 per slice, median 44 ms, max 60 ms a slice')
     expect(line).toContain('Page was hidden: no')
   })
 

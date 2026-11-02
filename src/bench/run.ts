@@ -1,6 +1,6 @@
 import Dexie from 'dexie'
 import { CACHE_SCHEMA, MESSAGES_SCHEMA, SEARCH_DOCS_SCHEMA } from '../lib/db'
-import { createSearchIndex, SLICE_BUDGET_MS } from '../lib/search/termIndex'
+import { createSearchIndex, placeRow, SLICE_BUDGET_MS, type SearchIndex } from '../lib/search/termIndex'
 import type { Message, SearchDoc } from '../lib/types'
 
 /**
@@ -21,6 +21,7 @@ const SLOW_MS = 500
 /** One slice in this many runs at the app's real budget, so its time can be read. */
 const REAL_SLICE_EVERY = 10
 const LONG_MESSAGE_CHARS = 500_000
+const CLEAN_PASS_MESSAGES = 1000
 const SMALL_SPACE_BYTES = 2 * 1024 ** 3
 
 /** Single words, inflected Finnish and two-word queries. Common words are in on purpose: they cost the most. */
@@ -179,6 +180,8 @@ export interface BenchResult {
   slice: Stats
   /** Indexing one 500 KB message. */
   longMessageMs: number
+  /** A pass with nothing to write, at the app's real budget, over part of the messages. */
+  cleanPass: { messages: number; slices: number; slice: Stats }
   query: Stats
   queries: { query: string; ms: number; hits: number }[]
   /** A frozen page adds time to any number here, and loses the wake lock. */
@@ -231,6 +234,26 @@ async function fakeLongText(): Promise<string> {
   return text
 }
 
+/**
+ * Times a pass with nothing to write at the app's real slice budget. It shows if the batch read
+ * leaves a slice too little time. Message ids are random, so the top share of ids is that share of
+ * the messages, and the pass starts there.
+ */
+async function cleanPass(index: SearchIndex, bench: Dexie, total: number): Promise<BenchResult['cleanPass']> {
+  const share = Math.min(1, CLEAN_PASS_MESSAGES / total)
+  const from = share === 1 ? '' : Math.floor((1 - share) * 0xffffffff).toString(16).padStart(8, '0')
+  const messages = await bench.table('messages').where(':id').above(from).count()
+  await bench.table('cache').put(placeRow(from))
+  const times: number[] = []
+  for (;;) {
+    const start = performance.now()
+    const done = await index.backfill(SLICE_BUDGET_MS)
+    times.push(performance.now() - start)
+    if (done) return { messages, slices: times.length, slice: stats(times) }
+    await breathe()
+  }
+}
+
 export async function runBench(opts: { messages: number; oneChat?: boolean; chars?: number; onProgress(p: BenchProgress): void }): Promise<BenchResult> {
   const { messages: total, oneChat = false, chars, onProgress } = opts
   let hidden = document.visibilityState === 'hidden'
@@ -276,7 +299,7 @@ export async function runBench(opts: { messages: number; oneChat?: boolean; char
     onProgress({ phase: 'index', done: total, total })
     const indexed = await usedBytes()
 
-    const steps = WRITE_SAMPLES + QUERIES.length + 1
+    const steps = WRITE_SAMPLES + QUERIES.length + 2
     let step = 0
     const sample = await rows.limit(WRITE_SAMPLES).primaryKeys()
     const writes: number[] = []
@@ -307,6 +330,9 @@ export async function runBench(opts: { messages: number; oneChat?: boolean; char
     })
     onProgress({ phase: 'measure', done: ++step, total: steps })
 
+    const clean = await cleanPass(index, bench, total)
+    onProgress({ phase: 'measure', done: ++step, total: steps })
+
     const held = await docs.limit(1000).toArray()
     const result: BenchResult = {
       messages: total,
@@ -322,6 +348,7 @@ export async function runBench(opts: { messages: number; oneChat?: boolean; char
       write: stats(writes),
       slice: stats(sliceTimes),
       longMessageMs,
+      cleanPass: clean,
       query: stats(queries.map((q) => q.ms)),
       queries,
       hidden,
@@ -356,6 +383,7 @@ export function reportText(r: BenchResult): string {
     `One index write: ${statLine(r.write)}`,
     `Backfill slice: ${statLine(r.slice)}`,
     `One 500 KB message: ${ms(r.longMessageMs)}`,
+    `Clean pass at 30 ms: ${r.cleanPass.messages.toLocaleString('en-US')} messages, ${r.cleanPass.slices} slices, ${Math.round(r.cleanPass.messages / r.cleanPass.slices)} per slice, median ${ms(r.cleanPass.slice.median)}, max ${ms(r.cleanPass.slice.max)} a slice`,
     `Queries (${r.queries.length}): ${statLine(r.query)}`,
     `Slowest: "${slowest.query}" ${ms(slowest.ms)}`,
     `Over 500 ms: ${over} of ${r.queries.length}`,
