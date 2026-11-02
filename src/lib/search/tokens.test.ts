@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { tokens, wordsOf } from './tokens'
+import { MAX_TOKENS, tokens, wordsOf } from './tokens'
 
 describe('tokens', () => {
   it('keeps ä and ö', () => {
@@ -36,6 +36,18 @@ describe('tokens', () => {
   it('skips a word too long to be a word', () => {
     expect(tokens(`${'x'.repeat(65)} talo`)).not.toContain('x'.repeat(65))
     expect(tokens(`${'x'.repeat(65)} talo`)).toContain('talo')
+  })
+
+  it('stops at the token cap and keeps the start of the text', () => {
+    const t = tokens(Array.from({ length: MAX_TOKENS * 2 }, (_, i) => `sana${i}`).join(' '))
+    expect(t).toHaveLength(MAX_TOKENS)
+    expect(t).toContain('sana0')
+    expect(t).not.toContain(`sana${MAX_TOKENS * 2 - 1}`)
+  })
+
+  it('counts a repeated word once, so repeats do not use up the cap', () => {
+    const t = tokens(`${'talo '.repeat(MAX_TOKENS * 2)} viimeinen`)
+    expect(t).toContain('viimeinen')
   })
 
   it('gives nothing for text with no words', () => {

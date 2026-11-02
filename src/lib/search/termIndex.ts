@@ -2,7 +2,6 @@ import type Dexie from 'dexie'
 import { db, type KvRow } from '../db'
 import { hashText } from '../hash'
 import type { Message, SearchDoc } from '../types'
-import { versionText } from '../versions'
 import { wordsOf, wordTokens, tokens } from './tokens'
 
 /** History search talks to this and nothing else, so FTS5 can replace the term index behind it. */
@@ -10,6 +9,8 @@ export interface SearchIndex {
   /** Makes the message's row match what is stored: a new row, an update, or no row if the message or its text is gone. */
   index(messageId: string): Promise<void>
   remove(messageId: string): Promise<void>
+  /** One delete for a whole chat. A long chat must not cost one transaction per message. */
+  removeChat(conversationId: string): Promise<void>
   /**
    * Best hits first, in one chat, ties newest first. Each query word adds at most 1 to the score,
    * and less the more rows hold it, so a name beats the plain words around it.
@@ -17,14 +18,26 @@ export interface SearchIndex {
   search(conversationId: string, query: string, limit: number): Promise<{ messageId: string; score: number }[]>
   /** One slice of a pass over all messages. True when the pass is done. The next call then starts a new pass. */
   backfill(budgetMs: number): Promise<boolean>
+  /** True if no pass has finished, one stopped half way, the last is over a week old, or it was of an older format. */
+  passDue(): Promise<boolean>
 }
 
 /** Bump this on any change to `filed` or `tokens`. A pass then rebuilds every row. */
 const FORMAT = 1
 /** `db.cache` key: the last message id the pass walked. A killed run resumes from it. */
 const PLACE = 'search-backfill'
+/** `db.cache` key: `at` is when the last pass finished, and `value` its format. */
+const FINISHED = 'search-backfill-finished'
+const WEEK_MS = 7 * 86_400_000
 /** Messages read in one transaction. */
 const BATCH = 25
+/** One backfill slice, in ms. */
+export const SLICE_BUDGET_MS = 30
+/**
+ * What one term costs to write, in ms, under a 6x throttle. The deadline is checked while
+ * tokenising, which is cheap. The write comes after, so a slice charges it up front.
+ */
+export const MS_PER_TERM = 0.1
 /** Row numbers per millisecond. 1.8e12 ms times this stays a safe integer. */
 const SAME_MS = 1024
 /**
@@ -47,7 +60,8 @@ export const MAX_QUERY_WORDS = 8
  * stored, so they have no effect here. Tool steps stay out: history search covers messages, and
  * notes have their own search.
  */
-const textOf = (m: Message): string => versionText(m.versions[m.activeVersion])
+const textOf = (m: Message): string =>
+  (m.versions[m.activeVersion]?.content ?? []).flatMap((p) => (p.type === 'text' ? [p.text] : [])).join('\n')
 
 /**
  * A term as the index holds it, filed under its chat. A search then reads only its own chat's rows.
@@ -80,8 +94,11 @@ export function createSearchIndex(store: Dexie): SearchIndex {
     return n
   }
 
-  /** Walks one batch from the stored place. Stops early at the deadline, but always walks one message. True at the end. */
-  const walk = (deadline: number): Promise<boolean> =>
+  /**
+   * Walks one batch from the stored place. Stops early when the clock plus the writes charged so
+   * far pass the deadline, but always walks one message. Returns the charge, and true at the end.
+   */
+  const walk = (deadline: number, charged: number): Promise<{ end: boolean; charged: number }> =>
     // One transaction, with the messages in it, so an edit can't slip in between the read and the write.
     store.transaction('rw', messages, docs, cache, async () => {
       const place = ((await cache.get(PLACE))?.value as string | undefined) ?? ''
@@ -97,13 +114,14 @@ export function createSearchIndex(store: Dexie): SearchIndex {
       const taken = new Set<number>()
       const walked = new Set<string>()
       for (const m of batch) {
-        if (walked.size > 0 && performance.now() >= deadline) break
+        if (walked.size > 0 && performance.now() + charged >= deadline) break
         walked.add(m.id)
         const text = textOf(m)
         const row = held.get(m.id)
         const textHash = hashOf(text)
         if (row?.textHash === textHash) continue
         const terms = termsOf(m, text)
+        charged += terms.length * MS_PER_TERM
         if (terms.length > 0) {
           const n = row?.n ?? (await freeNumber(m, taken))
           puts.push({ n, messageId: m.id, conversationId: m.conversationId, terms, textHash })
@@ -117,9 +135,11 @@ export function createSearchIndex(store: Dexie): SearchIndex {
       }
       if (puts.length > 0) await docs.bulkPut(puts)
       if (drops.length > 0) await docs.bulkDelete(drops)
-      if (end) await cache.delete(PLACE)
-      else if (last !== undefined) await cache.put({ k: PLACE, value: last, at: Date.now() })
-      return end
+      if (end) {
+        await cache.delete(PLACE)
+        await cache.put({ k: FINISHED, value: FORMAT, at: Date.now() })
+      } else if (last !== undefined) await cache.put({ k: PLACE, value: last, at: Date.now() })
+      return { end, charged }
     })
 
   /** The numbers of rows that hold this token, newest first. Keys only: much cheaper than reading the rows. */
@@ -144,6 +164,9 @@ export function createSearchIndex(store: Dexie): SearchIndex {
     },
     async remove(messageId) {
       await docs.where('messageId').equals(messageId).delete()
+    },
+    async removeChat(conversationId) {
+      await docs.where('conversationId').equals(conversationId).delete()
     },
     async search(conversationId, query, limit) {
       const asked = [...new Set(wordsOf(query))].slice(0, MAX_QUERY_WORDS).map(wordTokens)
@@ -175,10 +198,18 @@ export function createSearchIndex(store: Dexie): SearchIndex {
     },
     async backfill(budgetMs) {
       const deadline = performance.now() + budgetMs
+      let charged = 0
       for (;;) {
-        if (await walk(deadline)) return true
-        if (performance.now() >= deadline) return false
+        const step = await walk(deadline, charged)
+        if (step.end) return true
+        charged = step.charged
+        if (performance.now() + charged >= deadline) return false
       }
+    },
+    async passDue() {
+      if (await cache.get(PLACE)) return true
+      const last = await cache.get(FINISHED)
+      return last?.value !== FORMAT || Date.now() - last.at > WEEK_MS
     },
   }
 }

@@ -7,7 +7,7 @@ import { buildIndex } from './notes/index'
 import { notes, writeResult, type UndoReport } from './notes/store'
 import { mergeReasoning, streamChat, type ChatRequest, type OutMessage, type StreamEvent } from './openrouter'
 import { wholeInWindow } from './retention'
-import { searchIndex } from './search/termIndex'
+import { searchIndex, SLICE_BUDGET_MS } from './search/termIndex'
 import { db, newId, storage } from './storage'
 import { systemFor, systemText } from './system'
 import type { ContentPart, Conversation, LastRequest, Message, Reasoning, ToolPart, Usage, Version } from './types'
@@ -30,8 +30,6 @@ const CONTINUE_TURN: OutMessage = {
   content: 'Continue exactly where you stopped. Do not repeat what you already wrote. Do not repeat a tool call that already ran.',
 }
 const WRITE_INTERVAL_MS = 200
-/** One backfill slice. Short enough to go unnoticed between taps. */
-const BACKFILL_BUDGET_MS = 30
 /** Share of the context limit above which a cold cache triggers a trim (spec §6). */
 const SOFT_THRESHOLD = 0.85
 /**
@@ -113,7 +111,7 @@ function nextSlice(): void {
 async function backfillSlice(): Promise<void> {
   try {
     // A reply may have started since this slice was asked for.
-    if (!isAnyGenerating() && (await searchIndex.backfill(BACKFILL_BUDGET_MS))) passes--
+    if (!isAnyGenerating() && (await searchIndex.backfill(SLICE_BUDGET_MS))) passes--
   } catch (e) {
     console.error('backfill failed', e)
     passes = 0
@@ -129,15 +127,29 @@ export function backfillSoon(): void {
 }
 
 /**
+ * The pass at app start. Normal writes sync themselves and a failure asks for a pass, so a start
+ * needs one only if a pass is due or a reply was cut off (`recovered`: chats that lost a reply).
+ */
+export async function backfillAtStart(recovered: number): Promise<void> {
+  try {
+    if (recovered > 0 || (await searchIndex.passDue())) backfillSoon()
+  } catch (e) {
+    console.error('backfill failed', e)
+  }
+}
+
+function indexFailed(e: unknown): void {
+  console.error('index failed', e)
+  backfillSoon()
+}
+
+/**
  * Brings the message's index row in line with what is stored. Called when a message settles, not on
  * each stream write: tokenising a stream every 200 ms would slow the phone. Not awaited, and it never
  * throws: a send must not wait on the index or fail with it.
  */
 function syncIndex(messageId: string): void {
-  searchIndex.index(messageId).catch((e: unknown) => {
-    console.error('index failed', e)
-    backfillSoon()
-  })
+  searchIndex.index(messageId).catch(indexFailed)
 }
 
 /** The visible OK on a step that waits. A tap for any other step does nothing. */
@@ -168,7 +180,7 @@ export async function deleteChat(id: string): Promise<ChatSnapshot | null> {
     await notes.trashShelf(id, notesDeletedAt)
     return { conversation, messages, notesDeletedAt }
   })
-  for (const m of snapshot?.messages ?? []) syncIndex(m.id)
+  if (snapshot) searchIndex.removeChat(id).catch(indexFailed)
   return snapshot
 }
 

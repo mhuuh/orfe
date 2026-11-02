@@ -41,7 +41,7 @@ describe('backup', () => {
     const s = await storage.getSettings()
     expect(s.streaming).toBe(false)
     expect(s.key).toBe('sk-or-other')
-    expect(await db.cache.count()).toBe(0)
+    expect(await storage.getCache('models')).toBeUndefined()
   })
 
   it('merge keeps rows that are not in the file', async () => {

@@ -4,7 +4,7 @@ import { db, newId, storage } from './storage'
 import { setAbilitiesForTest, toolsFor, type Ability } from './abilities/registry'
 import { setModelRulesForTest } from './modelRules'
 import { searchIndex } from './search/termIndex'
-import { backfillSoon, computeCold, deleteChat, deleteMessage, deleteVersion, editMessage, errorText, flipVersion, generate, MAX_ROUNDS, okStep, patchVersion, isGenerating, recoverInterrupted, replacePromptRef, restoreChat, restoreMessage, restoreVersion, sendUserMessage, setAbility, setAlreadyDoneForTest, setPlain, setPrompt, setToolUndone, stop, undoReplyWrites } from './send'
+import { backfillAtStart, backfillSoon, computeCold, deleteChat, deleteMessage, deleteVersion, editMessage, errorText, flipVersion, generate, MAX_ROUNDS, okStep, patchVersion, isGenerating, recoverInterrupted, replacePromptRef, restoreChat, restoreMessage, restoreVersion, sendUserMessage, setAbility, setAlreadyDoneForTest, setPlain, setPrompt, setToolUndone, stop, undoReplyWrites } from './send'
 import { notes, YOU } from './notes/store'
 import { CAPABILITY_NOTE, systemFor } from './system'
 import { fingerprint } from './context'
@@ -2675,6 +2675,63 @@ describe('term index', () => {
     await vi.waitFor(async () => expect(await db.searchDocs.count()).toBe(0))
     await restoreChat(snapshot!)
     await finds('kissa', m.id)
+  })
+
+  it('deleting a chat makes one index call, not one per message', async () => {
+    for (const t of ['kissa', 'koira', 'lintu']) await sendUserMessage(convId, t, { reply: false })
+    await finds('lintu', (await lastMsg()).id)
+    const index = vi.spyOn(searchIndex, 'index')
+    const removeChat = vi.spyOn(searchIndex, 'removeChat')
+    await deleteChat(convId)
+    expect(removeChat).toHaveBeenCalledTimes(1)
+    expect(removeChat).toHaveBeenCalledWith(convId)
+    expect(index).not.toHaveBeenCalled()
+  })
+
+  it('a chat delete does not wait for the index', async () => {
+    vi.spyOn(searchIndex, 'removeChat').mockReturnValue(new Promise(() => {}))
+    expect(await deleteChat(convId)).not.toBeNull()
+  })
+
+  it('a failed chat delete in the index logs and asks for a pass', async () => {
+    const error = quiet()
+    await sendUserMessage(convId, 'kissa', { reply: false })
+    await finds('kissa', (await lastMsg()).id)
+    vi.spyOn(searchIndex, 'removeChat').mockRejectedValue(new Error('disk full'))
+    await deleteChat(convId)
+    await vi.waitFor(() => expect(error).toHaveBeenCalledWith('index failed', expect.any(Error)))
+    await vi.waitFor(async () => expect(await db.searchDocs.count()).toBe(0))
+  })
+
+  describe('at app start', () => {
+    it('runs a pass when one is due', async () => {
+      vi.spyOn(searchIndex, 'passDue').mockResolvedValue(true)
+      const backfill = vi.spyOn(searchIndex, 'backfill').mockResolvedValue(true)
+      await backfillAtStart(0)
+      await vi.waitFor(() => expect(backfill).toHaveBeenCalled())
+    })
+
+    it('runs a pass when a reply was cut off, even if none is due', async () => {
+      vi.spyOn(searchIndex, 'passDue').mockResolvedValue(false)
+      const backfill = vi.spyOn(searchIndex, 'backfill').mockResolvedValue(true)
+      await backfillAtStart(1)
+      await vi.waitFor(() => expect(backfill).toHaveBeenCalled())
+    })
+
+    it('runs no pass otherwise', async () => {
+      vi.spyOn(searchIndex, 'passDue').mockResolvedValue(false)
+      const backfill = vi.spyOn(searchIndex, 'backfill').mockResolvedValue(true)
+      await backfillAtStart(0)
+      await pause()
+      expect(backfill).not.toHaveBeenCalled()
+    })
+
+    it('logs and goes on if it cannot tell', async () => {
+      const error = quiet()
+      vi.spyOn(searchIndex, 'passDue').mockRejectedValue(new Error('closed'))
+      await backfillAtStart(0)
+      expect(error).toHaveBeenCalledWith('backfill failed', expect.any(Error))
+    })
   })
 
   it('an index error never breaks a send', async () => {

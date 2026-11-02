@@ -3,7 +3,7 @@ import { db, newId, storage } from '../storage'
 import type { ContentPart, Message } from '../types'
 import { editedVersion, withActive, withNewVersion } from '../versions'
 import { hashText } from '../hash'
-import { createSearchIndex, MAX_QUERY_WORDS, MAX_ROWS_PER_TOKEN, searchIndex } from './termIndex'
+import { createSearchIndex, MAX_QUERY_WORDS, MAX_ROWS_PER_TOKEN, MS_PER_TERM, searchIndex } from './termIndex'
 
 let chat: string
 
@@ -275,6 +275,19 @@ describe('row numbers', () => {
   })
 })
 
+describe('whole chats', () => {
+  it('removeChat takes the chat out in one call, and leaves other chats', async () => {
+    const other = (await storage.createConversation()).id
+    await indexed('kissa')
+    await indexed('koira')
+    const kept = await indexed('kissa', other)
+    await searchIndex.removeChat(chat)
+    expect(await found('kissa')).toEqual([])
+    expect(await found('kissa', other)).toEqual([kept.id])
+    expect(await db.searchDocs.count()).toBe(1)
+  })
+})
+
 describe('what goes in', () => {
   it('leaves tool steps out', async () => {
     const step: ContentPart = { type: 'tool', callId: 'c', round: 0, model: 'm', name: 'read_note', args: { path: 'mira' }, result: 'mira', status: 'done' }
@@ -289,6 +302,14 @@ describe('what goes in', () => {
     const divider = await storage.appendMessage(chat, 'divider', version([]))
     await searchIndex.index(divider.id)
     expect(await db.searchDocs.count()).toBe(0)
+  })
+
+  it('keeps words apart across a tool step', async () => {
+    const step: ContentPart = { type: 'tool', callId: 'c', round: 0, model: 'm', name: 'read_note', args: {}, result: '', status: 'done' }
+    const m = await storage.appendMessage(chat, 'assistant', version([{ type: 'text', text: 'Katson muistiinpanoa' }, step, { type: 'text', text: 'Mira asuu Oulussa' }]))
+    await searchIndex.index(m.id)
+    expect(await found('mira')).toEqual([m.id])
+    expect(await found('muistiinpanoamira')).toEqual([])
   })
 
   it('takes the row away when the active version has no text', async () => {
@@ -330,6 +351,59 @@ describe('backfill', () => {
     const done = await db.searchDocs.count()
     expect(done).toBeGreaterThan(0)
     expect(done).toBeLessThanOrEqual(10)
+  })
+
+  // The clock is real here, and the count holds on any machine, because a slice charges its writes
+  // up front. This proves the count only. How long a slice really takes on IndexedDB is a bench number.
+  it('a slice pays for its writes, so it writes no more rows than its budget buys', async () => {
+    const words = Array.from({ length: 40 }, (_, i) => `sana${i}`).join(' ')
+    for (let i = 0; i < 60; i++) await text(words)
+    const terms = (await indexed(words)).id
+    const perRow = (await db.searchDocs.where('messageId').equals(terms).first())!.terms.length
+    await db.searchDocs.clear()
+
+    const budget = 30
+    await searchIndex.backfill(budget)
+    expect(await db.searchDocs.count()).toBeLessThanOrEqual(Math.ceil(budget / (perRow * MS_PER_TERM)) + 1)
+  })
+
+  it('a slice always moves on, however large the first message', async () => {
+    await text(Array.from({ length: 500 }, (_, i) => `sana${i}`).join(' '))
+    await text('kissa')
+    expect(await searchIndex.backfill(1)).toBe(false)
+    expect(await db.searchDocs.count()).toBe(1)
+  })
+
+  describe('passDue', () => {
+    const WEEK = 7 * 86_400_000
+    it('is true until a pass has finished', async () => {
+      expect(await searchIndex.passDue()).toBe(true)
+      await pass()
+      expect(await searchIndex.passDue()).toBe(false)
+    })
+
+    it('is true when a pass stopped half way', async () => {
+      await pass()
+      for (let i = 0; i < 3; i++) await text(`kissa ${i}`)
+      await searchIndex.backfill(0)
+      expect(await searchIndex.passDue()).toBe(true)
+    })
+
+    it('is true when the last pass is over a week old', async () => {
+      await pass()
+      const now = Date.now()
+      vi.spyOn(Date, 'now').mockReturnValue(now + WEEK - 60_000)
+      expect(await searchIndex.passDue()).toBe(false)
+      vi.spyOn(Date, 'now').mockReturnValue(now + WEEK + 60_000)
+      expect(await searchIndex.passDue()).toBe(true)
+    })
+
+    it('is true when the last pass was of an older format', async () => {
+      await pass()
+      const [row] = await db.cache.where('k').startsWith('search-backfill').toArray()
+      await db.cache.put({ ...row, value: 0 })
+      expect(await searchIndex.passDue()).toBe(true)
+    })
   })
 
   it('a finished pass leaves no place behind, so the next one starts over', async () => {
